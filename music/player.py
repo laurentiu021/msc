@@ -238,25 +238,36 @@ async def process_play(ctx, query, is_radio=False):
             web_url = selected.get('webpage_url') or \
                 f"https://www.youtube.com/watch?v={selected.get('id', '')}"
 
-            for fmt in formats_to_try:
-                try:
-                    dl_opts = YDL_OPTS_DOWNLOAD.copy()
-                    dl_opts['format'] = fmt
-                    with yt_dlp.YoutubeDL(dl_opts) as ydl_dl:
-                        dl_info = await _loop.run_in_executor(
-                            None, lambda: ydl_dl.extract_info(web_url, download=True)
-                        )
-                        filename = ydl_dl.prepare_filename(dl_info)
-                        if not os.path.exists(filename):
-                            base = os.path.splitext(filename)[0]
-                            for ext in ['.opus', '.m4a', '.webm', '.mp3', '.ogg']:
-                                if os.path.exists(base + ext):
-                                    filename = base + ext
-                                    break
-                    if filename and os.path.exists(filename):
-                        break
-                except Exception as e:
-                    log.warning(f"Download esuat cu format '{fmt}': {e}")
+            # Download: incearca fara cookies, apoi cu cookies
+            for use_cookies_dl in [False, True]:
+                if filename and os.path.exists(filename):
+                    break
+                for fmt in formats_to_try:
+                    try:
+                        if use_cookies_dl:
+                            _, dl_opts = get_opts_with_cookies()
+                            if not dl_opts:
+                                break  # no cookies available
+                            dl_opts['format'] = fmt
+                            log.info(f"Download retry WITH cookies, format={fmt}")
+                        else:
+                            dl_opts = YDL_OPTS_DOWNLOAD.copy()
+                            dl_opts['format'] = fmt
+                        with yt_dlp.YoutubeDL(dl_opts) as ydl_dl:
+                            dl_info = await _loop.run_in_executor(
+                                None, lambda: ydl_dl.extract_info(web_url, download=True)
+                            )
+                            filename = ydl_dl.prepare_filename(dl_info)
+                            if not os.path.exists(filename):
+                                base = os.path.splitext(filename)[0]
+                                for ext in ['.opus', '.m4a', '.webm', '.mp3', '.ogg']:
+                                    if os.path.exists(base + ext):
+                                        filename = base + ext
+                                        break
+                        if filename and os.path.exists(filename):
+                            break
+                    except Exception as e:
+                        log.warning(f"Download esuat (cookies={use_cookies_dl}, fmt='{fmt}'): {e}")
 
         if not filename or not os.path.exists(filename):
             raise FileNotFoundError("Niciun format nu a reusit descarcarea")
