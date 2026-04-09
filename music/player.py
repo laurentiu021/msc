@@ -238,6 +238,11 @@ async def process_play(ctx, query, is_radio=False):
             web_url = selected.get('webpage_url') or \
                 f"https://www.youtube.com/watch?v={selected.get('id', '')}"
 
+            # Skip download attempts if search found 0 real formats
+            if not has_real_formats(selected.get('formats', [])):
+                log.warning(f"0 real formats for {selected.get('id','?')} — skipping download")
+                raise ValueError("YouTube a blocat acest video (0 formate reale)")
+
             # Download: incearca fara cookies, apoi cu cookies
             for use_cookies_dl in [False, True]:
                 if filename and os.path.exists(filename):
@@ -354,7 +359,7 @@ async def process_play(ctx, query, is_radio=False):
             except discord.HTTPException:
                 pass
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(min(2 * state._consecutive_errors, 15))
         if state.autoplay or state.queue:
             play_next(ctx)
         else:
