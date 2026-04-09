@@ -1,0 +1,7 @@
+discord.py[voice]>=2.3.0
+yt-dlp
+bgutil-ytdlp-pot-provider
+PySocks
+PyNaCl
+python-dotenv>=1.0.0
+psutil
