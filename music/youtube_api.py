@@ -157,15 +157,32 @@ def get_video_details(video_ids: list[str]) -> dict:
 
 
 def get_related_videos(video_id: str, max_results: int = 15) -> list[dict]:
-    """Gaseste video-uri similare. Costa 100 unitati.
-    Folosit ca fallback pentru autoplay cand Mix-ul esueaza.
+    """Gaseste video-uri similare prin search bazat pe video curent.
+    Costa 100 unitati per request.
     """
+    # Get video title first to search for similar (1 unit)
+    details = get_video_details([video_id])
+    info = details.get(video_id, {})
+    title = info.get('channel', '')
+    if not title:
+        return []
+
+    # Search for similar music by same channel/artist
     data = _api_get('search', {
         'part': 'snippet',
-        'relatedToVideoId': video_id,
+        'q': title + ' music',
         'type': 'video',
         'maxResults': max_results,
+        'videoCategoryId': '10',
     })
+    if not data:
+        # Fallback without music category
+        data = _api_get('search', {
+            'part': 'snippet',
+            'q': title,
+            'type': 'video',
+            'maxResults': max_results,
+        })
     if not data:
         return []
 
@@ -173,14 +190,14 @@ def get_related_videos(video_id: str, max_results: int = 15) -> list[dict]:
     for item in data.get('items', []):
         vid_id = item['id'].get('videoId')
         snippet = item.get('snippet', {})
-        if not vid_id:
+        if not vid_id or vid_id == video_id:
             continue
-        title = snippet.get('title', '')
-        if any(w in title.lower() for w in BLACKLIST):
+        t = snippet.get('title', '')
+        if any(w in t.lower() for w in BLACKLIST):
             continue
         results.append({
             'id': vid_id,
-            'title': title,
+            'title': t,
             'channel': snippet.get('channelTitle', ''),
             'thumbnail': snippet.get('thumbnails', {}).get('high', {}).get('url', ''),
         })
