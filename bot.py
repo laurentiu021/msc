@@ -49,6 +49,33 @@ if _yt_cookies:
 else:
     log.warning("YT_COOKIES_CONTENT not set — YouTube may block requests")
 
+# Test PO Token server connectivity
+try:
+    import urllib.request
+    req = urllib.request.Request('http://127.0.0.1:4416/token', method='GET')
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        log.info(f"PO Token server: status={resp.status}, responding OK")
+except Exception as e:
+    log.warning(f"PO Token server NOT responding: {e}")
+
+# Test yt-dlp can actually get formats with PO Token
+try:
+    import yt_dlp
+    test_opts = {
+        'quiet': True, 'no_warnings': True, 'skip_download': True,
+        'format': 'best', 'socket_timeout': 10,
+        'extractor_args': {'youtube': 'player_client=mweb,android_vr,tv'},
+    }
+    with yt_dlp.YoutubeDL(test_opts) as ydl:
+        info = ydl.extract_info('https://www.youtube.com/watch?v=dQw4w9WgXcQ', download=False)
+        fmts = info.get('formats', [])
+        real = sum(1 for f in fmts if f.get('acodec', 'none') != 'none')
+        log.info(f"yt-dlp startup test: {len(fmts)} formats ({real} real audio)")
+        if real == 0:
+            log.warning("yt-dlp startup test: 0 real formats — YouTube may be blocking this IP")
+except Exception as e:
+    log.warning(f"yt-dlp startup test failed: {e}")
+
 # --- Bot setup ---
 intents = discord.Intents.default()
 intents.message_content = True

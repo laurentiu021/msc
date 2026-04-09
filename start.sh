@@ -14,4 +14,11 @@ else
 fi
 
 echo "[STARTUP] Starting Gogu music bot..."
+
+# Verify PO Token server is responding
+if command -v curl &> /dev/null; then
+    POT_TEST=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:4416/token 2>/dev/null || echo "failed")
+    echo "[STARTUP] PO Token server health check: $POT_TEST"
+fi
+
 exec python bot.py
