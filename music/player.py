@@ -4,8 +4,14 @@ import yt_dlp
 import asyncio
 import os
 import time
+import random
 from music.config import YDL_OPTS_SEARCH, YDL_OPTS_DOWNLOAD, FFMPEG_OPTS, log
 from music.config import get_opts_with_cookies, has_real_formats
+from music.config import (
+    YT_REQUEST_MIN_INTERVAL_SEC,
+    YT_REQUEST_MAX_INTERVAL_SEC,
+    YT_GLOBAL_COOLDOWN_SEC,
+)
 from music.state import get_state
 from music.utils import is_clean, cleanup_file
 from music.autoplay import prefill_autoplay_queue
@@ -18,6 +24,55 @@ update_player_ui = None
 start_timeout = None
 cancel_timeout = None
 _loop = None
+_YT_REQ_LOCK = asyncio.Lock()
+_NEXT_YT_REQUEST_AT = 0.0
+_GLOBAL_YT_COOLDOWN_UNTIL = 0.0
+
+
+def _is_youtube_pressure_error(error: Exception) -> bool:
+    e = str(error).lower()
+    patterns = (
+        "http error 429",
+        "too many requests",
+        "rate limit",
+        "sign in to confirm",
+        "forbidden",
+        "http error 403",
+    )
+    return any(p in e for p in patterns)
+
+
+async def _wait_for_youtube_slot():
+    global _NEXT_YT_REQUEST_AT
+    async with _YT_REQ_LOCK:
+        now = time.time()
+        wait_for = max(_NEXT_YT_REQUEST_AT, _GLOBAL_YT_COOLDOWN_UNTIL) - now
+        if wait_for > 0:
+            log.info(f"YouTube throttling active: waiting {wait_for:.1f}s")
+            await asyncio.sleep(wait_for)
+        min_delay = max(0.0, YT_REQUEST_MIN_INTERVAL_SEC)
+        max_delay = max(min_delay, YT_REQUEST_MAX_INTERVAL_SEC)
+        _NEXT_YT_REQUEST_AT = time.time() + random.uniform(min_delay, max_delay)
+
+
+async def _yt_extract_info(ydl_opts, query_or_url, download=False, stage=""):
+    global _GLOBAL_YT_COOLDOWN_UNTIL
+    await _wait_for_youtube_slot()
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return await _loop.run_in_executor(
+                None, lambda: ydl.extract_info(query_or_url, download=download)
+            )
+    except Exception as e:
+        if _is_youtube_pressure_error(e):
+            until = time.time() + max(30, YT_GLOBAL_COOLDOWN_SEC)
+            _GLOBAL_YT_COOLDOWN_UNTIL = max(_GLOBAL_YT_COOLDOWN_UNTIL, until)
+            remaining = int(_GLOBAL_YT_COOLDOWN_UNTIL - time.time())
+            log.warning(
+                f"YouTube pressure detected at stage='{stage}'. "
+                f"Global cooldown active for ~{remaining}s."
+            )
+        raise
 
 
 def init(bot_ref, ui_func, start_to, cancel_to):
@@ -108,21 +163,20 @@ async def preload_next(ctx):
         return
     next_query = state.queue[0]['query']
     try:
-        with yt_dlp.YoutubeDL(YDL_OPTS_SEARCH) as ydl:
-            info = await _loop.run_in_executor(
-                None, lambda: ydl.extract_info(next_query, download=False)
-            )
-            entries = info.get('entries', [info])
-            selected = entries[0]
-            for entry in entries:
-                if is_clean(entry.get('title', ''), entry.get('duration'), state.last_title):
-                    selected = entry
-                    break
-            web_url = selected.get('webpage_url') or \
-                f"https://www.youtube.com/watch?v={selected.get('id', '')}"
+        info = await _yt_extract_info(
+            YDL_OPTS_SEARCH, next_query, download=False, stage="preload_search"
+        )
+        entries = info.get('entries', [info])
+        selected = entries[0]
+        for entry in entries:
+            if is_clean(entry.get('title', ''), entry.get('duration'), state.last_title):
+                selected = entry
+                break
+        web_url = selected.get('webpage_url') or \
+            f"https://www.youtube.com/watch?v={selected.get('id', '')}"
         with yt_dlp.YoutubeDL(YDL_OPTS_DOWNLOAD) as ydl_dl:
-            dl_info = await _loop.run_in_executor(
-                None, lambda: ydl_dl.extract_info(web_url, download=True)
+            dl_info = await _yt_extract_info(
+                YDL_OPTS_DOWNLOAD, web_url, download=True, stage="preload_download"
             )
             filename = ydl_dl.prepare_filename(dl_info)
             # Postprocessor-ul poate schimba extensia
@@ -210,10 +264,9 @@ async def process_play(ctx, query, is_radio=False):
                     search_opts['extractor_args'] = {'youtube': f'player_client={clients}'}
 
                 try:
-                    with yt_dlp.YoutubeDL(search_opts) as ydl:
-                        info = await _loop.run_in_executor(
-                            None, lambda: ydl.extract_info(query, download=False)
-                        )
+                    info = await _yt_extract_info(
+                        search_opts, query, download=False, stage=f"search_{clients}"
+                    )
                     entries = info.get('entries', [info])
                     selected = None
                     for entry in entries:
@@ -259,8 +312,8 @@ async def process_play(ctx, query, is_radio=False):
                             dl_opts = YDL_OPTS_DOWNLOAD.copy()
                             dl_opts['format'] = fmt
                         with yt_dlp.YoutubeDL(dl_opts) as ydl_dl:
-                            dl_info = await _loop.run_in_executor(
-                                None, lambda: ydl_dl.extract_info(web_url, download=True)
+                            dl_info = await _yt_extract_info(
+                                dl_opts, web_url, download=True, stage=f"download_{fmt}"
                             )
                             filename = ydl_dl.prepare_filename(dl_info)
                             if not os.path.exists(filename):
