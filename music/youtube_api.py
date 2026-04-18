@@ -151,6 +151,7 @@ def get_video_details(video_ids: list[str]) -> dict:
             'views': int(stats.get('viewCount', 0)),
             'likes': int(stats.get('likeCount', 0)),
             'channel': snippet.get('channelTitle', ''),
+            'title': snippet.get('title', ''),
             'thumbnail': thumb,
         }
     return result
@@ -158,31 +159,37 @@ def get_video_details(video_ids: list[str]) -> dict:
 
 def get_related_videos(video_id: str, max_results: int = 15) -> list[dict]:
     """Gaseste video-uri similare prin search bazat pe video curent.
-    Costa 100 unitati per request.
+    Costa 100-200 unitati (1-2 search requests).
     """
-    # Get video title first to search for similar (1 unit)
     details = get_video_details([video_id])
     info = details.get(video_id, {})
-    title = info.get('channel', '')
-    if not title:
+    channel = info.get('channel', '')
+    video_title = info.get('title', '')
+
+    if not video_title and not channel:
         return []
 
-    # Search for similar music by same channel/artist
+    # Clean the title for a better search query
+    clean_title = _clean_search_title(video_title) if video_title else ''
+
+    # Primary search: cleaned title (finds similar songs)
+    query = clean_title if clean_title else channel
     data = _api_get('search', {
         'part': 'snippet',
-        'q': title + ' music',
+        'q': query,
         'type': 'video',
         'maxResults': max_results,
         'videoCategoryId': '10',
     })
     if not data:
-        # Fallback without music category
-        data = _api_get('search', {
-            'part': 'snippet',
-            'q': title,
-            'type': 'video',
-            'maxResults': max_results,
-        })
+        # Fallback: search by channel name
+        if channel:
+            data = _api_get('search', {
+                'part': 'snippet',
+                'q': channel + ' music',
+                'type': 'video',
+                'maxResults': max_results,
+            })
     if not data:
         return []
 
@@ -245,3 +252,21 @@ def _parse_duration(iso: str) -> int:
     mins = int(m.group(2) or 0)
     s = int(m.group(3) or 0)
     return h * 3600 + mins * 60 + s
+
+
+def _clean_search_title(title: str) -> str:
+    """Curata titlul video pentru search mai relevant.
+    'Los Del Rio - Macarena (Official Video)' -> 'Los Del Rio Macarena'
+    """
+    clean = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
+    clean = re.sub(
+        r'\b(official|video|audio|lyrics|lyric|hd|hq|4k|mv|music\s*video|'
+        r'visualizer|visualiser|clip|feat\.?|ft\.?|prod\.?|remix|'
+        r'challenge|reaction|tutorial|cover|live|performance|vevo)\b',
+        '', clean, flags=re.I
+    ).strip()
+    # Collapse multiple spaces
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    # Remove trailing separators like " - " or " | "
+    clean = re.sub(r'\s*[-|]+\s*$', '', clean).strip()
+    return clean if len(clean) >= 3 else title
