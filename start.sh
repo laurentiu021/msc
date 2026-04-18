@@ -41,24 +41,8 @@ print(f'  GETPOT_BGUTIL_BASE_URL={os.getenv(\"GETPOT_BGUTIL_BASE_URL\", \"NOT SE
 " 2>&1 || echo "[STARTUP] Plugin check failed"
 
 # Quick verbose test to see if PO Token is being generated (always run for debug)
-echo "[STARTUP] Running verbose yt-dlp probe..."
-python -c "
-import yt_dlp, json, sys
-opts = {
-    'quiet': False, 'verbose': True, 'skip_download': True,
-    'format': 'best', 'socket_timeout': 10,
-    'extractor_args': {'youtube': 'player_client=mweb'},
-    'ignore_no_formats_error': True,
-}
-try:
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info('https://www.youtube.com/watch?v=dQw4w9WgXcQ', download=False)
-        fmts = info.get('formats', [])
-        real = sum(1 for f in fmts if f.get('acodec','none') != 'none')
-        print(f'[STARTUP] Probe result: {len(fmts)} formats ({real} real audio)')
-except Exception as e:
-    print(f'[STARTUP] Probe failed: {e}')
-" 2>&1 | grep -iE '(pot|token|plugin|formats|real|probe|error|warning|sabr|challenge|deno|jsc|getpot|bgutil)' | head -30
+# DISABLED — probe consumes the fresh YouTube session and causes 429 for the bot
+# echo "[STARTUP] Running verbose yt-dlp probe..."
 
 # Verify PO Token server is responding
 if command -v curl &> /dev/null; then

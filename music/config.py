@@ -30,8 +30,8 @@ YT_REQUEST_MAX_INTERVAL_SEC = float(os.getenv('YT_REQUEST_MAX_INTERVAL_SEC', '3.
 # Guest mode + PO Token (fara cookies — mai rapid si mai stabil)
 YDL_OPTS_SEARCH = {
     'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
+    'quiet': False,
+    'no_warnings': False,
     'default_search': 'ytsearch',
     'nocheckcertificate': True,
     'source_address': '0.0.0.0',
