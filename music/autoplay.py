@@ -1,9 +1,13 @@
-"""Logica autoplay: YouTube API (preferat) + yt-dlp Mix (fallback)."""
+"""Logica autoplay: YouTube Mix (preferat) + fallback-uri."""
 import re
 import yt_dlp
 from music.config import YDL_OPTS_SEARCH, BLACKLIST, log
 from music.state import GuildState
 from music import youtube_api as yt_api
+
+
+# Cat de multe piese de la acelasi artist sunt permise in coada/history
+MAX_SAME_ARTIST = 2
 
 
 def _extract_video_id(url: str) -> str | None:
@@ -12,6 +16,13 @@ def _extract_video_id(url: str) -> str | None:
     if 'youtu.be/' in url:
         return url.split('youtu.be/')[-1].split('?')[0]
     return None
+
+
+def _artist_from_title(title: str) -> str:
+    """Extrage posibil nume de artist din titlu (partea dinainte de '-')."""
+    if ' - ' in title:
+        return title.split(' - ', 1)[0].strip().lower()
+    return ''
 
 
 async def prefill_autoplay_queue(state: GuildState, bot_loop, target: int = 6):
@@ -38,32 +49,39 @@ async def prefill_autoplay_queue(state: GuildState, bot_loop, target: int = 6):
         return
 
     skip_ids = set()
+    artist_counts: dict[str, int] = {}
     for h in state.history:
         vid = _extract_video_id(h.get('url') or '')
         if vid:
             skip_ids.add(vid)
+        artist_key = _artist_from_title(h.get('title') or '').lower()
+        if artist_key:
+            artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
     for item in state.queue:
         vid = _extract_video_id(item.get('query', ''))
         if vid:
             skip_ids.add(vid)
+        artist_key = _artist_from_title(item.get('title') or '').lower()
+        if artist_key:
+            artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
 
     added = 0
 
-    # Strategy 1: YouTube API related videos
-    if yt_api.is_available() and added < needed:
-        added += await _try_api_related(state, bot_loop, origin_id, skip_ids, needed - added)
-
-    # Strategy 2: yt-dlp Mix
+    # Strategy 1: YouTube Mix (RD playlist) — radio curat, stil pastrat, artisti diversi
     if added < needed:
-        added += await _try_ytdlp_mix(state, bot_loop, origin_id, skip_ids, needed - added)
+        added += await _try_ytdlp_mix(state, bot_loop, origin_id, skip_ids, needed - added, artist_counts)
 
-    # Strategy 3: YouTube API search
+    # Strategy 2: YouTube API related (search dupa artist — mai putin divers)
     if yt_api.is_available() and added < needed:
-        added += await _try_api_search(state, bot_loop, state.last_title, skip_ids, needed - added)
+        added += await _try_api_related(state, bot_loop, origin_id, skip_ids, needed - added, artist_counts)
 
-    # Strategy 4: yt-dlp search
+    # Strategy 3: YouTube API search (dupa titlu)
+    if yt_api.is_available() and added < needed:
+        added += await _try_api_search(state, bot_loop, state.last_title, skip_ids, needed - added, artist_counts)
+
+    # Strategy 4: yt-dlp search (ultima sansa)
     if added < needed:
-        added += await _try_ytdlp_search(state, bot_loop, state.last_title, skip_ids, needed - added)
+        added += await _try_ytdlp_search(state, bot_loop, state.last_title, skip_ids, needed - added, artist_counts)
 
     if added == 0:
         log.warning("Autoplay: 0 piese gasite din toate strategiile")
@@ -71,12 +89,19 @@ async def prefill_autoplay_queue(state: GuildState, bot_loop, target: int = 6):
         log.info(f"Autoplay: total +{added} piese (coada: {len(state.queue)})")
 
 
-def _add_to_queue(state, vid_id, title, skip_ids) -> bool:
+def _add_to_queue(state, vid_id, title, skip_ids, artist_counts=None, channel='') -> bool:
     """Adauga un video in coada daca trece filtrele."""
     if not vid_id or vid_id in skip_ids:
         return False
     if any(w in title.lower() for w in BLACKLIST):
         return False
+    # Limit same-artist pieces (use channel name or title prefix)
+    if artist_counts is not None:
+        artist_key = (channel or _artist_from_title(title) or '').strip().lower()
+        if artist_key:
+            if artist_counts.get(artist_key, 0) >= MAX_SAME_ARTIST:
+                return False
+            artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
     state.queue.append({
         'query': f"https://www.youtube.com/watch?v={vid_id}",
         'title': title or 'Autoplay'
@@ -85,7 +110,7 @@ def _add_to_queue(state, vid_id, title, skip_ids) -> bool:
     return True
 
 
-async def _try_api_related(state, bot_loop, origin_id, skip_ids, needed):
+async def _try_api_related(state, bot_loop, origin_id, skip_ids, needed, artist_counts=None):
     """YouTube API: related videos. Stabil, costa 100 units."""
     try:
         results = await bot_loop.run_in_executor(
@@ -96,7 +121,8 @@ async def _try_api_related(state, bot_loop, origin_id, skip_ids, needed):
         for r in results:
             if added >= needed:
                 break
-            if _add_to_queue(state, r['id'], r['title'], skip_ids):
+            if _add_to_queue(state, r['id'], r['title'], skip_ids,
+                             artist_counts, r.get('channel', '')):
                 added += 1
         if added:
             log.info(f"Autoplay API related: +{added}")
@@ -106,8 +132,8 @@ async def _try_api_related(state, bot_loop, origin_id, skip_ids, needed):
         return 0
 
 
-async def _try_ytdlp_mix(state, bot_loop, origin_id, skip_ids, needed):
-    """yt-dlp: YouTube Mix (RD playlist). Gratis dar instabil."""
+async def _try_ytdlp_mix(state, bot_loop, origin_id, skip_ids, needed, artist_counts=None):
+    """yt-dlp: YouTube Mix (RD playlist). Radio curat, stil pastrat."""
     mix_url = f"https://www.youtube.com/watch?v={origin_id}&list=RD{origin_id}"
     opts = YDL_OPTS_SEARCH.copy()
     opts['noplaylist'] = False
@@ -124,7 +150,10 @@ async def _try_ytdlp_mix(state, bot_loop, origin_id, skip_ids, needed):
         for e in entries:
             if added >= needed:
                 break
-            if _add_to_queue(state, e.get('id', ''), e.get('title', ''), skip_ids):
+            # Mix entries may have 'channel' or 'uploader'
+            channel = e.get('channel') or e.get('uploader') or ''
+            if _add_to_queue(state, e.get('id', ''), e.get('title', ''),
+                             skip_ids, artist_counts, channel):
                 added += 1
         if added:
             log.info(f"Autoplay Mix: +{added}")
@@ -134,7 +163,7 @@ async def _try_ytdlp_mix(state, bot_loop, origin_id, skip_ids, needed):
         return 0
 
 
-async def _try_api_search(state, bot_loop, title, skip_ids, needed):
+async def _try_api_search(state, bot_loop, title, skip_ids, needed, artist_counts=None):
     """YouTube API: search bazat pe titlu. Costa 100 units."""
     if not title:
         return 0
@@ -148,7 +177,8 @@ async def _try_api_search(state, bot_loop, title, skip_ids, needed):
         for r in results:
             if added >= needed:
                 break
-            if _add_to_queue(state, r['id'], r['title'], skip_ids):
+            if _add_to_queue(state, r['id'], r['title'], skip_ids,
+                             artist_counts, r.get('channel', '')):
                 added += 1
         if added:
             log.info(f"Autoplay API search: +{added}")
@@ -158,7 +188,7 @@ async def _try_api_search(state, bot_loop, title, skip_ids, needed):
         return 0
 
 
-async def _try_ytdlp_search(state, bot_loop, title, skip_ids, needed):
+async def _try_ytdlp_search(state, bot_loop, title, skip_ids, needed, artist_counts=None):
     """yt-dlp: search fallback. Ultima sansa."""
     if not title:
         return 0
@@ -176,7 +206,9 @@ async def _try_ytdlp_search(state, bot_loop, title, skip_ids, needed):
         for e in entries:
             if added >= needed:
                 break
-            if _add_to_queue(state, e.get('id', ''), e.get('title', ''), skip_ids):
+            channel = e.get('channel') or e.get('uploader') or ''
+            if _add_to_queue(state, e.get('id', ''), e.get('title', ''),
+                             skip_ids, artist_counts, channel):
                 added += 1
         if added:
             log.info(f"Autoplay yt-dlp search: +{added}")
