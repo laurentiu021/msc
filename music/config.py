@@ -23,10 +23,9 @@ _YT_EXTRACTOR_ARGS = {
 # Proxy optional — setat via env var YT_PROXY (ex: socks5://host:port)
 _proxy = os.getenv('YT_PROXY')
 
-# Traffic shaping pentru a reduce sansele de flag/rate-limit pe IP.
+# Traffic shaping — delay minim intre cereri YouTube consecutive
 YT_REQUEST_MIN_INTERVAL_SEC = float(os.getenv('YT_REQUEST_MIN_INTERVAL_SEC', '1.2'))
 YT_REQUEST_MAX_INTERVAL_SEC = float(os.getenv('YT_REQUEST_MAX_INTERVAL_SEC', '3.2'))
-YT_GLOBAL_COOLDOWN_SEC = int(os.getenv('YT_GLOBAL_COOLDOWN_SEC', '120'))
 
 # Guest mode + PO Token (fara cookies — mai rapid si mai stabil)
 YDL_OPTS_SEARCH = {

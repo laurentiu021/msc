@@ -10,7 +10,6 @@ from music.config import get_opts_with_cookies, has_real_formats
 from music.config import (
     YT_REQUEST_MIN_INTERVAL_SEC,
     YT_REQUEST_MAX_INTERVAL_SEC,
-    YT_GLOBAL_COOLDOWN_SEC,
 )
 from music.state import get_state
 from music.utils import is_clean, cleanup_file
@@ -26,7 +25,6 @@ cancel_timeout = None
 _loop = None
 _YT_REQ_LOCK = asyncio.Lock()
 _NEXT_YT_REQUEST_AT = 0.0
-_GLOBAL_YT_COOLDOWN_UNTIL = 0.0
 
 
 def _is_youtube_pressure_error(error: Exception) -> bool:
@@ -46,7 +44,7 @@ async def _wait_for_youtube_slot():
     global _NEXT_YT_REQUEST_AT
     async with _YT_REQ_LOCK:
         now = time.time()
-        wait_for = max(_NEXT_YT_REQUEST_AT, _GLOBAL_YT_COOLDOWN_UNTIL) - now
+        wait_for = _NEXT_YT_REQUEST_AT - now
         if wait_for > 0:
             log.info(f"YouTube throttling active: waiting {wait_for:.1f}s")
             await asyncio.sleep(wait_for)
@@ -56,23 +54,11 @@ async def _wait_for_youtube_slot():
 
 
 async def _yt_extract_info(ydl_opts, query_or_url, download=False, stage=""):
-    global _GLOBAL_YT_COOLDOWN_UNTIL
     await _wait_for_youtube_slot()
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return await _loop.run_in_executor(
-                None, lambda: ydl.extract_info(query_or_url, download=download)
-            )
-    except Exception as e:
-        if _is_youtube_pressure_error(e):
-            until = time.time() + max(30, YT_GLOBAL_COOLDOWN_SEC)
-            _GLOBAL_YT_COOLDOWN_UNTIL = max(_GLOBAL_YT_COOLDOWN_UNTIL, until)
-            remaining = int(_GLOBAL_YT_COOLDOWN_UNTIL - time.time())
-            log.warning(
-                f"YouTube pressure detected at stage='{stage}'. "
-                f"Global cooldown active for ~{remaining}s."
-            )
-        raise
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        return await _loop.run_in_executor(
+            None, lambda: ydl.extract_info(query_or_url, download=download)
+        )
 
 
 def init(bot_ref, ui_func, start_to, cancel_to):
