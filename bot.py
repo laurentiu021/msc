@@ -4,6 +4,8 @@ import sys
 import logging
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from dotenv import load_dotenv
@@ -73,25 +75,38 @@ except urllib.error.HTTPError as e:
 except Exception as e:
     log.warning(f"PO Token server NOT responding: {e}")
 
-# Test yt-dlp can actually get formats with PO Token
-try:
+# Test yt-dlp (rapid, cu timeout) — prin SOCKS5 poate bloca minute dacă proxy-ul e lent; nu întârzie niciodată login-ul Discord.
+def _ytdlp_startup_probe():
     import yt_dlp
     test_opts = {
         'quiet': True, 'no_warnings': True, 'skip_download': True,
-        'format': 'best', 'socket_timeout': 10,
+        'format': 'best', 'socket_timeout': 8,
         'extractor_args': {'youtube': 'player_client=mweb,android_vr,tv'},
     }
     if _yt_proxy:
         test_opts['proxy'] = _yt_proxy
     with yt_dlp.YoutubeDL(test_opts) as ydl:
-        info = ydl.extract_info('https://www.youtube.com/watch?v=dQw4w9WgXcQ', download=False)
-        fmts = info.get('formats', [])
+        return ydl.extract_info('https://www.youtube.com/watch?v=dQw4w9WgXcQ', download=False)
+
+if os.getenv('SKIP_YTDLP_STARTUP_TEST', '').strip().lower() in ('1', 'true', 'yes'):
+    log.info('SKIP_YTDLP_STARTUP_TEST set — skipping yt-dlp probe')
+else:
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_ytdlp_startup_probe)
+            info = fut.result(timeout=20)
+        fmts = info.get('formats', []) if info else []
         real = sum(1 for f in fmts if f.get('acodec', 'none') != 'none')
         log.info(f"yt-dlp startup test: {len(fmts)} formats ({real} real audio)")
         if real == 0:
             log.warning("yt-dlp startup test: 0 real formats — YouTube may be blocking this IP")
-except Exception as e:
-    log.warning(f"yt-dlp startup test failed: {e}")
+    except concurrent.futures.TimeoutError:
+        log.warning(
+            "yt-dlp startup test timed out after 20s (often slow/bad proxy). "
+            "Discord will still start; set SKIP_YTDLP_STARTUP_TEST=1 to skip this check."
+        )
+    except Exception as e:
+        log.warning(f"yt-dlp startup test failed: {e}")
 
 # --- Bot setup ---
 intents = discord.Intents.default()
@@ -240,6 +255,7 @@ def main():
         target=lambda: HTTPServer(("0.0.0.0", port), _Health).serve_forever(),
         daemon=True,
     ).start()
+    log.info("Connecting to Discord Gateway...")
     bot.run(TOKEN, log_handler=None)
 
 
