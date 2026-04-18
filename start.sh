@@ -13,6 +13,16 @@ else
     echo "[STARTUP] WARNING: PO Token server failed to start"
 fi
 
+# Verify Deno is available (required for yt-dlp JS challenges)
+if command -v deno &> /dev/null; then
+    echo "[STARTUP] Deno available: $(deno --version | head -1)"
+else
+    echo "[STARTUP] WARNING: Deno not found — YouTube JS challenges may fail"
+fi
+
+# Verify yt-dlp version
+echo "[STARTUP] yt-dlp version: $(python -c 'import yt_dlp; print(yt_dlp.version.__version__)')"
+
 echo "[STARTUP] Starting Gogu music bot..."
 
 # Verify PO Token server is responding

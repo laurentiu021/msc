@@ -228,6 +228,7 @@ async def process_play(ctx, query, is_radio=False):
     formats_to_try = [
         'bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
         'bestaudio',
+        'best[protocol=m3u8_native]/best[protocol=m3u8]',
         'worstaudio',
         'best',
         'worst',
@@ -248,9 +249,10 @@ async def process_play(ctx, query, is_radio=False):
 
             # Search cu multiple strategii pana gasim formate reale
             _CLIENT_CHAINS = [
-                ('mweb,android_vr,tv', False),   # guest + PO Token + fallbacks
-                ('android_vr', False),            # android_vr singur, fara cookies
-                ('mweb,tv', True),                # cu cookies
+                ('mweb', False),                  # mweb + PO Token (bgutil plugin)
+                ('web_safari', False),            # HLS fallback (nu cere PO Token pt GVS)
+                ('mweb', True),                   # mweb cu cookies
+                ('web_safari', True),             # web_safari cu cookies
             ]
             selected = None
             for clients, use_cookies in _CLIENT_CHAINS:
@@ -271,8 +273,10 @@ async def process_play(ctx, query, is_radio=False):
                     selected = None
                     for entry in entries:
                         fmts = entry.get('formats', [])
-                        real = sum(1 for f in fmts if f.get('acodec', 'none') != 'none' or
-                                   (f.get('vcodec', 'none') != 'none' and 'storyboard' not in f.get('format_note', '').lower()))
+                        real = sum(1 for f in fmts if
+                                   f.get('acodec', 'none') != 'none' or
+                                   (f.get('vcodec', 'none') != 'none' and 'storyboard' not in f.get('format_note', '').lower()) or
+                                   'm3u8' in f.get('protocol', ''))
                         log.info(f"[{clients}|cookies={use_cookies}] Video {entry.get('id','?')}: {len(fmts)} formats ({real} real)")
                         if is_clean(entry.get('title', ''), entry.get('duration'), state.last_title):
                             selected = entry

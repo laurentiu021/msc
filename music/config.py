@@ -14,9 +14,10 @@ BLACKLIST = [
 ]
 
 # PO Token provider pe port 4416 (bgutil in acelasi container)
-# Chain de clienti: mweb (cu PO Token) -> android_vr (fara nimic) -> tv (cu cookies)
+# mweb = client principal (cu PO Token via bgutil plugin)
+# web_safari = fallback (HLS m3u8, nu cere PO Token pt GVS deocamdata)
 _YT_EXTRACTOR_ARGS = {
-    'youtube': 'player_client=mweb,android_vr,tv',
+    'youtube': 'player_client=mweb,web_safari',
 }
 
 # Proxy optional — setat via env var YT_PROXY (ex: socks5://host:port)
@@ -87,6 +88,10 @@ def get_opts_with_cookies():
 def has_real_formats(formats_list: list) -> bool:
     """Verifica daca lista de formate contine formate audio/video reale."""
     for f in formats_list:
+        # HLS/m3u8 formats are always real (muxed streams)
+        proto = f.get('protocol', '')
+        if 'm3u8' in proto:
+            return True
         if f.get('acodec', 'none') != 'none' or f.get('vcodec', 'none') != 'none':
             if 'storyboard' not in f.get('format_note', '').lower():
                 return True

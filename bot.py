@@ -81,7 +81,7 @@ def _ytdlp_startup_probe():
     test_opts = {
         'quiet': True, 'no_warnings': True, 'skip_download': True,
         'format': 'best', 'socket_timeout': 8,
-        'extractor_args': {'youtube': 'player_client=mweb,android_vr,tv'},
+        'extractor_args': {'youtube': 'player_client=mweb,web_safari'},
     }
     if _yt_proxy:
         test_opts['proxy'] = _yt_proxy
