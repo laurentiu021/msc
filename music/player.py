@@ -297,10 +297,37 @@ async def process_play(ctx, query, is_radio=False):
             web_url = selected.get('webpage_url') or \
                 f"https://www.youtube.com/watch?v={selected.get('id', '')}"
 
-            # Skip download attempts if search found 0 real formats
+            # Retry once with delay if 0 real formats (429 rate-limit recovery)
             if not has_real_formats(selected.get('formats', [])):
-                log.warning(f"0 real formats for {selected.get('id','?')} — skipping download")
-                raise ValueError("YouTube a blocat acest video (0 formate reale)")
+                vid_id = selected.get('id', '?')
+                log.warning(f"0 real formats for {vid_id} — waiting 5s and retrying with mweb")
+                await asyncio.sleep(5)
+                retry_url = web_url if web_url.startswith('http') else \
+                    f"https://www.youtube.com/watch?v={vid_id}"
+                retry_opts = dict(YDL_OPTS_SEARCH)
+                retry_opts['extractor_args'] = {'youtube': 'player_client=mweb'}
+                retry_opts['default_search'] = None  # use URL directly
+                try:
+                    retry_info = await _yt_extract_info(
+                        retry_opts, retry_url, download=False, stage="retry_mweb"
+                    )
+                    retry_fmts = retry_info.get('formats', [])
+                    retry_real = sum(1 for f in retry_fmts if
+                                    f.get('acodec', 'none') != 'none' or
+                                    (f.get('vcodec', 'none') != 'none' and 'storyboard' not in f.get('format_note', '').lower()) or
+                                    'm3u8' in f.get('protocol', ''))
+                    log.info(f"[retry mweb] Video {vid_id}: {len(retry_fmts)} formats ({retry_real} real)")
+                    if has_real_formats(retry_fmts):
+                        selected = retry_info
+                        log.info(f"Retry succeeded for {vid_id}")
+                    else:
+                        log.warning(f"Retry also got 0 real formats for {vid_id}")
+                        raise ValueError("YouTube a blocat acest video (0 formate reale)")
+                except ValueError:
+                    raise
+                except Exception as e:
+                    log.warning(f"Retry failed for {vid_id}: {e}")
+                    raise ValueError("YouTube a blocat acest video (0 formate reale)")
 
             # Download: incearca fara cookies, apoi cu cookies
             for use_cookies_dl in [False, True]:
