@@ -216,10 +216,35 @@ async def on_voice_state_update(member, before, after):
 
 
 @bot.event
+async def on_message(message):
+    """Obligatoriu: dacă suprascrii on_message, trebuie apelat process_commands."""
+    if not message.author.bot and message.guild:
+        raw = message.content or ""
+        if raw.lstrip().startswith("!"):
+            log.info(
+                "Heard prefix message: author=%s content_len=%s preview=%r",
+                message.author,
+                len(raw),
+                raw[:120],
+            )
+    await bot.process_commands(message)
+
+
+@bot.before_invoke
+async def _log_command_invoke(ctx):
+    if ctx.command:
+        log.info("Running command: %s (guild=%s)", ctx.command.name, ctx.guild and ctx.guild.id)
+
+
+@bot.event
 async def on_ready():
     player._loop = asyncio.get_event_loop()
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     log.info(f"Connected to {len(bot.guilds)} guild(s)")
+    log.info(
+        "Pentru comenzi cu ! în server: Bot > Privileged Gateway Intents > "
+        "MESSAGE CONTENT INTENT = ON în Developer Portal."
+    )
     try:
         bot.tree.clear_commands(guild=None)
         await bot.tree.sync()
