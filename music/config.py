@@ -60,7 +60,7 @@ if _proxy:
     YDL_OPTS_DOWNLOAD['proxy'] = _proxy
     YDL_OPTS_SEARCH['socket_timeout'] = 30
     YDL_OPTS_DOWNLOAD['socket_timeout'] = 30
-    log.info(f"YouTube proxy configured: {_proxy[:20]}...")
+    log.info("YouTube proxy configured for yt-dlp (value hidden)")
 
 # Cookies disponibile ca fallback (pt content care cere cont: age-restricted, privat)
 _cookies_path = None
