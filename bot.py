@@ -6,22 +6,33 @@ import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-import discord
-from discord.ext import commands
 from dotenv import load_dotenv
 
-from music.config import DOWNLOAD_DIR, log as music_log
-from music.state import get_state, guild_states
-from music.utils import safe_delete, cleanup_file
-from music.autoplay import prefill_autoplay_queue
-
+# Înainte de music.* — citește .env local și lasă logging activ pentru logurile din config la import.
 load_dotenv()
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("gogu")
+
+_yt_proxy = (os.getenv("YT_PROXY") or "").strip()
+if _yt_proxy:
+    log.info(
+        "YT_PROXY is set (socks5=%s, len=%s)",
+        str(_yt_proxy.startswith("socks5")).lower(),
+        len(_yt_proxy),
+    )
+else:
+    log.info("YT_PROXY is not set — YouTube traffic uses direct egress")
+
+import discord
+from discord.ext import commands
+
+from music.config import DOWNLOAD_DIR, log as music_log
+from music.state import get_state, guild_states
+from music.utils import safe_delete, cleanup_file
+from music.autoplay import prefill_autoplay_queue
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
@@ -70,6 +81,8 @@ try:
         'format': 'best', 'socket_timeout': 10,
         'extractor_args': {'youtube': 'player_client=mweb,android_vr,tv'},
     }
+    if _yt_proxy:
+        test_opts['proxy'] = _yt_proxy
     with yt_dlp.YoutubeDL(test_opts) as ydl:
         info = ydl.extract_info('https://www.youtube.com/watch?v=dQw4w9WgXcQ', download=False)
         fmts = info.get('formats', [])
