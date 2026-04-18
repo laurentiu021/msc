@@ -251,6 +251,8 @@ async def process_play(ctx, query, is_radio=False):
             _CLIENT_CHAINS = [
                 ('mweb', False),                  # mweb + PO Token (bgutil plugin)
                 ('web_safari', False),            # HLS fallback (nu cere PO Token pt GVS)
+                ('android_vr', False),            # android_vr (nu cere PO Token, limitat)
+                ('tv_embedded', False),           # tv_embedded (fara SABR deocamdata)
                 ('mweb', True),                   # mweb cu cookies
                 ('web_safari', True),             # web_safari cu cookies
             ]
