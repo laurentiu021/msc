@@ -243,6 +243,8 @@ async def process_play(ctx, query, is_radio=False):
                 ('web_safari', True),             # web_safari cu cookies
             ]
             selected = None
+            successful_client = None
+            successful_cookies = False
             for clients, use_cookies in _CLIENT_CHAINS:
                 search_opts = dict(YDL_OPTS_SEARCH)
                 search_opts['extractor_args'] = {'youtube': f'player_client={clients}'}
@@ -272,7 +274,9 @@ async def process_play(ctx, query, is_radio=False):
                     if not selected:
                         selected = entries[0]
                     if has_real_formats(selected.get('formats', [])):
-                        log.info(f"Found real formats with client={clients}")
+                        log.info(f"Found real formats with client={clients}, cookies={use_cookies}")
+                        successful_client = clients
+                        successful_cookies = use_cookies
                         break
                 except Exception as e:
                     log.warning(f"Search failed with client={clients}: {e}")
@@ -315,8 +319,9 @@ async def process_play(ctx, query, is_radio=False):
                     log.warning(f"Retry failed for {vid_id}: {e}")
                     raise ValueError("YouTube a blocat acest video (0 formate reale)")
 
-            # Download: incearca fara cookies, apoi cu cookies
-            for use_cookies_dl in [False, True]:
+            # Download: incearca prima data cu combinatia care a mers la search
+            cookie_order = [True, False] if successful_cookies else [False, True]
+            for use_cookies_dl in cookie_order:
                 if filename and os.path.exists(filename):
                     break
                 for fmt in formats_to_try:
@@ -326,10 +331,14 @@ async def process_play(ctx, query, is_radio=False):
                             if not dl_opts:
                                 break  # no cookies available
                             dl_opts['format'] = fmt
-                            log.info(f"Download retry WITH cookies, format={fmt}")
+                            if successful_client:
+                                dl_opts['extractor_args'] = {'youtube': f'player_client={successful_client}'}
+                            log.info(f"Download WITH cookies, client={successful_client or 'default'}, format={fmt}")
                         else:
                             dl_opts = YDL_OPTS_DOWNLOAD.copy()
                             dl_opts['format'] = fmt
+                            if successful_client:
+                                dl_opts['extractor_args'] = {'youtube': f'player_client={successful_client}'}
                         with yt_dlp.YoutubeDL(dl_opts) as ydl_dl:
                             dl_info = await _yt_extract_info(
                                 dl_opts, web_url, download=True, stage=f"download_{fmt}"
