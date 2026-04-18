@@ -52,9 +52,13 @@ else:
 # Test PO Token server connectivity
 try:
     import urllib.request
+    import urllib.error
     req = urllib.request.Request('http://127.0.0.1:4416/token', method='GET')
     with urllib.request.urlopen(req, timeout=5) as resp:
         log.info(f"PO Token server: status={resp.status}, responding OK")
+except urllib.error.HTTPError as e:
+    # Some providers return 404 on GET /token but are still reachable/healthy.
+    log.info(f"PO Token server reachable (HTTP {e.code})")
 except Exception as e:
     log.warning(f"PO Token server NOT responding: {e}")
 
