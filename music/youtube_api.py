@@ -159,7 +159,7 @@ def get_video_details(video_ids: list[str]) -> dict:
 
 def get_related_videos(video_id: str, max_results: int = 15) -> list[dict]:
     """Gaseste video-uri similare prin search bazat pe video curent.
-    Costa 100-200 unitati (1-2 search requests).
+    Strategie: canal/artist first (diversitate), apoi titlu (similaritate).
     """
     details = get_video_details([video_id])
     info = details.get(video_id, {})
@@ -169,46 +169,80 @@ def get_related_videos(video_id: str, max_results: int = 15) -> list[dict]:
     if not video_title and not channel:
         return []
 
-    # Clean the title for a better search query
     clean_title = _clean_search_title(video_title) if video_title else ''
-
-    # Primary search: cleaned title (finds similar songs)
-    query = clean_title if clean_title else channel
-    data = _api_get('search', {
-        'part': 'snippet',
-        'q': query,
-        'type': 'video',
-        'maxResults': max_results,
-        'videoCategoryId': '10',
-    })
-    if not data:
-        # Fallback: search by channel name
-        if channel:
-            data = _api_get('search', {
-                'part': 'snippet',
-                'q': channel + ' music',
-                'type': 'video',
-                'maxResults': max_results,
-            })
-    if not data:
-        return []
-
     results = []
-    for item in data.get('items', []):
-        vid_id = item['id'].get('videoId')
-        snippet = item.get('snippet', {})
-        if not vid_id or vid_id == video_id:
-            continue
-        t = snippet.get('title', '')
-        if any(w in t.lower() for w in BLACKLIST):
-            continue
-        results.append({
-            'id': vid_id,
-            'title': t,
-            'channel': snippet.get('channelTitle', ''),
-            'thumbnail': snippet.get('thumbnails', {}).get('high', {}).get('url', ''),
+    seen_ids = {video_id}
+
+    # Strategy 1: search by channel/artist name (diverse songs by same artist)
+    if channel:
+        data = _api_get('search', {
+            'part': 'snippet',
+            'q': channel,
+            'type': 'video',
+            'maxResults': max_results,
+            'videoCategoryId': '10',
         })
-    return results
+        if data:
+            for item in data.get('items', []):
+                vid_id = item['id'].get('videoId')
+                snippet = item.get('snippet', {})
+                if not vid_id or vid_id in seen_ids:
+                    continue
+                t = snippet.get('title', '')
+                if any(w in t.lower() for w in BLACKLIST):
+                    continue
+                # Skip results that are too similar to current song
+                if clean_title and _titles_too_similar(clean_title, t):
+                    continue
+                results.append({
+                    'id': vid_id,
+                    'title': t,
+                    'channel': snippet.get('channelTitle', ''),
+                    'thumbnail': snippet.get('thumbnails', {}).get('high', {}).get('url', ''),
+                })
+                seen_ids.add(vid_id)
+
+    # Strategy 2: search by cleaned title if not enough results
+    if len(results) < max_results and clean_title:
+        data = _api_get('search', {
+            'part': 'snippet',
+            'q': clean_title,
+            'type': 'video',
+            'maxResults': max_results,
+            'videoCategoryId': '10',
+        })
+        if data:
+            for item in data.get('items', []):
+                vid_id = item['id'].get('videoId')
+                snippet = item.get('snippet', {})
+                if not vid_id or vid_id in seen_ids:
+                    continue
+                t = snippet.get('title', '')
+                if any(w in t.lower() for w in BLACKLIST):
+                    continue
+                if _titles_too_similar(clean_title, t):
+                    continue
+                results.append({
+                    'id': vid_id,
+                    'title': t,
+                    'channel': snippet.get('channelTitle', ''),
+                    'thumbnail': snippet.get('thumbnails', {}).get('high', {}).get('url', ''),
+                })
+                seen_ids.add(vid_id)
+
+    return results[:max_results]
+
+
+def _titles_too_similar(title_a: str, title_b: str) -> bool:
+    """Verifica daca doua titluri sunt prea similare (aceeasi piesa, alta versiune)."""
+    a = _clean_search_title(title_a).lower().split()
+    b = _clean_search_title(title_b).lower().split()
+    if not a or not b:
+        return False
+    common = set(a) & set(b)
+    shorter = min(len(a), len(b))
+    # If 70%+ of words match, it's probably the same song
+    return shorter > 0 and len(common) / shorter >= 0.7
 
 
 def get_playlist_items(playlist_id: str, max_results: int = 50) -> list[dict]:
