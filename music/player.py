@@ -4,8 +4,9 @@ import asyncio
 import os
 import time
 from music.config import FFMPEG_OPTS, MAX_TRACK_SECONDS, log
-from music.config import (cookies_available, count_real_formats,
-                          has_real_formats, make_download_opts,
+from music.config import (clear_ydl_reason, cookies_available,
+                          count_real_formats, has_real_formats,
+                          last_ydl_reason, make_download_opts,
                           make_search_opts, yt_client_args, WEB_CLIENTS)
 from music import ytdlp
 from music.state import get_state
@@ -319,12 +320,6 @@ async def process_play(ctx, query, is_radio=False):
         else:
             reused = False
 
-        if state.preloaded:
-            # Nu mai preîncarcam nimic; daca a rămas ceva dintr-o versiune veche
-            # a botului, il curatam.
-            cleanup_file(state.preloaded.get('filename'), _loop)
-            state.preloaded = None
-
         if not reused:
             # Alegerea piesei se face pe metadata IEFTINA, apoi extragem complet
             # exact un videoclip. Cu ytsearch5 fara extract_flat, yt-dlp extragea
@@ -428,6 +423,7 @@ async def process_play(ctx, query, is_radio=False):
                 raise TrackRejected(reason)
 
             # Download: incearca prima data cu combinatia care a mers la search
+            clear_ydl_reason()
             cookie_order = [True, False] if successful_cookies else [False, True]
             for use_cookies_dl in cookie_order:
                 if filename and os.path.exists(filename):
@@ -464,15 +460,15 @@ async def process_play(ctx, query, is_radio=False):
                         log.warning(f"Download esuat (cookies={use_cookies_dl}, fmt='{fmt}'): {e}")
 
         if not filename or not os.path.exists(filename):
-            # Daca nicio incercare n-a lasat un motiv, cauza cea mai probabila e
-            # match_filter: yt-dlp raporteaza respingerea doar prin to_screen,
-            # care nu scoate nimic la quiet=True, si nu ridica excepție.
+            # Nicio excepție nu a fost ridicata: yt-dlp raporteaza refuzul doar
+            # prin to_screen, care fara logger nu scrie nimic. Cu logger avem
+            # propozitia lui, care e mult mai buna decat o presupunere a noastra.
             if not state.last_raw_error:
-                state.last_raw_error = (
+                state.last_raw_error = last_ydl_reason() or (
                     "yt-dlp nu a scris fisierul si nu a raportat nicio eroare; "
                     f"probabil respins de filtru (live sau durata peste "
                     f"{MAX_TRACK_SECONDS}s)")
-                log.warning(state.last_raw_error)
+                log.warning(f"Descarcare fara fisier: {state.last_raw_error}")
             raise FileNotFoundError("Niciun format nu a reusit descarcarea")
 
         state.last_url = web_url

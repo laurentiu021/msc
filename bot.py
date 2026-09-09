@@ -248,9 +248,6 @@ async def on_voice_state_update(member, before, after):
         state.autoplay = False
         state.loop_mode = 0
         state.is_loading = False
-        if state.preloaded:
-            cleanup_file(state.preloaded.get('filename'), bot.loop)
-            state.preloaded = None
         if state.current_file:
             cleanup_file(state.current_file, bot.loop)
             state.current_file = None

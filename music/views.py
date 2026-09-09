@@ -149,10 +149,13 @@ class MusicControlView(discord.ui.View):
         import music.player as _p
         _p.bump_play_generation(state)
         _p.cancel_timeout(self.ctx)
-        if state.preloaded:
+        # Butonul de stop lasa fisierul curent pe disc, spre deosebire de
+        # !stop: fiecare oprire din panou pierdea un fisier audio pana la
+        # repornirea containerului.
+        if state.current_file:
             from music.utils import cleanup_file
-            cleanup_file(state.preloaded.get('filename'), self.ctx.bot.loop)
-            state.preloaded = None
+            cleanup_file(state.current_file, self.ctx.bot.loop)
+            state.current_file = None
         if self.ctx.voice_client:
             await self.ctx.voice_client.disconnect()
         await safe_delete(state.current_msg)

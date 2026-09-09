@@ -94,18 +94,122 @@ def test_preload_is_gone():
     """preload_next nu folosea niciodata cookies, deci pe Railway eseua mereu."""
     assert not hasattr(player, 'preload_next'), (
         'preload_next a revenit: dubla cererile si corupea .part-urile partajate')
+    # Si campul de stare, plus cele patru blocuri de curatare care il pazeau.
+    # Functia fusese stearsa, dar `state.preloaded` primea doar None de la patru
+    # locuri diferite, unul pe calea fierbinte a fiecarei piese — cod mort cu
+    # curatare vie, care il facea pe cititor sa creada ca preload-ul exista.
+    assert not hasattr(GuildState(), 'preloaded'), 'state.preloaded a revenit'
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    import glob
+    leftovers = [os.path.basename(p)
+                 for p in glob.glob(os.path.join(root, 'music', '*.py'))
+                 + [os.path.join(root, 'bot.py')]
+                 if 'preloaded' in open(p, encoding='utf-8').read()]
+    assert not leftovers, f'referinte la preloaded ramase in: {leftovers}'
+
+
+# Cate apeluri directe `yt_dlp.YoutubeDL(` are voie fiecare fisier. Orice
+# altceva ocoleste poarta din music/ytdlp.py: fara throttle, fara plafon de timp
+# si cu propriul obiect care poate rescrie fisierul de cookies.
+_DIRECT_YTDLP_ALLOWED = {
+    # Proba de pornire e sincrona si ruleaza INAINTE ca bucla de evenimente sa
+    # existe, deci nu poate folosi poarta async. E opt-in (YTDLP_STARTUP_PROBE),
+    # o singura cerere, la boot.
+    'bot.py': 1,
+    # ytdlp.py ESTE poarta.
+    'music/ytdlp.py': 1,
+}
 
 
 def test_every_ytdlp_call_goes_through_the_shared_throttle():
-    """Nicio cerere YouTube nu are voie sa cheme yt_dlp.YoutubeDL direct."""
-    offenders = []
+    """Scanare pe TOT pachetul, cu allowlist explicita.
+
+    Verificarea se uita la trei fisiere alese manual si rata exact apelul care
+    nu avea nici throttle, nici socket_timeout, nici plafon
+    (commands._resolve_platform_url), plus proba din bot.py.
+    """
+    import ast
+    import glob
+
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for name in ('player.py', 'autoplay.py', 'commands.py'):
-        path = os.path.join(root, 'music', name)
-        body = open(path, encoding='utf-8').read()
-        if 'yt_dlp.YoutubeDL(' in body:
-            offenders.append(name)
-    assert not offenders, f'ocolesc throttle-ul: {offenders}'
+    offenders = []
+    for path in sorted(glob.glob(os.path.join(root, 'music', '*.py'))
+                       + [os.path.join(root, 'bot.py')]):
+        rel = os.path.relpath(path, root).replace('\\', '/')
+        with open(path, encoding='utf-8') as fh:
+            tree = ast.parse(fh.read())
+        # Pe AST, nu pe text: docstring-ul lui ytdlp.py citeaza tocmai forma
+        # interzisa ca sa explice de ce e interzisa.
+        count = sum(
+            1 for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and ast.unparse(n.func) == 'yt_dlp.YoutubeDL')
+        allowed = _DIRECT_YTDLP_ALLOWED.get(rel, 0)
+        if count != allowed:
+            offenders.append(f'{rel}: {count} apeluri directe, permise {allowed}')
+    assert not offenders, 'ocolesc poarta:\n  ' + '\n  '.join(offenders)
+
+
+def test_the_pinned_versions_are_the_ones_actually_installed():
+    """Testele care ruleaza pe alt extractor decat producția nu dovedesc nimic.
+
+    yt-dlp e singura dependenta care se sparge de la sine, iar local rula
+    2026.07.04 in timp ce requirements.txt pinuia 2026.8.19 — deci fiecare
+    verificare de comportament yt-dlp era facuta pe alt cod decat cel livrat.
+    """
+    import re
+
+    import yt_dlp
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    reqs = open(os.path.join(root, 'requirements.txt'), encoding='utf-8').read()
+
+    floating = [l.strip() for l in reqs.splitlines()
+                if l.strip() and not l.startswith('#') and '==' not in l]
+    assert not floating, f'dependente nepinuite: {floating}'
+
+    pin = re.search(r'^yt-dlp\[default\]==(.+)$', reqs, re.M)
+    assert pin, 'pinul yt-dlp a dispărut din requirements.txt'
+    want = pin.group(1).strip()
+    have = yt_dlp.version.__version__
+    # 2026.8.19 si 2026.08.19 sunt aceeasi versiune pentru pip.
+    norm = lambda v: tuple(int(p) for p in v.split('.'))
+    assert norm(have) == norm(want), (
+        f'yt-dlp instalat {have}, pinuit {want}: testele nu verifica ce se livreaza')
+
+
+def test_the_pot_provider_versions_are_in_lockstep():
+    """Serverul si pluginul trebuie sa fie aceeasi versiune.
+
+    Pluginul (pip) vorbeste cu serverul (tag de git din Dockerfile) printr-un
+    protocol care s-a schimbat intre versiuni majore. Doua pinuri in doua fisiere
+    diferite driftează in silence si abia apoi apar 403-uri fara explicatie.
+    """
+    import re
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    reqs = open(os.path.join(root, 'requirements.txt'), encoding='utf-8').read()
+    docker = open(os.path.join(root, 'Dockerfile'), encoding='utf-8').read()
+
+    plugin = re.search(r'^bgutil-ytdlp-pot-provider==(.+)$', reqs, re.M)
+    server = re.search(r'^ARG BGUTIL_VERSION=(.+)$', docker, re.M)
+    assert plugin and server, 'pinul bgutil a dispărut dintr-unul din fisiere'
+    assert plugin.group(1).strip() == server.group(1).strip(), (
+        f'plugin {plugin.group(1)} != server {server.group(1)}')
+
+
+def test_the_healthcheck_path_is_one_the_server_answers():
+    """railway.toml si bot.py trebuie sa cada de acord, altfel deploy-ul eșueaza."""
+    import re
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    toml = open(os.path.join(root, 'railway.toml'), encoding='utf-8').read()
+    bot_src = open(os.path.join(root, 'bot.py'), encoding='utf-8').read()
+
+    m = re.search(r'healthcheckPath\s*=\s*"([^"]+)"', toml)
+    assert m, 'healthcheckPath lipseste din railway.toml'
+    path = m.group(1)
+    assert f"'{path}'" in bot_src or f'"{path}"' in bot_src, (
+        f'{path} nu apare in bot.py, deci handler-ul nu il accepta')
 
 
 def test_the_slot_is_always_released_even_when_the_request_raises():

@@ -177,9 +177,6 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         state = get_state(ctx.guild.id)
         state.queue.clear(); state.autoplay = False; state.loop_mode = 0
         state.is_loading = False; state.always_on = False
-        if state.preloaded:
-            cleanup_file(state.preloaded.get('filename'), bot.loop)
-            state.preloaded = None
         if state.current_file:
             cleanup_file(state.current_file, bot.loop)
             state.current_file = None

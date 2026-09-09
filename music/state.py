@@ -28,7 +28,6 @@ class GuildState:
         self._lock = asyncio.Lock()
         self.current_file = None
         self.always_on = False
-        self.preloaded: dict | None = None
         self._consecutive_errors = 0
         self._last_notified_error: str | None = None
 

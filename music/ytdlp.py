@@ -34,6 +34,7 @@ import yt_dlp
 
 from music.config import (YT_REQUEST_MAX_INTERVAL_SEC,
                           YT_REQUEST_MIN_INTERVAL_SEC, log)
+from music.errors import YtdlpTimeout
 
 _NEXT_ALLOWED_AT = 0.0
 _LOOP = None
@@ -149,8 +150,7 @@ async def extract(opts: dict, query: str, *, download: bool = False,
             log.warning(
                 f"yt-dlp a depasit {budget}s la {stage or 'cerere'}; thread-ul "
                 f"continua in fundal (abandonate pana acum: {_leaked}/{MAX_WORKERS})")
-            raise TimeoutError(
-                f"yt-dlp a depasit {budget}s la {stage or 'cerere'}") from e
+            raise YtdlpTimeout(stage, budget) from e
 
     if stage:
         log.debug(f"yt-dlp stage terminat: {stage}")

@@ -31,6 +31,11 @@ class _YdlLog:
                 'skipping', 'Sign in to confirm', 'not available',
                 'has already been downloaded')
 
+    # Ultima linie care explica o decizie. Cand yt-dlp refuza o piesa prin
+    # match_filter nu ridica nicio excepție, deci fara asta singurul motiv
+    # disponibil era o presupunere scrisa de noi.
+    last_reason: str | None = None
+
     def debug(self, msg):
         # Liniile de downloader vin cu \r in fata (sunt gandite pentru terminal,
         # ca sa se suprascrie una pe alta); intr-un log de linii ar tăia prefixul
@@ -41,6 +46,7 @@ class _YdlLog:
         # primul caracter din afara setului si scotea "ownload] File is larger".
         text = text.removeprefix('[debug] ')
         if any(marker in text for marker in self._PROMOTE):
+            _YdlLog.last_reason = text
             log.info(f"yt-dlp: {text}")
         else:
             log.debug(f"yt-dlp: {text}")
@@ -49,13 +55,29 @@ class _YdlLog:
         log.info(f"yt-dlp: {msg}")
 
     def warning(self, msg):
+        _YdlLog.last_reason = str(msg)
         log.warning(f"yt-dlp: {msg}")
 
     def error(self, msg):
+        _YdlLog.last_reason = str(msg)
         log.error(f"yt-dlp: {msg}")
 
 
 YDL_LOGGER = _YdlLog()
+
+
+def clear_ydl_reason():
+    """Uita ultimul motiv, inainte de o incercare noua.
+
+    Fara golire, motivul unei piese de acum o ora ar fi raportat ca explicatie
+    pentru piesa curenta — exact bug-ul pe care state.last_raw_error il avea.
+    """
+    _YdlLog.last_reason = None
+
+
+def last_ydl_reason() -> str | None:
+    """Ultima decizie explicata de yt-dlp de la ultima golire."""
+    return _YdlLog.last_reason
 
 
 def yt_client_args(*clients):

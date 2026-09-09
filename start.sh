@@ -9,8 +9,13 @@ POT_URL="http://127.0.0.1:${POT_PORT}"
 # si fiecare redare eseua cu 403, la infinit, fara nimic in loguri.
 supervise_pot() {
     while true; do
-        node /opt/pot-provider/server/build/main.js --port "$POT_PORT" || true
-        echo "[SUPERVISOR] PO Token server a ieșit (cod $?). Repornesc in 5s."
+        # `|| rc=$?`, nu `|| true`: cu `|| true` variabila $? de pe linia
+        # urmatoare era codul lui `true`, adica mereu 0, deci un OOM kill si o
+        # ieșire curata arata identic si singurul diagnostic al supervizorului
+        # era mereu greșit.
+        rc=0
+        node /opt/pot-provider/server/build/main.js --port "$POT_PORT" || rc=$?
+        echo "[SUPERVISOR] PO Token server a ieșit (cod ${rc}). Repornesc in 5s."
         sleep 5
     done
 }
@@ -30,6 +35,10 @@ for _ in $(seq 1 60); do
     sleep 0.5
 done
 
+# POT_READY=1/0 e un token STABIL, de caut in loguri. Mesajul din errori
+# (music/errors.py) trimitea utilizatorul sa caute "[STARTUP] PO Token server
+# running", un text care nu exista nicaieri in proiect.
+echo "[STARTUP] POT_READY=${POT_READY}"
 if [ "$POT_READY" = "1" ]; then
     echo "[STARTUP] PO Token server gata: $(curl -fsS --max-time 2 "${POT_URL}/ping")"
 else

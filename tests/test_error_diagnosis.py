@@ -107,6 +107,120 @@ def test_type_keys_do_not_round_trip_into_themselves():
             f'paseze textul brut al erorii, nu cheia')
 
 
+def test_the_timeout_type_is_diagnosed_as_a_timeout():
+    """Plafoanele de 90s/240s exista ca sa faca vizibil un blocaj.
+
+    Mesajul lor e in romana ("a depasit 90s"), iar ramura de rețea cauta
+    "timed out"/"timeout" — deci exact eșecul pe care aceste plafoane il
+    raporteaza era singurul despre care utilizatorul nu putea fi informat.
+    """
+    from music.errors import YtdlpTimeout
+
+    exc = YtdlpTimeout('search_mweb+web_safari', 90)
+    assert diagnose_error(exc)[0] == 'timeout'
+    # Si prin textul salvat in state.last_raw_error, unde tipul se pierde.
+    assert diagnose_error(str(exc))[0] == 'timeout'
+    assert diagnose_error("descarcarea a depasit 240s")[0] == 'timeout'
+    assert exc.stage == 'search_mweb+web_safari' and exc.budget == 90
+
+
+def test_ytdlp_raises_the_typed_timeout_not_a_bare_one():
+    """Producatorul si diagnoza trebuie sa rămâna legate prin TIP, nu prin text."""
+    import ast
+    import inspect
+
+    from music import ytdlp
+    from music.errors import YtdlpTimeout
+
+    assert ytdlp.YtdlpTimeout is YtdlpTimeout, 'ytdlp foloseste alt tip'
+    raised = [
+        getattr(n.exc.func, 'id', '')
+        for n in ast.walk(ast.parse(inspect.getsource(ytdlp.extract)))
+        if isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
+    ]
+    assert raised == ['YtdlpTimeout'], raised
+
+
+# Excepțiile de mai jos NU trec prin diagnose_error: au fiecare propriul
+# handler in process_play, care nu diagnosticheaza nimic.
+_SELF_HANDLED_TYPES = {'PlaybackInterrupted', 'TrackRejected'}
+# ...si trigger_radio isi prinde propria eroare, cu propriul mesaj.
+_SELF_HANDLED_FUNCS = {'trigger_radio'}
+
+
+def _own_error_messages():
+    """Mesajele literale pe care player.py le ridica si care AJUNG la diagnoza."""
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    tree = ast.parse((root / 'music' / 'player.py').read_text(encoding='utf-8'))
+    found = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if fn.name in _SELF_HANDLED_FUNCS:
+            continue
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
+                continue
+            name = getattr(node.exc.func, 'id', '')
+            if name in _SELF_HANDLED_TYPES or not node.exc.args:
+                continue
+            arg = node.exc.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                found.append((fn.name, node.lineno, arg.value))
+    return found
+
+
+def test_our_own_error_messages_are_all_diagnosable():
+    """Scanare pe AST, nu o lista scrisa de mana.
+
+    Toate mesajele proprii ieseau 'unknown', deci utilizatorul primea propriul
+    nostru text citat inapoi la el si niciun sfat. Testul se uita in sursa, deci
+    un mesaj NOU adaugat maine trebuie sa aiba si el o ramura.
+    """
+    messages = _own_error_messages()
+    assert messages, 'scanarea nu a gasit nimic — s-a schimbat structura?'
+    undiagnosed = [(f, ln, m) for f, ln, m in messages
+                   if diagnose_error(m)[0] == 'unknown']
+    assert not undiagnosed, 'mesaje proprii fara ramura de diagnoza:\n  ' + \
+        '\n  '.join(f'player.py:{ln} in {f}: {m!r}' for f, ln, m in undiagnosed)
+
+
+def test_log_tokens_quoted_to_the_user_actually_exist():
+    """Un sfat care trimite la un text inexistent e mai rau decat niciun sfat.
+
+    Mesajul de PO Token spunea "In loguri cauta `[STARTUP] PO Token server
+    running`" — un text care nu exista nicaieri in proiect. Verificarea e
+    mecanica, deci nu se mai poate intampla.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    source = root / 'music' / 'errors.py'
+    advice = source.read_text(encoding='utf-8')
+    # errors.py NU face parte din caut: altfel orice token s-ar gasi in fisierul
+    # care il citeaza si verificarea ar trece mereu.
+    haystack = '\n'.join(
+        p.read_text(encoding='utf-8')
+        for p in [*sorted(root.glob('*.py')), *sorted((root / 'music').glob('*.py')),
+                  root / 'start.sh', root / 'Dockerfile']
+        if p.exists() and p != source)
+
+    missing = []
+    for token in re.findall(r'`([^`\n]+)`', advice):
+        # Comenzile de Discord (`!play`) si flag-urile yt-dlp (`--cookies`) sunt
+        # ale altcuiva; `{short}` e interpolare, nu un token de căutat.
+        # Verificam doar ce pretindem ca producem noi.
+        if token.startswith(('!', '-')) or '{' in token:
+            continue
+        if token not in haystack:
+            missing.append(token)
+    assert not missing, f'citate in errors.py dar inexistente in cod: {missing}'
+
+
 def _capture_ydl_log(messages):
     """Ruleaza logger-ul yt-dlp cu un handler care retine (nivel, text)."""
     import logging
