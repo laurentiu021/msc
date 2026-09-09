@@ -17,6 +17,47 @@ BLACKLIST = [
     "asmr", "karaoke", "instrumental", "tutorial",
 ]
 
+class _YdlLog:
+    """Logger pentru yt-dlp, ca deciziile lui sa nu mai fie invizibile.
+
+    Cu quiet=True, yt-dlp raporteaza respingerile de filtru prin `to_screen`,
+    care nu scrie nimic — deci o piesa refuzata pentru durata dispărea complet:
+    nicio excepție, nicio linie in log, iar utilizatorului i se arata eroarea
+    altei piese. Cu un logger, `to_screen` merge la `debug`, deci ridicam la
+    nivel de INFO exact liniile care explica o decizie.
+    """
+
+    _PROMOTE = ('does not pass filter', 'larger than max-filesize',
+                'skipping', 'Sign in to confirm', 'not available',
+                'has already been downloaded')
+
+    def debug(self, msg):
+        # Liniile de downloader vin cu \r in fata (sunt gandite pentru terminal,
+        # ca sa se suprascrie una pe alta); intr-un log de linii ar tăia prefixul
+        # propriu al inregistrarii.
+        text = str(msg).strip('\r\n')
+        # removeprefix, nu lstrip: lstrip primeste un SET de caractere, deci
+        # lstrip('[debug] ') mânca si din "[download] File is larger" pana la
+        # primul caracter din afara setului si scotea "ownload] File is larger".
+        text = text.removeprefix('[debug] ')
+        if any(marker in text for marker in self._PROMOTE):
+            log.info(f"yt-dlp: {text}")
+        else:
+            log.debug(f"yt-dlp: {text}")
+
+    def info(self, msg):
+        log.info(f"yt-dlp: {msg}")
+
+    def warning(self, msg):
+        log.warning(f"yt-dlp: {msg}")
+
+    def error(self, msg):
+        log.error(f"yt-dlp: {msg}")
+
+
+YDL_LOGGER = _YdlLog()
+
+
 def yt_client_args(*clients):
     """Construieste extractor_args pentru API-ul Python al yt-dlp.
 
@@ -64,6 +105,7 @@ YDL_OPTS_SEARCH = {
     'format': 'best',
     'ignore_no_formats_error': True,
     'extractor_args': _YT_EXTRACTOR_ARGS,
+    'logger': YDL_LOGGER,
 }
 
 MAX_TRACK_SECONDS = 660
@@ -81,10 +123,15 @@ YDL_OPTS_DOWNLOAD = {
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
+    # Cu un logger atasat, to_screen NU mai respecta quiet: iese direct pe
+    # logger.debug. Fara asta, fiecare tick de progres al descarcarii ar deveni
+    # un apel de logging formatat degeaba, de zeci de ori pe piesa.
+    'noprogress': True,
     'source_address': '0.0.0.0',
     'retries': 3,
     'socket_timeout': 15,
     'extractor_args': _YT_EXTRACTOR_ARGS,
+    'logger': YDL_LOGGER,
 }
 
 if _proxy:

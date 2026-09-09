@@ -107,6 +107,93 @@ def test_type_keys_do_not_round_trip_into_themselves():
             f'paseze textul brut al erorii, nu cheia')
 
 
+def _capture_ydl_log(messages):
+    """Ruleaza logger-ul yt-dlp cu un handler care retine (nivel, text)."""
+    import logging
+
+    from music.config import YDL_LOGGER, log as music_log
+
+    records = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record):
+            records.append((record.levelno, record.getMessage()))
+
+    sink = _Sink()
+    saved_level = music_log.level
+    music_log.addHandler(sink)
+    music_log.setLevel(logging.DEBUG)
+    try:
+        for msg in messages:
+            YDL_LOGGER.debug(msg)
+    finally:
+        music_log.removeHandler(sink)
+        music_log.setLevel(saved_level)
+    return records
+
+
+def test_filter_rejections_are_promoted_to_visible_lines():
+    """Motivul unei piese sarite trebuie sa ajunga in log, nu in vid.
+
+    yt-dlp raporteaza respingerea prin `to_screen`, care la quiet=True nu scrie
+    nimic si nu ridica excepție: piesa dispărea complet, iar utilizatorului i se
+    arata eroarea unei piese anterioare. Cu logger atasat, `to_screen` intra pe
+    `debug`, deci exact liniile care explica o decizie se ridica la INFO.
+    """
+    import logging
+
+    # Textele sunt cele REALE ale yt-dlp-ului instalat, verificate cu
+    # match_filter_func(...) si cu downloader/http.py, nu scrise din memorie.
+    promoted = [
+        '[download] Radio non-stop does not pass filter '
+        '(!is_live & !live_from_start & duration < 660), skipping ..',
+        '\r[download] File is larger than max-filesize '
+        '(150000000 bytes > 104857600 bytes). Aborting.',
+        "[youtube] vid123: Sign in to confirm you're not a bot",
+    ]
+    records = _capture_ydl_log(promoted)
+    assert len(records) == len(promoted)
+    for level, text in records:
+        assert level == logging.INFO, f'rămâne invizibila in producție: {text}'
+    # Textul trebuie sa rămâna citibil. lstrip('[debug] ') primeste un SET de
+    # caractere, deci tăia si din "[download] File is larger" pana la primul
+    # caracter din afara setului: "ownload] File is larger".
+    for (_, text), original in zip(records, promoted):
+        payload = original.strip('\r\n').removeprefix('[debug] ')
+        assert text.endswith(payload), f'mesaj mutilat: {text!r}'
+    # \r ar tăia prefixul inregistrarii in vizualizatorul de loguri.
+    assert not any('\r' in text for _, text in records), records
+
+
+def test_the_debug_prefix_is_removed_without_eating_the_message():
+    records = _capture_ydl_log(['[debug] [youtube] downloading player'])
+    assert records[0][1] == 'yt-dlp: [youtube] downloading player', records
+
+
+def test_routine_chatter_stays_at_debug():
+    """Altfel logul de producție devine ilizibil si nu-l mai citeste nimeni."""
+    import logging
+
+    records = _capture_ydl_log([
+        '[debug] Loading youtube-nsig player from cache',
+        '[debug] [youtube] Extracting URL: https://www.youtube.com/watch?v=x',
+    ])
+    assert records and all(level == logging.DEBUG for level, _ in records), records
+
+
+def test_both_opts_sets_carry_the_logger():
+    """Fara logger, yt-dlp tace la quiet=True — nu e o optiune de estetica."""
+    from music.config import make_download_opts, make_search_opts
+
+    for name, opts in (('search', make_search_opts()),
+                       ('download', make_download_opts())):
+        logger = opts.get('logger')
+        assert logger is not None, f'{name} nu are logger'
+        for level in ('debug', 'info', 'warning', 'error'):
+            assert callable(getattr(logger, level, None)), \
+                f'{name}: logger fara {level}(), yt-dlp va crapa'
+
+
 if __name__ == '__main__':
     failed = 0
     for name, fn in sorted(globals().items()):
@@ -118,5 +205,11 @@ if __name__ == '__main__':
         except AssertionError as e:
             failed += 1
             print(f'FAIL {name}: {e}')
+        except Exception as e:
+            # Nu doar AssertionError: un test care CRAPA (RuntimeError,
+            # TypeError) opreste altfel fisierul si testele de dupa el nu mai
+            # ruleaza deloc, fara sa apara nicaieri ca lipsesc.
+            failed += 1
+            print(f'FAIL {name}: {type(e).__name__}: {e}')
     print(f'\n{failed} failed')
     sys.exit(1 if failed else 0)

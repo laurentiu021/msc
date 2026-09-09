@@ -125,5 +125,11 @@ if __name__ == '__main__':
         except AssertionError as e:
             failed += 1
             print(f'FAIL {name}: {e}')
+        except Exception as e:
+            # Nu doar AssertionError: un test care CRAPA (RuntimeError,
+            # TypeError) opreste altfel fisierul si testele de dupa el nu mai
+            # ruleaza deloc, fara sa apara nicaieri ca lipsesc.
+            failed += 1
+            print(f'FAIL {name}: {type(e).__name__}: {e}')
     print(f'\n{failed} failed')
     sys.exit(1 if failed else 0)

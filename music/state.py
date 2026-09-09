@@ -32,6 +32,12 @@ class GuildState:
         self._consecutive_errors = 0
         self._last_notified_error: str | None = None
 
+        # Piese refuzate de reguli (live, durata) una dupa alta. Nu sunt erori,
+        # deci nu trebuie sa intre in intrerupatorul de 5 erori, dar o coada
+        # plina de live-uri trebuie totusi sa se opreasca la un moment dat, nu
+        # sa consume o extractie completa pentru fiecare element pe rand.
+        self._consecutive_rejects = 0
+
         # Token de generatie pentru callback-ul after_play. VoiceClient.stop()
         # declanseaza ALWAYS callback-ul, deci un stop deliberat (seek, nplay,
         # inlocuirea piesei) facea coada sa avanseze si stergea fisierul care

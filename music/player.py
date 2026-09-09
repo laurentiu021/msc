@@ -30,6 +30,20 @@ class PlaybackInterrupted(Exception):
     """Redarea a fost oprita intentionat (stop, deconectare), nu a eșuat."""
 
 
+class TrackRejected(Exception):
+    """Piesa a fost refuzata de reguli (live, durata), nu a eșuat tehnic.
+
+    Tip separat pentru ca tratamentul e diferit: mesaj clar, fara numaratoare de
+    erori si fara diagnoza de cookies. Ambalate ca Exception generica, refuzurile
+    urcau spre intrerupatorul de 5 erori si utilizatorul primea "Eroare
+    necunoscuta" pentru o regula pe care noi am scris-o.
+    """
+
+
+# Cate refuzuri consecutive acceptam inainte sa ne oprim din a avansa coada.
+MAX_CONSECUTIVE_REJECTS = 5
+
+
 def _scrub(text) -> str:
     """Scoate URL-ul de proxy din textul erorii inainte sa ajunga pe Discord.
 
@@ -82,8 +96,9 @@ async def _resolve_query_to_url(state, query: str) -> str:
     if chosen is None:
         # Niciunul nu trece filtrul. Inainte se lua orbeste entries[0], deci
         # filtrul nu putea respinge nimic si un live de 3 ore ajungea in redare.
-        raise ValueError(
-            "Toate rezultatele au fost filtrate (live, prea scurte sau prea lungi)")
+        raise TrackRejected(
+            f"toate cele {len(entries)} rezultate au fost filtrate "
+            f"(live, prea scurte sau prea lungi)")
 
     log.info(f"Ales din {len(entries)} rezultate: {item_title(chosen, 60)}")
     url = chosen.get('url') or chosen.get('id')
@@ -92,6 +107,31 @@ async def _resolve_query_to_url(state, query: str) -> str:
     if not url:
         raise ValueError("Rezultatul nu are URL")
     return url
+
+
+def _unplayable_reason(info) -> str | None:
+    """Motiv pentru care piesa nu are ce sa caute in redare, sau None.
+
+    Se aplica si pe URL-uri directe, nu doar pe rezultatele de cautare. Pana
+    acum un link de live sau de podcast de trei ore trecea intreaga extractie,
+    intra in bucla de descarcare, era respins tacut de match_filter, si
+    utilizatorul primea "Niciun format nu a reusit descarcarea" — un mesaj care
+    arata ca o defectiune, nu ca o regula.
+
+    Verifica DOAR ce e o limita operationala reala: un live nu se termina
+    niciodata, iar peste MAX_TRACK_SECONDS trecem bugetul de descarcare si
+    limita de fisier. Blocklist-ul, similaritatea si durata MINIMA din is_clean
+    servesc alegerea AUTOMATA (cautare, autoplay), unde scopul e sa nu culegem
+    teasere si shorts; cand cineva da explicit un link de 20 de secunde, singurul
+    lucru corect e sa il redam.
+    """
+    if info.get('is_live') or info.get('live_status') in ('is_live', 'is_upcoming'):
+        return "E un live, nu o piesa"
+    duration = info.get('duration')
+    if duration and duration > MAX_TRACK_SECONDS:
+        return (f"Piesa are {int(duration // 60)} minute, limita e "
+                f"{MAX_TRACK_SECONDS // 60}")
+    return None
 
 
 def bump_play_generation(state) -> int:
@@ -253,6 +293,7 @@ async def process_play(ctx, query, is_radio=False):
     state.load_token += 1
     my_load_token = state.load_token
     failure = None
+    rejected = None
     filename = None
     formats_to_try = [
         'bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
@@ -379,6 +420,13 @@ async def process_play(ctx, query, is_radio=False):
                     log.warning(f"Retry failed for {vid_id}: {e}")
                     raise ValueError("YouTube a blocat acest video (0 formate reale)")
 
+            # Regulile se aplica si pe URL-uri directe, nu doar pe cautare.
+            # Altfel un link de live trecea toata extractia, intra in bucla de
+            # descarcare si era respins tacut de match_filter.
+            reason = _unplayable_reason(selected)
+            if reason:
+                raise TrackRejected(reason)
+
             # Download: incearca prima data cu combinatia care a mers la search
             cookie_order = [True, False] if successful_cookies else [False, True]
             for use_cookies_dl in cookie_order:
@@ -484,6 +532,7 @@ async def process_play(ctx, query, is_radio=False):
             vc.play(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTS), after=after_play)
 
         state._consecutive_errors = 0
+        state._consecutive_rejects = 0
         state.breaker_until = 0.0
         # Altfel eroarea unei piese de acum o ora era raportata ca motiv pentru
         # urmatoarea care eșua fara sa spuna nimic.
@@ -527,6 +576,13 @@ async def process_play(ctx, query, is_radio=False):
         # retea, care trebuie sa rămâna vizibile.
         log.info(f"Redare intrerupta: {e}")
         cleanup_file(filename, _loop)
+    except TrackRejected as e:
+        # Regula noastra, nu defectiune: nu atinge _consecutive_errors si nu
+        # trece prin diagnose_error, care ar traduce-o in "Eroare necunoscuta".
+        log.info(f"Piesa refuzata: {e}")
+        cleanup_file(filename, _loop)
+        state._consecutive_rejects += 1
+        rejected = str(e)
     except Exception as e:
         log.error(f"Eroare process_play: {e}", exc_info=True)
         cleanup_file(filename, _loop)
@@ -537,6 +593,30 @@ async def process_play(ctx, query, is_radio=False):
         # care se termina ar debloca un altul aflat inca in lucru.
         if state.load_token == my_load_token:
             state.is_loading = False
+
+    if rejected:
+        too_many = state._consecutive_rejects >= MAX_CONSECUTIVE_REJECTS
+        try:
+            if too_many:
+                await ctx.send(
+                    f"⏭️ **{state._consecutive_rejects} piese refuzate la rand** "
+                    f"(ultima: {rejected}). Ma opresc, da-mi altceva cu `!play`.",
+                    delete_after=60)
+            else:
+                await ctx.send(f"⏭️ **Sarita:** {rejected}", delete_after=30)
+        except discord.HTTPException:
+            pass
+        if too_many:
+            # Coada e plina de lucruri pe care nu le putem reda; fiecare element
+            # costa o extractie completa, deci nu o parcurgem pana la capat.
+            state._consecutive_rejects = 0
+            state.autoplay = False
+            start_timeout(ctx)
+        elif state.autoplay or state.queue:
+            play_next(ctx)
+        else:
+            start_timeout(ctx)
+        return
 
     if failure is None:
         return

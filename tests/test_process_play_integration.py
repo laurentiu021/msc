@@ -63,11 +63,15 @@ class _Harness:
     ATTRS = ('update_player_ui', 'start_timeout', 'cancel_timeout', 'play_next',
              'cleanup_file', '_loop')
 
-    def __init__(self, download_target):
+    def __init__(self, download_target, full_info=None, flat_entries=None):
         self.download_target = download_target
+        self.full_info = full_info
+        self.flat_entries = flat_entries
         self.extract_calls = []
         self.download_calls = []
         self.cleaned = []
+        self.play_next_calls = []
+        self.timeouts = []
 
     def __enter__(self):
         self.saved = {a: getattr(player, a, None) for a in self.ATTRS}
@@ -80,11 +84,13 @@ class _Harness:
             if stage == 'search_flat':
                 # Cautarea de text e acum FLAT: doar metadata de lista, apoi o
                 # singura extractie completa a videoclipului ales.
-                return {'entries': [{
+                return {'entries': self.flat_entries if self.flat_entries is not None else [{
                     'id': 'vid123', 'title': 'Artistul - Piesa', 'duration': 200,
                     'live_status': None,
                     'url': 'https://www.youtube.com/watch?v=vid123',
                 }]}
+            if self.full_info is not None:
+                return self.full_info
             return {
                 'id': 'vid123',
                 'title': 'Artistul - Piesa',
@@ -111,9 +117,9 @@ class _Harness:
         player.ytdlp.extract_and_prepare_filename = fake_download
         player.discord.FFmpegOpusAudio = _FakeSource
         player.update_player_ui = noop
-        player.start_timeout = lambda *a, **k: None
+        player.start_timeout = lambda *a, **k: self.timeouts.append(a)
         player.cancel_timeout = lambda *a, **k: None
-        player.play_next = lambda *a, **k: None
+        player.play_next = lambda *a, **k: self.play_next_calls.append(a)
         player.cleanup_file = lambda f, *a, **k: self.cleaned.append(f)
         player._loop = None
         return self
@@ -213,6 +219,136 @@ def test_missing_file_is_reported_not_silently_played():
         assert ctx.sent, 'utilizatorul nu a fost anuntat'
 
 
+def _reject_run(full_info, query='https://www.youtube.com/watch?v=vid123',
+                state=None):
+    """Ruleaza process_play cu un videoclip care trebuie refuzat."""
+    st = state or _fresh_state()
+    vc = _FakeVoiceClient()
+    ctx = _FakeCtx(vc)
+    with _Harness('/nu/conteaza', full_info=full_info) as h:
+        asyncio.run(player.process_play(ctx, query))
+    return st, vc, ctx, h
+
+
+LIVE_INFO = {
+    'id': 'live1', 'title': 'Radio non-stop', 'live_status': 'is_live',
+    'is_live': True, 'duration': None,
+    'webpage_url': 'https://www.youtube.com/watch?v=live1',
+    'formats': [{'acodec': 'opus', 'url': 'https://x/a', 'protocol': 'https'}],
+}
+
+LONG_INFO = {
+    'id': 'long1', 'title': 'Podcast integral', 'duration': 3 * 3600,
+    'webpage_url': 'https://www.youtube.com/watch?v=long1',
+    'formats': [{'acodec': 'opus', 'url': 'https://x/a', 'protocol': 'https'}],
+}
+
+
+def test_direct_live_url_is_refused_before_any_download():
+    """Regula se aplica si pe URL direct, nu doar pe rezultatele de cautare.
+
+    Inainte, un link de live trecea toata extractia, intra in bucla de
+    descarcare si era respins tacut de match_filter; utilizatorul primea
+    "Niciun format nu a reusit descarcarea", adica un mesaj de defectiune.
+    """
+    st, vc, ctx, h = _reject_run(LIVE_INFO)
+    assert not h.download_calls, 'a descarcat un live'
+    assert not vc.played
+    assert st._consecutive_errors == 0, 'un refuz nu e o eroare'
+    assert st._consecutive_rejects == 1
+    assert ctx.sent, 'utilizatorul nu a fost anuntat'
+    assert 'live' in str(ctx.sent[0]).lower(), ctx.sent[0]
+    assert st.is_loading is False
+
+
+def test_direct_overlong_url_is_refused_with_the_real_reason():
+    st, vc, ctx, h = _reject_run(LONG_INFO)
+    assert not h.download_calls
+    assert st._consecutive_errors == 0
+    text = str(ctx.sent[0])
+    assert '180' in text or 'minute' in text, text
+    assert 'necunoscuta' not in text.lower(), 'refuzul a ajuns la diagnose_error'
+
+
+def test_refusal_advances_the_queue_instead_of_stalling():
+    st = _fresh_state()
+    st.queue = [{'query': 'altceva', 'title': 'Altceva'}]
+    _, _, _, h = _reject_run(LIVE_INFO, state=st)
+    assert h.play_next_calls, 'coada a rămas blocata dupa un refuz'
+
+
+def test_refusal_with_empty_queue_starts_the_idle_timer():
+    st = _fresh_state()
+    _, _, _, h = _reject_run(LIVE_INFO, state=st)
+    assert not h.play_next_calls
+    assert h.timeouts, 'nici avans, nici timer: sesiunea rămâne suspendata'
+
+
+def test_a_queue_full_of_lives_stops_instead_of_grinding_through_it():
+    st = _fresh_state()
+    st.autoplay = True
+    st.queue = [{'query': f'q{i}', 'title': f'T{i}'} for i in range(20)]
+    for i in range(player.MAX_CONSECUTIVE_REJECTS):
+        _, _, ctx, h = _reject_run(LIVE_INFO, state=st)
+        last = (ctx, h)
+    ctx, h = last
+    assert st.autoplay is False, 'ar continua sa ceara extractii pentru live-uri'
+    assert not h.play_next_calls, 'a avansat dupa ce a atins limita'
+    assert h.timeouts
+    assert 'refuzate' in str(ctx.sent[0]), ctx.sent[0]
+    assert st._consecutive_rejects == 0, 'contorul nu s-a resetat la oprire'
+
+
+def test_a_successful_play_resets_the_reject_counter():
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        open(target, 'wb').write(b'audio')
+        st = _fresh_state()
+        st._consecutive_rejects = 3
+        ctx = _FakeCtx(_FakeVoiceClient())
+        with _Harness(target):
+            asyncio.run(player.process_play(ctx, 'ceva'))
+        assert st._consecutive_rejects == 0
+
+
+def test_search_with_everything_filtered_says_so_plainly():
+    st = _fresh_state()
+    entries = [
+        {'id': 'a', 'title': 'Live acum', 'duration': 20000, 'live_status': 'is_live'},
+        {'id': 'b', 'title': 'Scurt', 'duration': 4, 'live_status': None},
+    ]
+    vc = _FakeVoiceClient()
+    ctx = _FakeCtx(vc)
+    with _Harness('/nu/conteaza', flat_entries=entries) as h:
+        asyncio.run(player.process_play(ctx, 'ceva text'))
+    assert not h.download_calls
+    assert st._consecutive_errors == 0, 'un filtru complet nu e o defectiune'
+    text = str(ctx.sent[0])
+    assert 'filtrate' in text, text
+    assert 'necunoscuta' not in text.lower(), text
+
+
+def test_unplayable_reason_passes_normal_tracks():
+    assert player._unplayable_reason(
+        {'duration': 200, 'live_status': None}) is None
+    assert player._unplayable_reason({'duration': 200}) is None
+    # Fara durata (unele extractii nu o dau) nu inventam un refuz.
+    assert player._unplayable_reason({'title': 'x'}) is None
+
+
+def test_an_explicit_short_link_is_still_played():
+    """Durata MINIMA e o regula pentru alegerea automata, nu pentru un link dat.
+
+    is_clean o aplica la cautare si autoplay ca sa nu culegem shorts si teasere.
+    Pe un link explicit de 20 de secunde, singurul lucru corect e sa il redam.
+    """
+    assert player._unplayable_reason({'duration': 20, 'live_status': None}) is None
+
+
+def test_unplayable_reason_catches_upcoming_premieres():
+    assert player._unplayable_reason({'live_status': 'is_upcoming'})
+
+
 if __name__ == '__main__':
     failed = 0
     for name, fn in sorted(globals().items()):
@@ -224,5 +360,11 @@ if __name__ == '__main__':
         except AssertionError as e:
             failed += 1
             print(f'FAIL {name}: {e}')
+        except Exception as e:
+            # Nu doar AssertionError: un test care CRAPA (RuntimeError,
+            # TypeError) opreste altfel fisierul si testele de dupa el nu mai
+            # ruleaza deloc, fara sa apara nicaieri ca lipsesc.
+            failed += 1
+            print(f'FAIL {name}: {type(e).__name__}: {e}')
     print(f'\n{failed} failed')
     sys.exit(1 if failed else 0)

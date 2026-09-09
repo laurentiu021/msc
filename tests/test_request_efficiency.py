@@ -108,32 +108,63 @@ def test_every_ytdlp_call_goes_through_the_shared_throttle():
     assert not offenders, f'ocolesc throttle-ul: {offenders}'
 
 
-def test_throttle_reserves_the_slot_under_the_lock():
-    """Doi apelanti concurenti nu au voie sa plece impreuna.
+def test_the_slot_is_always_released_even_when_the_request_raises():
+    """Un slot nereturnat inseamna un bot care tace la orice !play de acum inainte.
 
-    Cand rezervarea se facea numai dupa terminarea cererii, amandoi citeau un
-    _NEXT_ALLOWED_AT deja trecut, nu așteptau nimic si porneau simultan — exact
-    rafala pe care throttle-ul exista sa o previna.
+    Poarta e un semafor de 1: daca o excepție ar putea ocoli eliberarea,
+    prima eroare ar bloca definitiv toate cererile catre YouTube.
     """
-    src = inspect.getsource(ytdlp.wait_for_slot)
-    assert 'async with _LOCK' in src
-    assert '_NEXT_ALLOWED_AT = time.time()' in src, (
-        'rezervarea trebuie sa se intample sub lock, in wait_for_slot')
-    extend = inspect.getsource(ytdlp._reserve_next_slot)
-    assert 'max(' in extend, 'prelungirea de dupa cerere nu are voie sa scurteze pauza'
-    assert 'finally' in inspect.getsource(ytdlp.extract)
+    async def main():
+        for _ in range(3):
+            try:
+                async with ytdlp._slot():
+                    raise RuntimeError('cererea a eșuat')
+            except RuntimeError:
+                pass
+        # Daca semaforul nu s-a eliberat, aici s-ar aștepta la infinit.
+        _, gate = ytdlp._primitives()
+        await asyncio.wait_for(gate.acquire(), timeout=1)
+        gate.release()
+
+    saved_min = ytdlp.YT_REQUEST_MIN_INTERVAL_SEC
+    saved_max = ytdlp.YT_REQUEST_MAX_INTERVAL_SEC
+    ytdlp.YT_REQUEST_MIN_INTERVAL_SEC = 0.0
+    ytdlp.YT_REQUEST_MAX_INTERVAL_SEC = 0.0
+    ytdlp._NEXT_ALLOWED_AT = 0.0
+    try:
+        asyncio.run(main())
+    except asyncio.TimeoutError:
+        raise AssertionError('poarta a rămas inchisa dupa o cerere eșuata')
+    finally:
+        ytdlp.YT_REQUEST_MIN_INTERVAL_SEC = saved_min
+        ytdlp.YT_REQUEST_MAX_INTERVAL_SEC = saved_max
+        ytdlp._NEXT_ALLOWED_AT = 0.0
 
 
-def test_ytdlp_uses_a_bounded_dedicated_executor():
-    """asyncio.wait_for anuleaza aȘteptarea, nu thread-ul: el continua sa ruleze."""
-    assert ytdlp._EXECUTOR is not None
-    assert ytdlp._EXECUTOR._max_workers <= 8
-    for fn in (ytdlp.extract, ytdlp.extract_and_prepare_filename):
-        src = inspect.getsource(fn)
-        assert '_EXECUTOR' in src, (
-            f'{fn.__name__} nu foloseste executorul dedicat, ci pe cel implicit')
-        assert 'None, lambda' not in src, (
-            f'{fn.__name__} inca trimite catre executorul implicit')
+def test_no_ytdlp_call_uses_the_default_executor():
+    """Pe pool-ul implicit ruleaza si FFmpegOpusAudio.probe al lui discord.py.
+
+    asyncio.wait_for anuleaza aȘteptarea, nu thread-ul, deci cateva cereri
+    expirate ar infometa fiecare alt run_in_executor din proces, inclusiv
+    pornirea audio. Verificarea e pe TOT modulul, nu pe functiile de azi: un apel
+    nou adaugat cu None ar trece altfel nedetectat.
+    Comportamentul (executor propriu, serializare, distanta) e in
+    tests/test_ytdlp_gate.py.
+    """
+    import ast
+
+    # Pe AST, nu pe text: docstring-ul modulului citeaza chiar forma greșita
+    # (`run_in_executor(None, ...)`) ca sa explice de ce e interzisa.
+    tree = ast.parse(inspect.getsource(ytdlp))
+    targets = [
+        ast.unparse(node.args[0]) if node.args else 'LIPSA'
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, 'attr', None) == 'run_in_executor'
+    ]
+    assert targets, 'nu mai exista niciun apel in executor'
+    assert all(t == '_EXECUTOR' for t in targets), targets
+    assert 0 < ytdlp.MAX_WORKERS <= 8, ytdlp.MAX_WORKERS
 
 
 def test_autoplay_seeds_from_the_current_track():
@@ -196,5 +227,11 @@ if __name__ == '__main__':
         except AssertionError as e:
             failed += 1
             print(f'FAIL {name}: {e}')
+        except Exception as e:
+            # Nu doar AssertionError: un test care CRAPA (RuntimeError,
+            # TypeError) opreste altfel fisierul si testele de dupa el nu mai
+            # ruleaza deloc, fara sa apara nicaieri ca lipsesc.
+            failed += 1
+            print(f'FAIL {name}: {type(e).__name__}: {e}')
     print(f'\n{failed} failed')
     sys.exit(1 if failed else 0)
