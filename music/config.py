@@ -153,10 +153,18 @@ def seed_cookies_from_env(raw: str) -> tuple[str | None, int]:
     try:
         with open(path, 'w', encoding='utf-8', newline='\n') as fh:
             fh.write(raw if raw.endswith('\n') else raw + '\n')
+        # O sesiune Google activa nu are ce cauta lizibila pentru altcineva.
+        os.chmod(path, 0o600)
         with open(seed_path, 'w', encoding='utf-8') as fh:
             fh.write(fingerprint)
     except OSError as e:
         log.error(f"Nu pot scrie cookies in {path}: {e}")
+        # Daca pe volum exista deja cookie-uri, le pastram. Varianta care
+        # intorcea (None, 0) pornea botul ca guest, adica singura configuratie
+        # fara nicio cale functionala, desi avea cookie-uri bune pe disc.
+        if os.path.exists(path):
+            log.warning(f"Folosesc cookie-urile existente din {path}")
+            return path, _count_cookie_entries(path)
         return None, 0
 
     log.info(f"Cookies scrise in {path} ({entries} intrari) din env"

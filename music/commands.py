@@ -7,7 +7,6 @@ import time
 from urllib.parse import urlparse
 
 import discord
-import yt_dlp
 
 from music.config import (FFMPEG_OPTS, cookies_available, log,
                           make_search_opts)
@@ -35,9 +34,13 @@ def sanitize_query(raw: str) -> tuple[str | None, str | None]:
     if not q:
         return None, "Nu ai scris nimic."
     if q.startswith('spotify:'):
-        # URI-urile spotify: nu erau prinse de verificarea pe 'spotify.com/' si
-        # plecau la YouTube ca text brut.
-        return f"ytsearch:{q.split(':')[-1].replace('-', ' ')}", None
+        # URI-urile spotify: nu erau prinse de verificarea pe 'spotify.com/', deci
+        # plecau la YouTube ca text brut si botul cauta ID-ul opac. Le aducem la
+        # forma web, ca sa treaca prin acelasi resolver ca linkurile normale.
+        parts = [part for part in q.split(':') if part]
+        if len(parts) >= 3:
+            return f"https://open.spotify.com/{parts[1]}/{parts[2]}", None
+        return None, "Link Spotify pe care nu il pot citi."
     # Verificam SCHEMA, nu prezenta lui '://': 'data:audio/mpeg;base64,...' si
     # 'javascript:' nu au '://' si treceau ca text de cautare.
     scheme_match = re.match(r'^([a-zA-Z][a-zA-Z0-9+.\-]*):', q)
@@ -78,26 +81,34 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                            delete_after=10)
         return None
 
-    async def _resolve_platform_url(query: str) -> str:
-        for platform in ['open.spotify.com/', 'spotify:', 'deezer.com/']:
-            if platform in query:
-                try:
-                    opts = {'quiet': True, 'no_warnings': True, 'extract_flat': True}
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = await bot.loop.run_in_executor(
-                            None, lambda: ydl.extract_info(query, download=False)
-                        )
-                        title = info.get('title', '')
-                        artist = info.get('artist') or info.get('uploader', '')
-                        if title:
-                            search = f"{artist} {title}".strip() if artist else title
-                            log.info(f"Platform resolved: {search}")
-                            return f"ytsearch:{search}"
-                except Exception as e:
-                    log.debug(f"Platform resolve esuat: {e}")
-                    parts = query.split('/')
-                    return f"ytsearch:{parts[-1].split('?')[0].replace('-', ' ')}"
-        return query
+    async def _resolve_platform_url(query: str):
+        """Spotify/Deezer -> text de cautare. None cand nu putem citi linkul.
+
+        yt-dlp nu are extractor pentru Spotify sau Deezer (verificat pe build-ul
+        instalat: nimic care sa se potriveasca), deci totul depinde de un scrape
+        generic al paginii. Cand acela eșua, varianta veche cauta pe YouTube
+        ULTIMUL segment din URL — un ID opac precum "4cOdK2wGLETKBW3PvgPWqT" —
+        si reda vesel orice rezultat, fara eroare pentru utilizator si fara nicio
+        linie de log la nivel INFO.
+        """
+        if not any(p in query for p in ('spotify.com/', 'deezer.com/')):
+            return query
+        try:
+            info = await ytdlp.extract(
+                {'quiet': True, 'no_warnings': True, 'extract_flat': True,
+                 'socket_timeout': 15},
+                query, loop=bot.loop, stage='platform_resolve')
+        except Exception as e:
+            log.warning(f"Nu am putut citi linkul de platforma: {e}")
+            return None
+        title = (info or {}).get('title') or ''
+        artist = (info or {}).get('artist') or (info or {}).get('uploader') or ''
+        if not title:
+            log.warning("Linkul de platforma nu a intors niciun titlu")
+            return None
+        search = f"{artist} {title}".strip() if artist else title
+        log.info(f"Link de platforma rezolvat ca: {search}")
+        return search
 
     @bot.command()
     async def play(ctx, *, search):
@@ -114,7 +125,12 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         cancel_timeout(ctx)
 
         if any(p in search for p in ['spotify.com/', 'deezer.com/']):
-            search = await _resolve_platform_url(search)
+            resolved = await _resolve_platform_url(search)
+            if resolved is None:
+                return await ctx.send(
+                    "Nu pot citi linkul de Spotify/Deezer. Scrie artistul si titlul.",
+                    delete_after=15)
+            search = resolved
 
         if 'list=' in search and 'youtube.com' in search:
             ydl_opts_pl = make_search_opts(
@@ -197,7 +213,12 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         state = get_state(ctx.guild.id)
         cancel_timeout(ctx)
         if any(p in search for p in ['spotify.com/', 'deezer.com/']):
-            search = await _resolve_platform_url(search)
+            resolved = await _resolve_platform_url(search)
+            if resolved is None:
+                return await ctx.send(
+                    "Nu pot citi linkul de Spotify/Deezer. Scrie artistul si titlul.",
+                    delete_after=15)
+            search = resolved
         state.skip_request = True
         await process_play(ctx, search)
 

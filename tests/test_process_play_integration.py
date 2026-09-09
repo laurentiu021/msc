@@ -77,6 +77,14 @@ class _Harness:
 
         async def fake_extract(opts, query, download=False, loop=None, stage=''):
             self.extract_calls.append((stage, dict(opts)))
+            if stage == 'search_flat':
+                # Cautarea de text e acum FLAT: doar metadata de lista, apoi o
+                # singura extractie completa a videoclipului ales.
+                return {'entries': [{
+                    'id': 'vid123', 'title': 'Artistul - Piesa', 'duration': 200,
+                    'live_status': None,
+                    'url': 'https://www.youtube.com/watch?v=vid123',
+                }]}
             return {
                 'id': 'vid123',
                 'title': 'Artistul - Piesa',

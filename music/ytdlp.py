@@ -11,6 +11,7 @@ cererile intre ele. Doua extractii lente puteau pleca la 1.2s una de alta si
 rula complet suprapus.
 """
 import asyncio
+import concurrent.futures
 import random
 import time
 
@@ -22,6 +23,13 @@ from music.config import (YT_REQUEST_MAX_INTERVAL_SEC,
 _LOCK = asyncio.Lock()
 _NEXT_ALLOWED_AT = 0.0
 
+# Executor dedicat. asyncio.wait_for anuleaza doar AȘTEPTAREA, nu thread-ul:
+# la timeout cererea continua sa ruleze in fundal si abia yt-dlp o abandoneaza.
+# Pe executorul implicit, cateva astfel de thread-uri ar consuma toate sloturile
+# si ar infometa orice alt run_in_executor, inclusiv din discord.py.
+_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix='ytdlp')
+
 # Plafon absolut per cerere. socket_timeout acopera doar inactivitatea pe socket:
 # un stream care curge foarte lent, sau un manifest live, putea tine un thread
 # din executor ocupat pe viata procesului, fara nimic in loguri.
@@ -29,22 +37,34 @@ EXTRACT_TIMEOUT_SEC = 90
 DOWNLOAD_TIMEOUT_SEC = 240
 
 
+def _interval() -> tuple[float, float]:
+    low = max(0.0, YT_REQUEST_MIN_INTERVAL_SEC)
+    return low, max(low, YT_REQUEST_MAX_INTERVAL_SEC)
+
+
 async def wait_for_slot():
-    """Asteapta pana e permisa urmatoarea cerere catre YouTube."""
+    """Asteapta si REZERVA slotul, tot sub lock.
+
+    Rezervarea trebuie sa se intample cat timp tinem lock-ul. Cand se facea doar
+    dupa terminarea cererii, doi apelanti concurenti citeau amandoi un
+    _NEXT_ALLOWED_AT deja trecut, nu așteptau nimic si plecau simultan — exact
+    rafala pe care throttle-ul exista sa o previna.
+    """
     global _NEXT_ALLOWED_AT
     async with _LOCK:
         wait_for = _NEXT_ALLOWED_AT - time.time()
         if wait_for > 0:
             log.info(f"YouTube throttling active: waiting {wait_for:.1f}s")
             await asyncio.sleep(wait_for)
+        low, high = _interval()
+        _NEXT_ALLOWED_AT = time.time() + random.uniform(low, high)
 
 
 def _reserve_next_slot():
-    """Stabileste momentul urmatoarei cereri, masurat de la SFARSITUL acesteia."""
+    """Prelungeste pauza dupa o cerere lunga, fara sa o scurteze niciodata."""
     global _NEXT_ALLOWED_AT
-    low = max(0.0, YT_REQUEST_MIN_INTERVAL_SEC)
-    high = max(low, YT_REQUEST_MAX_INTERVAL_SEC)
-    _NEXT_ALLOWED_AT = time.time() + random.uniform(low, high)
+    low, _ = _interval()
+    _NEXT_ALLOWED_AT = max(_NEXT_ALLOWED_AT, time.time() + low)
 
 
 async def extract(opts: dict, query: str, *, download: bool = False,
@@ -62,7 +82,7 @@ async def extract(opts: dict, query: str, *, download: bool = False,
         with yt_dlp.YoutubeDL(opts) as ydl:
             return await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, lambda: ydl.extract_info(query, download=download)
+                    _EXECUTOR, lambda: ydl.extract_info(query, download=download)
                 ),
                 timeout=budget,
             )
@@ -89,7 +109,7 @@ async def extract_and_prepare_filename(opts: dict, query: str, *, loop=None,
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, lambda: ydl.extract_info(query, download=True)
+                    _EXECUTOR, lambda: ydl.extract_info(query, download=True)
                 ),
                 timeout=DOWNLOAD_TIMEOUT_SEC,
             )

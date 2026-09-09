@@ -53,10 +53,23 @@ def test_non_http_schemes_are_rejected():
         assert reason
 
 
-def test_spotify_uri_becomes_a_search():
+def test_spotify_uri_becomes_a_resolvable_web_url():
+    """Nu o cautare pe ID-ul opac.
+
+    Vechea varianta intorcea ytsearch:<id>, deci botul cauta pe YouTube
+    "4cOdK2wGLETKBW3PvgPWqT" si reda orice rezultat, fara eroare. Acum URI-ul
+    devine forma web, care trece prin resolver-ul de platforma.
+    """
     query, reason = sanitize_query('spotify:track:4cOdK2wGLETKBW3PvgPWqT')
     assert reason is None
-    assert query.startswith('ytsearch:')
+    assert query == 'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT', query
+    assert not query.startswith('ytsearch:')
+
+
+def test_malformed_spotify_uri_is_rejected_not_guessed():
+    query, reason = sanitize_query('spotify:bad')
+    assert query is None
+    assert reason
 
 
 def test_empty_input_is_rejected():

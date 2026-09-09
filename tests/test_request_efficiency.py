@@ -67,6 +67,21 @@ def test_search_asks_for_several_candidates():
     assert int(ds.replace('ytsearch', '')) >= 3
 
 
+def test_text_search_is_flat_then_one_full_extraction():
+    """ytsearchN fara extract_flat extrage COMPLET toate rezultatele.
+
+    Masurat: cu opts-urile reale ale repo-ului, ytsearch5 producea cinci
+    extractii complete, adica ~20 de cereri catre YouTube pentru un !play, toate
+    in acelasi slot de throttle si acelasi buget de 90s.
+    """
+    src = inspect.getsource(player._resolve_query_to_url)
+    assert 'extract_flat=True' in src, 'cautarea de text nu mai e flat'
+    # si nu mai luam orbeste primul rezultat cand niciunul nu trece filtrul
+    assert 'is_clean' in src
+    code = ''.join(line.split('#')[0] for line in src.splitlines())
+    assert 'entries[0]' not in code, 'inca ia orbeste primul rezultat'
+
+
 def test_format_list_is_short_and_without_duplicates():
     src = inspect.getsource(player.process_play)
     block = src.split('formats_to_try = [')[1].split(']')[0]
@@ -85,7 +100,7 @@ def test_every_ytdlp_call_goes_through_the_shared_throttle():
     """Nicio cerere YouTube nu are voie sa cheme yt_dlp.YoutubeDL direct."""
     offenders = []
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for name in ('player.py', 'autoplay.py'):
+    for name in ('player.py', 'autoplay.py', 'commands.py'):
         path = os.path.join(root, 'music', name)
         body = open(path, encoding='utf-8').read()
         if 'yt_dlp.YoutubeDL(' in body:
@@ -93,13 +108,32 @@ def test_every_ytdlp_call_goes_through_the_shared_throttle():
     assert not offenders, f'ocolesc throttle-ul: {offenders}'
 
 
-def test_throttle_measures_from_the_end_of_the_request():
-    """Slotul era rezervat inainte de cerere, deci nu distanta cererile intre ele."""
-    src = inspect.getsource(ytdlp.extract)
-    reserve = src.index('_reserve_next_slot')
-    wait = src.index('wait_for_slot')
-    assert wait < reserve, 'rezervarea trebuie sa fie dupa cerere, in finally'
-    assert 'finally' in src
+def test_throttle_reserves_the_slot_under_the_lock():
+    """Doi apelanti concurenti nu au voie sa plece impreuna.
+
+    Cand rezervarea se facea numai dupa terminarea cererii, amandoi citeau un
+    _NEXT_ALLOWED_AT deja trecut, nu așteptau nimic si porneau simultan — exact
+    rafala pe care throttle-ul exista sa o previna.
+    """
+    src = inspect.getsource(ytdlp.wait_for_slot)
+    assert 'async with _LOCK' in src
+    assert '_NEXT_ALLOWED_AT = time.time()' in src, (
+        'rezervarea trebuie sa se intample sub lock, in wait_for_slot')
+    extend = inspect.getsource(ytdlp._reserve_next_slot)
+    assert 'max(' in extend, 'prelungirea de dupa cerere nu are voie sa scurteze pauza'
+    assert 'finally' in inspect.getsource(ytdlp.extract)
+
+
+def test_ytdlp_uses_a_bounded_dedicated_executor():
+    """asyncio.wait_for anuleaza aȘteptarea, nu thread-ul: el continua sa ruleze."""
+    assert ytdlp._EXECUTOR is not None
+    assert ytdlp._EXECUTOR._max_workers <= 8
+    for fn in (ytdlp.extract, ytdlp.extract_and_prepare_filename):
+        src = inspect.getsource(fn)
+        assert '_EXECUTOR' in src, (
+            f'{fn.__name__} nu foloseste executorul dedicat, ci pe cel implicit')
+        assert 'None, lambda' not in src, (
+            f'{fn.__name__} inca trimite catre executorul implicit')
 
 
 def test_autoplay_seeds_from_the_current_track():

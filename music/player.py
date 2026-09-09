@@ -3,7 +3,7 @@ import discord
 import asyncio
 import os
 import time
-from music.config import FFMPEG_OPTS, log
+from music.config import FFMPEG_OPTS, MAX_TRACK_SECONDS, log
 from music.config import (cookies_available, count_real_formats,
                           has_real_formats, make_download_opts,
                           make_search_opts, yt_client_args, WEB_CLIENTS)
@@ -26,6 +26,10 @@ GUEST_CHAIN = [(WEB_CLIENTS, False)]
 BREAKER_COOLDOWN_SEC = 900
 
 
+class PlaybackInterrupted(Exception):
+    """Redarea a fost oprita intentionat (stop, deconectare), nu a eșuat."""
+
+
 def _scrub(text) -> str:
     """Scoate URL-ul de proxy din textul erorii inainte sa ajunga pe Discord.
 
@@ -40,6 +44,54 @@ def _scrub(text) -> str:
         if host and host != proxy:
             out = out.replace(host, '<proxy>')
     return out
+
+
+async def _resolve_query_to_url(state, query: str) -> str:
+    """Transforma o interogare in URL-ul unui videoclip, cat mai ieftin posibil.
+
+    Un URL trece direct. Un text devine o cautare FLAT: yt-dlp intoarce doar
+    metadata de lista (id, titlu, durata, live_status), fara sa atinga pagina si
+    API-ul player pentru fiecare rezultat. Filtram apoi cu is_clean si extragem
+    complet exact un videoclip.
+
+    Inainte, `default_search='ytsearch5'` fara extract_flat extragea integral
+    toate cele cinci rezultate — aproximativ 20 de cereri pentru un singur
+    !play, si toate in interiorul unui singur slot de throttle si al unui singur
+    buget de 90s.
+    """
+    if str(query).startswith(('http://', 'https://')):
+        return query
+
+    opts = make_search_opts(
+        with_cookies=cookies_available(),
+        extract_flat=True,
+        extractor_args=yt_client_args(*WEB_CLIENTS),
+    )
+    info = await _yt_extract_info(opts, query, download=False, stage='search_flat')
+    entries = [e for e in (info.get('entries') or []) if e]
+    if not entries:
+        raise ValueError("Nu am gasit niciun rezultat")
+
+    chosen = None
+    for entry in entries:
+        if is_clean(entry.get('title'), entry.get('duration'), state.last_title):
+            chosen = entry
+            break
+        log.info(f"Sarit (filtru): {item_title(entry, 50)} "
+                 f"durata={entry.get('duration')} live={entry.get('live_status')}")
+    if chosen is None:
+        # Niciunul nu trece filtrul. Inainte se lua orbeste entries[0], deci
+        # filtrul nu putea respinge nimic si un live de 3 ore ajungea in redare.
+        raise ValueError(
+            "Toate rezultatele au fost filtrate (live, prea scurte sau prea lungi)")
+
+    log.info(f"Ales din {len(entries)} rezultate: {item_title(chosen, 60)}")
+    url = chosen.get('url') or chosen.get('id')
+    if url and not str(url).startswith('http'):
+        url = f"https://www.youtube.com/watch?v={url}"
+    if not url:
+        raise ValueError("Rezultatul nu are URL")
+    return url
 
 
 def bump_play_generation(state) -> int:
@@ -75,6 +127,8 @@ update_player_ui = None
 start_timeout = None
 cancel_timeout = None
 _loop = None
+
+
 async def _yt_extract_info(ydl_opts, query_or_url, download=False, stage=""):
     """Delegat catre music.ytdlp: un singur throttle pentru tot botul."""
     return await ytdlp.extract(ydl_opts, query_or_url, download=download,
@@ -196,6 +250,8 @@ async def process_play(ctx, query, is_radio=False):
         return
 
     state.is_loading = True
+    state.load_token += 1
+    my_load_token = state.load_token
     failure = None
     filename = None
     formats_to_try = [
@@ -229,6 +285,12 @@ async def process_play(ctx, query, is_radio=False):
             state.preloaded = None
 
         if not reused:
+            # Alegerea piesei se face pe metadata IEFTINA, apoi extragem complet
+            # exact un videoclip. Cu ytsearch5 fara extract_flat, yt-dlp extragea
+            # integral toate cele cinci rezultate: ~20 de cereri catre YouTube
+            # pentru un singur !play, toate intr-un singur slot de throttle.
+            target_url = await _resolve_query_to_url(state, query)
+
             # Cookies primele, pentru ca de pe IP-ul de datacenter al Railway
             # calea de guest ajunge la 429 pe webpage -> lipsa Visitor Data ->
             # niciun GVS PO Token -> zero formate redabile. Guest ramane in
@@ -246,31 +308,33 @@ async def process_play(ctx, query, is_radio=False):
                 search_opts = make_search_opts(
                     with_cookies=use_cookies,
                     extractor_args=yt_client_args(*clients),
+                    default_search=None,      # avem deja un URL
                 )
 
                 try:
                     info = await _yt_extract_info(
-                        search_opts, query, download=False, stage=f"search_{label}"
+                        search_opts, target_url, download=False,
+                        stage=f"extract_{label}"
                     )
-                    entries = info.get('entries', [info])
-                    selected = None
-                    for entry in entries:
-                        fmts = entry.get('formats', [])
-                        real = count_real_formats(fmts)
-                        log.info(f"[{label}|cookies={use_cookies}] Video {entry.get('id','?')}: {len(fmts)} formats ({real} real)")
-                        if is_clean(entry.get('title'), entry.get('duration'), state.last_title):
-                            selected = entry
-                            break
-                    if not selected:
-                        selected = entries[0]
-                    if has_real_formats(selected.get('formats', [])):
-                        log.info(f"Found real formats with client={label}, cookies={use_cookies}")
+                    entries = info.get('entries') or [info]
+                    candidate = entries[0] if entries else None
+                    if not candidate:
+                        continue
+                    fmts = candidate.get('formats', [])
+                    real = count_real_formats(fmts)
+                    log.info(f"[{label}|cookies={use_cookies}] Video "
+                             f"{candidate.get('id','?')}: {len(fmts)} formats "
+                             f"({real} redabile)")
+                    selected = candidate
+                    if has_real_formats(fmts):
+                        log.info(f"Formate redabile cu client={label}, "
+                                 f"cookies={use_cookies}")
                         successful_client = clients
                         successful_cookies = use_cookies
                         break
                 except Exception as e:
                     state.last_raw_error = str(e)[:600]
-                    log.warning(f"Search failed with client={label}: {e}")
+                    log.warning(f"Extractia a eșuat cu client={label}: {e}")
 
             if not selected:
                 raise ValueError("Nu am gasit niciun rezultat")
@@ -352,6 +416,15 @@ async def process_play(ctx, query, is_radio=False):
                         log.warning(f"Download esuat (cookies={use_cookies_dl}, fmt='{fmt}'): {e}")
 
         if not filename or not os.path.exists(filename):
+            # Daca nicio incercare n-a lasat un motiv, cauza cea mai probabila e
+            # match_filter: yt-dlp raporteaza respingerea doar prin to_screen,
+            # care nu scoate nimic la quiet=True, si nu ridica excepție.
+            if not state.last_raw_error:
+                state.last_raw_error = (
+                    "yt-dlp nu a scris fisierul si nu a raportat nicio eroare; "
+                    f"probabil respins de filtru (live sau durata peste "
+                    f"{MAX_TRACK_SECONDS}s)")
+                log.warning(state.last_raw_error)
             raise FileNotFoundError("Niciun format nu a reusit descarcarea")
 
         state.last_url = web_url
@@ -367,16 +440,28 @@ async def process_play(ctx, query, is_radio=False):
             state.history.pop(0)
 
         if not vc.is_connected():
-            raise ConnectionError("Voice deconectat in timpul descarcarii.")
-        if vc.is_playing():
-            # Oprire deliberata: invalidam callback-ul piesei vechi INAINTE de
+            raise PlaybackInterrupted("Voice deconectat in timpul descarcarii.")
+        if vc.is_playing() or vc.is_paused():
+            # Oprire deliberata. Invalidam callback-ul piesei vechi INAINTE de
             # stop, altfel el avanseaza coada si sterge fisierul pe care tocmai
             # il pornim (bug-ul de la !nplay).
+            #
+            # `is_paused()` conteaza la fel de mult ca `is_playing()`:
+            # discord.py raporteaza is_playing()==False cat timp e pauzat, iar
+            # vc.play() suprascrie _player fara sa se plânga, lasand thread-ul
+            # vechi parcat in _resumed.wait() cu procesul lui ffmpeg viu pana la
+            # oprirea containerului.
+            displaced = state.current_file
             bump_play_generation(state)
             vc.stop()
             await asyncio.sleep(0.3)
+            # Callback-ul invechit nu mai curata nimic, deci fisierul inlocuit
+            # e responsabilitatea noastra. Nu il stergem daca e chiar cel pe
+            # care urmeaza sa il redam (loop / acelasi URL).
+            if displaced and displaced != filename:
+                cleanup_file(displaced, _loop)
         if not vc.is_connected():
-            raise ConnectionError("Voice deconectat dupa stop.")
+            raise PlaybackInterrupted("Voice deconectat dupa stop.")
 
         state.last_start_time = time.time()
         state.current_file = filename
@@ -400,6 +485,9 @@ async def process_play(ctx, query, is_radio=False):
 
         state._consecutive_errors = 0
         state.breaker_until = 0.0
+        # Altfel eroarea unei piese de acum o ora era raportata ca motiv pentru
+        # urmatoarea care eșua fara sa spuna nimic.
+        state.last_raw_error = None
         state._last_notified_error = None
         await update_player_ui(ctx, send_new=True)
 
@@ -431,10 +519,12 @@ async def process_play(ctx, query, is_radio=False):
         # pentru totdeauna si botul tacea, conectat, la orice !play.
         cleanup_file(filename, _loop)
         raise
-    except ConnectionError as e:
+    except PlaybackInterrupted as e:
         # !stop, deconectare sau mutare din canal in timpul descarcarii. Nu e o
         # defectiune: inainte urca numaratoarea de erori spre intrerupator si ii
         # arunca utilizatorului "Eroare necunoscuta" pentru propria lui comanda.
+        # Tip propriu, nu ConnectionError: acela acopera si erorile reale de
+        # retea, care trebuie sa rămâna vizibile.
         log.info(f"Redare intrerupta: {e}")
         cleanup_file(filename, _loop)
     except Exception as e:
@@ -443,7 +533,10 @@ async def process_play(ctx, query, is_radio=False):
         state._consecutive_errors += 1
         failure = e
     finally:
-        state.is_loading = False
+        # Doar ultimul proprietar elibereaza steagul: altfel un process_play
+        # care se termina ar debloca un altul aflat inca in lucru.
+        if state.load_token == my_load_token:
+            state.is_loading = False
 
     if failure is None:
         return

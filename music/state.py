@@ -39,6 +39,11 @@ class GuildState:
         # callback-ul vechi vede alt numar si iese fara sa faca nimic.
         self.play_generation = 0
 
+        # Cine deține dreptul de a elibera is_loading. Cand doua process_play se
+        # suprapun, finally-ul primului stergea steagul pus de al doilea, si o
+        # comanda noua putea porni o a treia redare in paralel.
+        self.load_token = 0
+
         # Pauza dupa 5 erori consecutive. Fara ea, timer-ul de 24/7 reactiva
         # autoplay la fiecare 60s si intrerupatorul nu putea tine niciodata.
         self.breaker_until = 0.0
