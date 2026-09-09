@@ -73,39 +73,52 @@ except urllib.error.HTTPError as e:
 except Exception as e:
     log.warning(f"PO Token server NOT responding: {e}")
 
-# Test yt-dlp (rapid, cu timeout) — prin SOCKS5 poate bloca minute dacă proxy-ul e lent; nu întârzie niciodată login-ul Discord.
+# Proba yt-dlp la pornire: acum OPT-IN, nu opt-out.
+# start.sh isi dezactivase deja proba proprie cu motivul "probe consumes the
+# fresh YouTube session and causes 429 for the bot", iar bot.py facea exact
+# asta la fiecare boot. In plus, `with ThreadPoolExecutor(...)` face
+# shutdown(wait=True) la ieșire, deci timeout-ul de 20s nu limita nimic:
+# boot-ul aștepta oricum extractia intreaga.
 def _ytdlp_startup_probe():
     import yt_dlp
-    from music.config import yt_client_args
+    from music.config import yt_client_args, count_real_formats
     test_opts = {
         'quiet': True, 'no_warnings': True, 'skip_download': True,
         'format': 'best', 'socket_timeout': 8,
-        'extractor_args': yt_client_args('mweb', 'web_safari'),
+        'extractor_args': yt_client_args(*_probe_clients()),
     }
     if _yt_proxy:
         test_opts['proxy'] = _yt_proxy
     with yt_dlp.YoutubeDL(test_opts) as ydl:
-        return ydl.extract_info('https://www.youtube.com/watch?v=dQw4w9WgXcQ', download=False)
+        info = ydl.extract_info('https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+                                download=False)
+    fmts = (info or {}).get('formats', [])
+    return len(fmts), count_real_formats(fmts)
 
-if os.getenv('SKIP_YTDLP_STARTUP_TEST', '').strip().lower() in ('1', 'true', 'yes'):
-    log.info('SKIP_YTDLP_STARTUP_TEST set — skipping yt-dlp probe')
-else:
+
+def _probe_clients():
+    from music.config import WEB_CLIENTS
+    return WEB_CLIENTS
+
+
+if os.getenv('YTDLP_STARTUP_PROBE', '').strip().lower() in ('1', 'true', 'yes'):
+    # Executor nu-l inchidem cu `with`: altfel ieșirea din bloc ar aștepta
+    # thread-ul si timeout-ul de mai jos ar fi decorativ.
+    _probe_ex = ThreadPoolExecutor(max_workers=1)
     try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_ytdlp_startup_probe)
-            info = fut.result(timeout=20)
-        fmts = info.get('formats', []) if info else []
-        real = sum(1 for f in fmts if f.get('acodec', 'none') != 'none')
-        log.info(f"yt-dlp startup test: {len(fmts)} formats ({real} real audio)")
+        total, real = _probe_ex.submit(_ytdlp_startup_probe).result(timeout=20)
+        log.info(f"yt-dlp startup probe: {total} formats ({real} redabile)")
         if real == 0:
-            log.warning("yt-dlp startup test: 0 real formats — YouTube may be blocking this IP")
+            log.warning("yt-dlp startup probe: 0 formate redabile — "
+                        "YouTube blocheaza probabil acest IP")
     except concurrent.futures.TimeoutError:
-        log.warning(
-            "yt-dlp startup test timed out after 20s (often slow/bad proxy). "
-            "Discord will still start; set SKIP_YTDLP_STARTUP_TEST=1 to skip this check."
-        )
+        log.warning("yt-dlp startup probe: timeout dupa 20s, continui oricum")
     except Exception as e:
-        log.warning(f"yt-dlp startup test failed: {e}")
+        log.warning(f"yt-dlp startup probe a esuat: {e}")
+    finally:
+        _probe_ex.shutdown(wait=False)
+else:
+    log.info("yt-dlp startup probe dezactivata (YTDLP_STARTUP_PROBE=1 o activeaza)")
 
 # --- Bot setup ---
 intents = discord.Intents.default()
@@ -122,6 +135,8 @@ bot = commands.Bot(
     # pare mort fiindca nu intra in voice si nu raspunde nimic.
     case_insensitive=True,
 )
+
+_tree_synced = False
 
 # --- Music engine init ---
 import music.player as player
@@ -256,18 +271,23 @@ async def on_voice_state_update(member, before, after):
                     await vc.disconnect()
 
 
+@bot.check
+async def _guild_only(ctx):
+    """Toate comenzile dereferentiaza ctx.guild.id, deci in DM crapau."""
+    if ctx.guild is None:
+        raise commands.NoPrivateMessage()
+    return True
+
+
 @bot.event
 async def on_message(message):
     """Obligatoriu: dacă suprascrii on_message, trebuie apelat process_commands."""
     if not message.author.bot and message.guild:
         raw = message.content or ""
         if raw.lstrip().startswith("!"):
-            log.info(
-                "Heard prefix message: author=%s content_len=%s preview=%r",
-                message.author,
-                len(raw),
-                raw[:120],
-            )
+            # Fara autor si fara continut: logul asta a ajuns odata in git
+            # public cu handle-uri de membri si tot ce au ascultat.
+            log.info("Heard prefix message: content_len=%s", len(raw))
     await bot.process_commands(message)
 
 
@@ -286,11 +306,14 @@ async def on_ready():
         "Pentru comenzi cu ! în server: Bot > Privileged Gateway Intents > "
         "MESSAGE CONTENT INTENT = ON în Developer Portal."
     )
-    try:
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync()
-    except Exception:
-        pass
+    global _tree_synced
+    if not _tree_synced:
+        try:
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync()
+            _tree_synced = True
+        except discord.HTTPException as e:
+            log.warning(f"Sync arbore comenzi esuat: {e}")
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.listening, name="!mhelp"
@@ -301,18 +324,51 @@ async def on_ready():
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
-        # Logat, nu ignorat: altfel o comanda greasita e indistinguibila de un bot picat.
-        log.info("Unknown command: %r", (ctx.message.content or "")[:80])
+        # Logat, nu ignorat: altfel o comanda greasita e indistinguibila de un
+        # bot picat. Doar numele comenzii, nu continutul mesajului.
+        attempted = (ctx.message.content or '').lstrip('!').split(' ')[0][:32]
+        log.info("Unknown command: %r", attempted)
         return
+    if isinstance(error, commands.MissingRequiredArgument):
+        return await _reply(ctx, f"Lipseste un argument: `{error.param.name}`. "
+                                 f"Vezi `!mhelp`.")
+    if isinstance(error, commands.BadArgument):
+        return await _reply(ctx, "Argument invalid. Vezi `!mhelp`.")
+    if isinstance(error, commands.NoPrivateMessage):
+        return await _reply(ctx, "Comenzile merg doar pe server, nu in DM.")
+    if isinstance(error, commands.CommandInvokeError):
+        log.error(f"Command error '{ctx.command}': {error.original}", exc_info=error.original)
+        return await _reply(ctx, "Ceva a crapat la comanda asta. Verifica logurile.")
     log.error(f"Command error '{ctx.command}': {error}")
+    await _reply(ctx, "Nu am putut executa comanda.")
+
+
+async def _reply(ctx, text):
+    try:
+        await ctx.send(text, delete_after=15)
+    except discord.HTTPException:
+        pass
 
 
 # --- Entry point ---
 class _Health(BaseHTTPRequestHandler):
+    server_version = 'gogu'          # fara banner cu versiunea de Python
+    sys_version = ''
+    protocol_version = 'HTTP/1.1'
+    timeout = 10                     # o conexiune inactiva nu mai blocheaza thread-ul
+
     def do_GET(self):
-        self.send_response(200)
+        if self.path.rstrip('/') not in ('', '/health'):
+            self.send_error(404)
+            return
+        ready = bool(bot and bot.is_ready() and not bot.is_closed())
+        body = b'ok' if ready else b'starting'
+        self.send_response(200 if ready else 503)
+        self.send_header('Content-Type', 'text/plain')
+        self.send_header('Content-Length', str(len(body)))
         self.end_headers()
-        self.wfile.write(b"ok")
+        self.wfile.write(body)
+
     def log_message(self, *a):
         pass
 

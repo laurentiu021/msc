@@ -13,7 +13,7 @@ from music.config import (
     YT_REQUEST_MAX_INTERVAL_SEC,
 )
 from music.state import get_state
-from music.utils import is_clean, cleanup_file
+from music.utils import is_clean, cleanup_file, item_title
 from music.autoplay import prefill_autoplay_queue
 from music.errors import diagnose_error
 from music import youtube_api as yt_api
@@ -149,7 +149,7 @@ async def _play_next_async(ctx):
                 next_item = state.queue.pop(0)
 
         if next_item:
-            log.info(f"play_next: {next_item['title'][:40]}")
+            log.info(f"play_next: {item_title(next_item, 40)}")
             await process_play(ctx, next_item['query'], is_radio=False)
             if state.autoplay and len(state.queue) < 6 and state.last_url:
                 try:

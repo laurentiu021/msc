@@ -5,10 +5,48 @@ import asyncio
 import os
 import time
 import random
+import re
+from urllib.parse import urlparse
 from music.config import YDL_OPTS_SEARCH, FFMPEG_OPTS, log
 from music.state import get_state
 import music.player as player_mod
-from music.utils import safe_delete, format_time, cleanup_file
+
+# Doar aceste host-uri sunt acceptate ca URL. Fara allowlist, orice string cu
+# schema ajungea la extractorul generic al yt-dlp: el urmarea URL-ul, iar un
+# raspuns application/x-mpegurl devenea formate HLS reale pe care botul le reda.
+# Cererea duce si cookiefile-ul, deci un Set-Cookie ostil ajungea pe volum.
+ALLOWED_HOSTS = {
+    'youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com',
+    'youtu.be', 'www.youtu.be',
+    'open.spotify.com', 'spotify.com',
+    'deezer.com', 'www.deezer.com', 'link.deezer.com',
+}
+
+
+def sanitize_query(raw: str) -> tuple[str | None, str | None]:
+    """(interogare, motiv_respingere). Ce nu e URL devine o cautare pe YouTube."""
+    q = (raw or '').strip()
+    if not q:
+        return None, "Nu ai scris nimic."
+    if q.startswith('spotify:'):
+        # URI-urile spotify: nu erau prinse de verificarea pe 'spotify.com/' si
+        # plecau la YouTube ca text brut.
+        return f"ytsearch:{q.split(':')[-1].replace('-', ' ')}", None
+    # Verificam SCHEMA, nu prezenta lui '://': 'data:audio/mpeg;base64,...' si
+    # 'javascript:' nu au '://' si treceau ca text de cautare.
+    scheme_match = re.match(r'^([a-zA-Z][a-zA-Z0-9+.\-]*):', q)
+    if not scheme_match:
+        return q, None
+    scheme = scheme_match.group(1).lower()
+    if scheme not in ('http', 'https'):
+        return None, f"Schema `{scheme}` nu e permisa."
+    parsed = urlparse(q)
+    host = (parsed.hostname or '').lower()
+    if host not in ALLOWED_HOSTS:
+        return None, (f"Host neacceptat: `{host}`. "
+                      f"Accept doar YouTube, Spotify si Deezer.")
+    return q, None
+from music.utils import safe_delete, format_time, cleanup_file, item_title
 from music.autoplay import prefill_autoplay_queue
 
 
@@ -39,6 +77,9 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
     @bot.command()
     async def play(ctx, *, search):
         await safe_delete(ctx.message)
+        search, reason = sanitize_query(search)
+        if reason:
+            return await ctx.send(reason, delete_after=10)
         if not ctx.author.voice:
             return await ctx.send("Intra pe voce!", delete_after=5)
         vc = ctx.voice_client or await ctx.author.voice.channel.connect()
@@ -66,17 +107,21 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                         if url:
                             if not url.startswith('http'):
                                 url = f"https://www.youtube.com/watch?v={url}"
-                            state.queue.append({'query': url, 'title': e.get('title', 'Necunoscut')})
+                            state.queue.append({'query': url, 'title': e.get('title') or 'Necunoscut'})
                     first_url = first.get('url') or first.get('id')
                     if first_url and not first_url.startswith('http'):
                         first_url = f"https://www.youtube.com/watch?v={first_url}"
                     if vc.is_playing() or vc.is_paused() or state.is_loading:
-                        state.queue.insert(0, {'query': first_url, 'title': first.get('title', 'Necunoscut')})
+                        state.queue.insert(0, {'query': first_url, 'title': first.get('title') or 'Necunoscut'})
                         await update_player_ui(ctx)
                     else:
                         await process_play(ctx, first_url)
             except Exception as e:
                 log.error(f"Eroare playlist: {e}")
+                state.last_raw_error = str(e)[:600]
+                await ctx.send("Nu am putut citi playlist-ul.", delete_after=15)
+                if not (vc.is_playing() or vc.is_paused()):
+                    start_timeout(ctx)
             return
 
         if vc.is_playing() or vc.is_paused() or state.is_loading:
@@ -113,6 +158,9 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
     @bot.command()
     async def nplay(ctx, *, search):
         await safe_delete(ctx.message)
+        search, reason = sanitize_query(search)
+        if reason:
+            return await ctx.send(reason, delete_after=10)
         if not ctx.author.voice: return await ctx.send("Intra pe voce!", delete_after=5)
         vc = ctx.voice_client or await ctx.author.voice.channel.connect()
         state = get_state(ctx.guild.id)
@@ -153,7 +201,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         if index < 1 or index > len(state.queue):
             return await ctx.send(f"Index invalid (1-{len(state.queue)}).", delete_after=5)
         removed = state.queue.pop(index - 1)
-        await ctx.send(f"Scos: {removed['title'][:50]}", delete_after=5)
+        await ctx.send(f"Scos: {item_title(removed, 50)}", delete_after=5)
         await update_player_ui(ctx)
 
     @bot.command()
@@ -164,7 +212,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             return await ctx.send(f"Index invalid (1-{len(state.queue)}).", delete_after=5)
         item = state.queue.pop(from_idx - 1)
         state.queue.insert(to_idx - 1, item)
-        await ctx.send(f"Mutat '{item['title'][:40]}' -> #{to_idx}.", delete_after=5)
+        await ctx.send(f"Mutat '{item_title(item, 40)}' -> #{to_idx}.", delete_after=5)
         await update_player_ui(ctx)
 
     @bot.command()

@@ -2,11 +2,30 @@
 import discord
 from music.config import log
 from music.state import get_state
-from music.utils import safe_delete
+from music.utils import safe_delete, item_title
 from music.autoplay import prefill_autoplay_queue
 
 
 class MusicControlView(discord.ui.View):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Doar cine e in acelasi canal de voce poate comanda redarea.
+
+        Inainte, orice membru al serverului putea apasa Stop pe sesiunea
+        altcuiva, din orice canal.
+        """
+        vc = self.ctx.voice_client
+        if not vc or not vc.channel:
+            return True
+        author_voice = getattr(interaction.user, 'voice', None)
+        if author_voice and author_voice.channel == vc.channel:
+            return True
+        try:
+            await interaction.response.send_message(
+                "Trebuie sa fii in canalul de voce al botului.", ephemeral=True)
+        except discord.HTTPException:
+            pass
+        return False
+
     def __init__(self, ctx):
         super().__init__(timeout=None)
         self.ctx = ctx
@@ -43,7 +62,7 @@ class MusicControlView(discord.ui.View):
             options = []
             for i, item in enumerate(state.queue[:25]):
                 options.append(discord.SelectOption(
-                    label=f"{i+1}. {item['title'][:95]}",
+                    label=f"{i+1}. {item_title(item, 95)}",
                     value=str(i),
                 ))
             select = discord.ui.Select(

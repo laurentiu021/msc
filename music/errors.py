@@ -9,14 +9,32 @@ def diagnose_error(error_str: str) -> tuple[str, str]:
     """
     e = str(error_str).lower()
 
-    if "sign in to confirm" in e or "cookies" in e:
+    # Ordinea conteaza. "sign in to confirm" apare si la age gate ("confirm your
+    # age"), deci verificarea de varsta trebuie sa fie PRIMA, altfel era mereu
+    # umbrita si raporta greșit cookies expirate.
+    if "confirm your age" in e or "age-restricted" in e or "age restricted" in e:
+        return ("age_gate", (
+            "🔞 **Video-ul cere verificare de varsta.**\n"
+            "YouTube nu il lasa fara cookies de cont.\n"
+            "➡️ Reinnoieste cookies-urile pe Railway (la fel ca la eroarea de cookies)."
+        ))
+
+    # Fraze specifice, nu simplul cuvant "cookies": acela aparea si in propriile
+    # noastre mesaje si in orice text de ajutor de la yt-dlp, deci prindea erori
+    # care n-aveau nicio legatura cu autentificarea.
+    if ("not a bot" in e
+            or "cookies are no longer valid" in e
+            or "cookies have been rotated" in e
+            or "use --cookies" in e
+            or "login required" in e
+            or "private video" in e and "cookies" in e):
         return ("cookies", (
             "🍪 **Cookies YouTube expirate!**\n"
             "YouTube crede ca sunt bot si cere autentificare.\n"
             "➡️ Trebuie sa reinnoiesti cookies-urile:\n"
             "1. Exporta cookies din browser (extensia *Get cookies.txt LOCALLY*)\n"
             "2. Intra pe Railway → Variables → `YT_COOKIES_CONTENT`\n"
-            "3. Lipeste continutul nou si da Redeploy"
+            "3. Lipeste continutul nou (se aplica la restart, fara redeploy manual)"
         ))
 
     if "http error 429" in e or "too many requests" in e or "rate limit" in e:
@@ -26,17 +44,16 @@ def diagnose_error(error_str: str) -> tuple[str, str]:
             "➡️ Asteapta cateva minute si incearca din nou."
         ))
 
-    if "video unavailable" in e or "is not available" in e:
+    # "is not available" singur prindea si "Requested format is not available",
+    # care e o problema de formate, nu un video sters.
+    if ("video unavailable" in e
+            or "this video is not available" in e
+            or "not made this video available" in e
+            or "video has been removed" in e
+            or "is private" in e):
         return ("unavailable", (
             "🚫 **Video-ul nu e disponibil.**\n"
             "Poate fi sters, privat, sau blocat in regiunea serverului."
-        ))
-
-    if "age" in e and ("confirm" in e or "verify" in e or "gate" in e):
-        return ("age_gate", (
-            "🔞 **Video-ul cere verificare de varsta.**\n"
-            "YouTube nu il lasa fara cookies de cont.\n"
-            "➡️ Reinnoieste cookies-urile pe Railway (la fel ca la eroarea de cookies)."
         ))
 
     if "no video formats" in e or "requested format" in e:
@@ -47,7 +64,7 @@ def diagnose_error(error_str: str) -> tuple[str, str]:
             "Verifica logurile pe Railway."
         ))
 
-    if "po token" in e or "403" in e or "forbidden" in e:
+    if "po token" in e or "http error 403" in e or "403: forbidden" in e:
         return ("po_token", (
             "🔑 **Eroare PO Token / Acces interzis (403).**\n"
             "YouTube a blocat cererea. PO Token server-ul poate fi cazut.\n"
@@ -55,14 +72,16 @@ def diagnose_error(error_str: str) -> tuple[str, str]:
             "In loguri cauta `[STARTUP] PO Token server running`."
         ))
 
-    if "urlopen error" in e or "timed out" in e or "connection" in e:
+    if ("urlopen error" in e or "timed out" in e or "timeout" in e
+            or "connection refused" in e or "connection reset" in e
+            or "temporary failure in name resolution" in e):
         return ("network", (
             "🌐 **Eroare de retea.**\n"
             "Serverul nu poate ajunge la YouTube momentan.\n"
             "➡️ De obicei se rezolva singur. Daca persista, verifica statusul Railway."
         ))
 
-    if "ffmpeg" in e or "opus" in e:
+    if "ffmpeg" in e or "ffprobe" in e:
         return ("ffmpeg", (
             "🔧 **Eroare la procesarea audio (FFmpeg).**\n"
             "Fisierul descarcat pare corupt sau FFmpeg are o problema.\n"

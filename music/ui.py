@@ -2,7 +2,7 @@
 import discord
 from music.config import log
 from music.state import get_state
-from music.utils import format_time, safe_delete
+from music.utils import format_time, safe_delete, item_title
 
 
 def _format_number(n: int) -> str:
@@ -93,7 +93,7 @@ async def update_player_ui(ctx, send_new=False):
     if state.show_queue and state.queue:
         q_lines = []
         for i, item in enumerate(state.queue[:8]):
-            q_lines.append(f"`{i+1}.` {item['title'][:45]}")
+            q_lines.append(f"`{i+1}.` {item_title(item, 45)}")
         q_text = "\n".join(q_lines)
         if len(state.queue) > 8:
             q_text += f"\n*+{len(state.queue)-8} mai multe*"
