@@ -1,7 +1,10 @@
 """MusicControlView - butoane si dropdown."""
+import time
+
 import discord
 from music.config import log
-from music.state import get_state
+from music.state import (get_state, loading, mark_paused, mark_resumed,
+                         set_autoplay)
 from music.utils import safe_delete, item_title
 from music.autoplay import prefill_autoplay_queue
 
@@ -120,10 +123,15 @@ class MusicControlView(discord.ui.View):
 
     @discord.ui.button(label="Pause", style=discord.ButtonStyle.primary, custom_id="playpause", row=0)
     async def pause_resume_btn(self, interaction: discord.Interaction, button):
+        state = get_state(self.ctx.guild.id)
         vc = self.ctx.voice_client
         if vc:
-            if vc.is_playing(): vc.pause()
-            elif vc.is_paused(): vc.resume()
+            if vc.is_playing():
+                vc.pause()
+                mark_paused(state, time.time())
+            elif vc.is_paused():
+                vc.resume()
+                mark_resumed(state, time.time())
         await self._safe_defer(interaction)
         from music.ui import update_player_ui
         await update_player_ui(self.ctx)
@@ -142,7 +150,7 @@ class MusicControlView(discord.ui.View):
         await self._safe_defer(interaction)
         state = get_state(self.ctx.guild.id)
         state.queue.clear()
-        state.autoplay = False
+        set_autoplay(state, False, by_user=True)
         state.loop_mode = 0
         state.is_loading = False
         state.always_on = False
@@ -167,13 +175,18 @@ class MusicControlView(discord.ui.View):
         # mai jos face cereri de retea care pot depasi usor acest buget.
         await self._safe_defer(interaction)
         state = get_state(self.ctx.guild.id)
-        state.autoplay = not state.autoplay
+        set_autoplay(state, not state.autoplay, by_user=True)
         if state.autoplay:
             state.loop_mode = 0
             state.show_queue = True
-            if not state.queue and state.last_url:
+            # `is_loading` conteaza: prefill-ul trage un Mix de pana la 50 de
+            # intrari cu cookies, iar butonul nu se uita la nimic. Apasat in
+            # timpul unei incarcari, dubla cererile pe un IP deja limitat. Cand
+            # e ocupat, refill-ul normal din _play_next_async o face oricum.
+            if not state.queue and state.last_url and not state.is_loading:
                 try:
-                    await prefill_autoplay_queue(state, self.ctx.bot.loop)
+                    with loading(state):
+                        await prefill_autoplay_queue(state, self.ctx.bot.loop)
                 except Exception as e:
                     log.warning(f"Prefill esuat: {e}")
         else:
@@ -185,7 +198,7 @@ class MusicControlView(discord.ui.View):
     async def loop_btn(self, interaction: discord.Interaction, button):
         state = get_state(self.ctx.guild.id)
         state.loop_mode = (state.loop_mode + 1) % 3
-        if state.loop_mode > 0: state.autoplay = False
+        if state.loop_mode > 0: set_autoplay(state, False, by_user=True)
         await self._safe_defer(interaction)
         from music.ui import update_player_ui
         await update_player_ui(self.ctx)

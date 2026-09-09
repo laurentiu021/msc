@@ -232,13 +232,40 @@ def test_silent_filter_rejection_produces_a_reason():
 
 
 def test_only_the_latest_owner_clears_the_loading_flag():
-    """Doua process_play suprapuse: primul nu are voie sa deblocheze al doilea."""
+    """Doua incarcari suprapuse: prima nu are voie sa deblocheze a doua.
+
+    Verifica REGULA, nu textul din process_play: cand finally-ul primei stergea
+    steagul pus de a doua, o comanda noua putea porni o a treia in paralel.
+    """
+    from music.state import begin_loading, end_loading, loading
+
     st = _state()
-    st.is_loading = True
-    st.load_token = 5
+    first = begin_loading(st)
+    second = begin_loading(st)
+    assert st.is_loading is True
+
+    end_loading(st, first)                      # prima se termina
+    assert st.is_loading is True, 'prima incarcare a deblocat-o pe a doua'
+
+    end_loading(st, second)                     # a doua, proprietarul real
+    assert st.is_loading is False
+
+    # Si varianta de bloc, folosita de calea de playlist si de butonul Autoplay.
+    st2 = _state()
+    with loading(st2):
+        assert st2.is_loading is True
+    assert st2.is_loading is False
+
+
+def test_process_play_uses_the_shared_ownership_helpers():
+    """O a doua copie a regulii ar putea diverge de prima."""
+    import ast
+
     src = inspect.getsource(player.process_play)
-    assert 'state.load_token == my_load_token' in src, (
-        'finally-ul elibereaza is_loading fara sa verifice proprietatea')
+    calls = {ast.unparse(n.func) for n in ast.walk(ast.parse(src.strip()))
+             if isinstance(n, ast.Call)}
+    assert 'begin_loading' in calls and 'end_loading' in calls, sorted(calls)
+    assert 'state.load_token +=' not in src, 'regula a fost re-scrisa pe loc'
 
 
 def test_interrupted_playback_is_not_counted_as_a_failure():
@@ -251,6 +278,10 @@ def test_interrupted_playback_is_not_counted_as_a_failure():
 
 
 if __name__ == '__main__':
+    # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
+    # UnicodeEncodeError si ar ascunde exact testul care a picat.
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     failed = 0
     for name, fn in sorted(globals().items()):
         if not name.startswith('test_') or not callable(fn):

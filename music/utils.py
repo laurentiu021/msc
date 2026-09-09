@@ -51,6 +51,22 @@ def item_title(item, limit: int | None = None) -> str:
     return text[:limit] if limit else text
 
 
+def playback_remaining(now: float, start_time: float, duration: float,
+                       paused_at: float = 0.0) -> tuple[float, float]:
+    """(scurs, ramas) in secunde. Pauza nu consuma din piesa.
+
+    Functie pura, cu `now` primit: panoul calcula finalul ca
+    start_time + durata, iar nimic nu ajusta start_time la pauza, deci dupa o
+    pauza de 10 minute panoul anunta ca piesa s-a terminat acum 6 minute — exact
+    semnalul greșit pe un deploy care uneori chiar se blocheaza.
+    """
+    if not duration or not start_time:
+        return 0.0, 0.0
+    reference = paused_at if paused_at else now
+    elapsed = max(0.0, reference - start_time)
+    return min(elapsed, duration), max(0.0, duration - elapsed)
+
+
 def is_clean(title, duration, last_title: str) -> bool:
     if duration and (duration > MAX_TRACK_SECONDS or duration < MIN_TRACK_SECONDS):
         return False

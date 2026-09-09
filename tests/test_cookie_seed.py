@@ -89,6 +89,10 @@ def test_missing_env_is_not_an_error():
 
 
 if __name__ == '__main__':
+    # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
+    # UnicodeEncodeError si ar ascunde exact testul care a picat.
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     failed = 0
     for name, fn in sorted(globals().items()):
         if not name.startswith('test_') or not callable(fn):

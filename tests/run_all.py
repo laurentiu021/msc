@@ -34,8 +34,11 @@ def main() -> int:
         name = os.path.basename(path)
         try:
             proc = subprocess.run(
-                [sys.executable, path], cwd=ROOT, capture_output=True,
-                text=True, timeout=TIMEOUT_SEC)
+                [sys.executable, path], cwd=ROOT, timeout=TIMEOUT_SEC,
+                capture_output=True,
+                # UTF-8 explicit, nu codecul local: altfel diacriticele din
+                # mesajul de eșec ajung mojibake exact in linia pe care o citim.
+                text=True, encoding='utf-8', errors='replace')
         except subprocess.TimeoutExpired:
             broken.append(f'{name}: TIMEOUT dupa {TIMEOUT_SEC}s')
             print(f'{name:44s} TIMEOUT')

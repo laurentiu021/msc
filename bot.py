@@ -33,7 +33,9 @@ import discord
 from discord.ext import commands
 
 from music.config import DOWNLOAD_DIR, log as music_log
-from music.state import get_state, guild_states
+from music.state import (get_state, guild_states, mark_paused, mark_resumed,
+                         set_autoplay)
+from music.idle import DISCONNECT, RADIO, decide_idle_action
 from music.utils import safe_delete, cleanup_file
 from music.autoplay import prefill_autoplay_queue
 
@@ -159,6 +161,10 @@ def cancel_timeout(ctx):
         state.timeout_task = None
 
 
+IDLE_TICK_SEC = 60
+IDLE_QUIET_SEC = 300
+
+
 async def idle_timer(ctx):
     """Detecteaza inactivitatea. NU reda nimic: doar programeaza si se re-armeaza.
 
@@ -171,20 +177,23 @@ async def idle_timer(ctx):
     state = get_state(ctx.guild.id)
     cancelled = False
     try:
-        await asyncio.sleep(60)
+        await asyncio.sleep(IDLE_TICK_SEC)
         vc = ctx.voice_client
         connected = bool(vc and vc.is_connected())
-        idle = connected and not vc.is_playing() and not vc.is_paused()
+        decision = decide_idle_action(
+            state, connected=connected,
+            playing=bool(connected and vc.is_playing()),
+            paused=bool(connected and vc.is_paused()),
+            now=time.time())
+        # Motivul se retine: pana acum, "de ce nu cânta 24/7?" nu avea niciun
+        # raspuns in loguri, pentru ca fiecare ramura ieșea printr-un `return` mut.
+        state.last_idle_reason = decision.reason
+        music_log.debug(f"tick inactivitate: {decision.action} ({decision.reason})")
 
-        if state.always_on:
-            if not connected or not idle or state.is_loading:
-                return
-            now = time.time()
-            if now < state.breaker_until or now < state.idle_quiet_until:
-                return
-            if not state.last_url:
-                return
+        if decision.resume_autoplay:
             state.autoplay = True
+
+        if decision.action == RADIO:
             if not state.queue:
                 try:
                     await prefill_autoplay_queue(state, bot.loop)
@@ -195,11 +204,11 @@ async def idle_timer(ctx):
             else:
                 # Nimic de redat: taci 5 minute in loc sa bati YouTube-ul
                 # din minut in minut cat timp ne blocheaza.
-                state.idle_quiet_until = time.time() + 300
+                state.idle_quiet_until = time.time() + IDLE_QUIET_SEC
                 music_log.info("24/7: nimic de redat, reincerc in 5 minute")
             return
 
-        if idle:
+        if decision.action == DISCONNECT:
             await vc.disconnect()
             await safe_delete(state.current_msg)
             state.current_msg = await ctx.send(
@@ -235,17 +244,22 @@ async def on_voice_state_update(member, before, after):
         is_muted = after.mute or after.self_mute
         vc = member.guild.voice_client
         if vc:
+            state = get_state(member.guild.id)
             if not was_muted and is_muted and vc.is_playing():
                 vc.pause()
+                mark_paused(state, time.time())
                 music_log.info("Bot muted -> pause")
             elif was_muted and not is_muted and vc.is_paused():
                 vc.resume()
+                mark_resumed(state, time.time())
                 music_log.info("Bot unmuted -> resume")
 
     if member == bot.user and before.channel and not after.channel:
         state = get_state(member.guild.id)
         state.queue.clear()
-        state.autoplay = False
+        # Cineva a scos botul din canal: e o oprire deliberata, deci timer-ul de
+        # 24/7 nu are ce reporni.
+        set_autoplay(state, False, by_user=True)
         state.loop_mode = 0
         state.is_loading = False
         if state.current_file:

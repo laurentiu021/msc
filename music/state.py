@@ -1,5 +1,6 @@
 """GuildState si state management."""
 import asyncio
+import contextlib
 
 
 class GuildState:
@@ -8,6 +9,9 @@ class GuildState:
         self.queue: list[dict] = []
         self.history: list[dict] = []
         self.autoplay = False
+        # True doar cand radioul a fost oprit DELIBERAT (buton, comanda). Vezi
+        # set_autoplay: tick-ul de 24/7 il consulta ca sa nu-l reporneasca.
+        self.autoplay_user_off = False
         self.loop_mode = 0  # 0=off, 1=piesa, 2=coada
         self.show_queue = False
 
@@ -23,6 +27,10 @@ class GuildState:
         self.current_msg = None
         self.is_loading = False
         self.last_start_time = 0
+        # Momentul pauzei, 0 cand se reda. Fara el, panoul calcula finalul
+        # ca last_start_time + durata, deci dupa o pauza de 10 minute anunta
+        # ca piesa s-a terminat acum 6 minute.
+        self.paused_at = 0.0
         self.timeout_task = None
         self.skip_request = False
         self._lock = asyncio.Lock()
@@ -62,9 +70,73 @@ class GuildState:
         # ca "Eroare necunoscuta" si sfatul despre cookies nu putea fi afisat.
         self.last_raw_error: str | None = None
 
+        # Ultima decizie a tick-ului de inactivitate, ca sa existe un raspuns
+        # la "de ce nu cânta 24/7?": fiecare ramura ieșea printr-un return mut.
+        self.last_idle_reason = ''
+
         # View-ul curent, ca sa poata fi oprit inainte de a fi inlocuit.
         # Message.delete() nu il scoate din ViewStore-ul lui discord.py.
         self.current_view = None
+
+        # Garda de re-intrare pentru trimiterea panoului: doua
+        # actualizari concurente ar lasa doua panouri cu butoane vii.
+        self._ui_sending = False
+
+
+def mark_paused(state, now: float) -> None:
+    """Retine momentul pauzei. Pauza nu consuma din piesa."""
+    if not state.paused_at:
+        state.paused_at = now
+
+
+def mark_resumed(state, now: float) -> None:
+    """Muta inceputul piesei cu exact cat a durat pauza."""
+    if state.paused_at:
+        state.last_start_time += now - state.paused_at
+        state.paused_at = 0.0
+
+
+def set_autoplay(state, value: bool, *, by_user: bool) -> None:
+    """Comuta radioul si retine CINE l-a oprit.
+
+    Timer-ul de 24/7 are voie sa reporneasca radioul dupa o defectiune (5 erori
+    consecutive, un prefill fara rezultate), dar nu are voie sa treaca peste o
+    alegere explicita. Fara distinctia asta, butonul Autoplay se stingea singur
+    dupa 60 de secunde: tick-ul de 24/7 punea `autoplay = True` necondiționat, deci
+    o coada curatata manual era inlocuita de un Mix de YouTube si butonul parea
+    ca merge, apoi revenea in tacere.
+    """
+    state.autoplay = value
+    if by_user:
+        state.autoplay_user_off = not value
+
+
+def begin_loading(state) -> int:
+    """Marcheaza o incarcare in curs si intoarce token-ul proprietarului.
+
+    Regula de proprietate exista o singura data, aici. Cand doua incarcari se
+    suprapun, finally-ul primei stergea steagul pus de a doua, iar o comanda
+    noua putea atunci porni o a treia in paralel.
+    """
+    state.is_loading = True
+    state.load_token += 1
+    return state.load_token
+
+
+def end_loading(state, token: int) -> None:
+    """Stinge steagul, dar numai daca incarcarea care il tine e a noastra."""
+    if state.load_token == token:
+        state.is_loading = False
+
+
+@contextlib.contextmanager
+def loading(state):
+    """begin_loading/end_loading pentru blocuri scurte, cu acelasi contract."""
+    token = begin_loading(state)
+    try:
+        yield token
+    finally:
+        end_loading(state, token)
 
 
 guild_states: dict[int, GuildState] = {}

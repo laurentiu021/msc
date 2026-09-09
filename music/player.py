@@ -9,7 +9,7 @@ from music.config import (clear_ydl_reason, cookies_available,
                           last_ydl_reason, make_download_opts,
                           make_search_opts, yt_client_args, WEB_CLIENTS)
 from music import ytdlp
-from music.state import get_state
+from music.state import begin_loading, end_loading, get_state, loading
 from music.utils import is_clean, cleanup_file, item_title
 from music.autoplay import prefill_autoplay_queue
 from music.errors import diagnose_error
@@ -290,9 +290,7 @@ async def process_play(ctx, query, is_radio=False):
         start_timeout(ctx)
         return
 
-    state.is_loading = True
-    state.load_token += 1
-    my_load_token = state.load_token
+    my_load_token = begin_loading(state)
     failure = None
     rejected = None
     filename = None
@@ -508,6 +506,7 @@ async def process_play(ctx, query, is_radio=False):
             raise PlaybackInterrupted("Voice deconectat dupa stop.")
 
         state.last_start_time = time.time()
+        state.paused_at = 0.0
         state.current_file = filename
         captured_filename = filename
         after_play = make_after_play(ctx, state, captured_filename)
@@ -587,8 +586,7 @@ async def process_play(ctx, query, is_radio=False):
     finally:
         # Doar ultimul proprietar elibereaza steagul: altfel un process_play
         # care se termina ar debloca un altul aflat inca in lucru.
-        if state.load_token == my_load_token:
-            state.is_loading = False
+        end_loading(state, my_load_token)
 
     if rejected:
         too_many = state._consecutive_rejects >= MAX_CONSECUTIVE_REJECTS

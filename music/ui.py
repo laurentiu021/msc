@@ -1,8 +1,11 @@
 """UI: embed player si MusicControlView."""
+import time
+
 import discord
+
 from music.config import log
 from music.state import get_state
-from music.utils import format_time, safe_delete, item_title
+from music.utils import format_time, playback_remaining, safe_delete, item_title
 
 
 def _format_number(n: int) -> str:
@@ -12,6 +15,20 @@ def _format_number(n: int) -> str:
     if n >= 1_000:
         return f"{n/1_000:.1f}K"
     return str(n)
+
+
+def _stop_view(state):
+    """Opreste view-ul curent inainte sa fie inlocuit.
+
+    Message.delete() nu il scoate din ViewStore-ul lui discord.py, deci un view
+    neoprit rămâne sa asculte interactiuni pe viata procesului.
+    """
+    if state.current_view is not None:
+        try:
+            state.current_view.stop()
+        except Exception:
+            log.debug("View-ul vechi nu a putut fi oprit", exc_info=True)
+        state.current_view = None
 
 
 async def update_player_ui(ctx, send_new=False):
@@ -43,8 +60,15 @@ async def update_player_ui(ctx, send_new=False):
         info_parts.append(f"**{state.last_channel}**")
     if state.last_duration > 0:
         info_parts.append(f"`{format_time(state.last_duration)}`")
-        end_time = int(state.last_start_time + state.last_duration)
-        info_parts.append(f"<t:{end_time}:R>")
+        _, remaining = playback_remaining(
+            time.time(), state.last_start_time, state.last_duration,
+            state.paused_at)
+        if state.paused_at:
+            # Pauzat: text static. Un <t:...:R> continua sa numere in client
+            # oricum, deci ar minti exact cat timp e pauzat.
+            info_parts.append(f"`rămas {format_time(int(remaining))}`")
+        else:
+            info_parts.append(f"<t:{int(time.time() + remaining)}:R>")
     if info_parts:
         lines.append(" · ".join(info_parts))
 
@@ -104,12 +128,20 @@ async def update_player_ui(ctx, send_new=False):
     from music.views import MusicControlView
     view = MusicControlView(ctx)
 
+    if not send_new and state.current_msg is None:
+        # Panoul nu mai exista: sters de !stop, inlocuit de mesajul de plecare,
+        # sau anulat dupa un 403. Inainte, ramura de edit era `elif
+        # state.current_msg`, deci un !play care doar adauga in coada nu producea
+        # NIMIC vizibil: nici panou, nici mesaj, nici eroare.
+        send_new = True
+
     if send_new:
-        if state.current_view is not None:
-            try:
-                state.current_view.stop()
-            except Exception:
-                pass
+        if state._ui_sending:
+            # O trimitere e deja in zbor. Fara garda, doua actualizari
+            # concurente ar lasa doua panouri, fiecare cu butoane vii.
+            return
+        state._ui_sending = True
+        _stop_view(state)
         await safe_delete(state.current_msg)
         try:
             state.current_msg = await ctx.send(embed=embed, view=view)
@@ -122,9 +154,14 @@ async def update_player_ui(ctx, send_new=False):
             log.warning(f"Nu am putut trimite player-ul: {e}")
             state.current_msg = None
             state.current_view = None
-    elif state.current_msg:
+        finally:
+            state._ui_sending = False
+    else:
         try:
             await state.current_msg.edit(embed=embed, view=view)
+            # Si aici, nu doar la trimitere: view-ul vechi rămânea inregistrat in
+            # ViewStore-ul lui discord.py, deci fiecare piesa lasa un view viu.
+            _stop_view(state)
             state.current_view = view
         except discord.HTTPException:
             pass

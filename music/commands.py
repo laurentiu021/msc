@@ -10,7 +10,7 @@ import discord
 
 from music.config import (FFMPEG_OPTS, cookies_available, log,
                           make_search_opts)
-from music.state import get_state
+from music.state import get_state, loading, set_autoplay
 from music.utils import safe_delete, format_time, cleanup_file, item_title
 from music.autoplay import prefill_autoplay_queue
 from music import ytdlp
@@ -138,8 +138,12 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                 extract_flat=True, playlistend=30, noplaylist=False,
             )
             try:
-                info = await ytdlp.extract(ydl_opts_pl, search,
-                                           loop=bot.loop, stage='playlist')
+                # Marcam ocupat INAINTE de extractie. Fara asta, un !play dat in
+                # timpul citirii unui playlist de 30 de intrari nu vedea nimic
+                # ocupat si pornea propria rezolvare in paralel.
+                with loading(state):
+                    info = await ytdlp.extract(ydl_opts_pl, search,
+                                               loop=bot.loop, stage='playlist')
                 entries = info.get('entries', [])
                 if not entries: raise ValueError("Playlist gol")
                 first = entries.pop(0)
@@ -167,6 +171,14 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
 
         if vc.is_playing() or vc.is_paused() or state.is_loading:
             state.queue.append({'query': search, 'title': search})
+            # Confirmare explicita. Comanda isi sterge propriul mesaj, iar
+            # actualizarea panoului schimba doar contorul din footer, pe un panou
+            # care poate fi mult mai sus in canal — deci cea mai folosita comanda
+            # putea sa nu produca nimic vizibil.
+            await ctx.send(
+                f"➕ **#{len(state.queue)}** in coada: {item_title(search, 60)}"
+                + ("  *(se incarca altceva chiar acum)*" if state.is_loading else ""),
+                delete_after=12)
             await update_player_ui(ctx)
         else:
             await process_play(ctx, search)
@@ -175,7 +187,8 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
     async def stop(ctx):
         await safe_delete(ctx.message)
         state = get_state(ctx.guild.id)
-        state.queue.clear(); state.autoplay = False; state.loop_mode = 0
+        state.queue.clear(); set_autoplay(state, False, by_user=True)
+        state.loop_mode = 0
         state.is_loading = False; state.always_on = False
         if state.current_file:
             cleanup_file(state.current_file, bot.loop)
@@ -216,6 +229,15 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                     "Nu pot citi linkul de Spotify/Deezer. Scrie artistul si titlul.",
                     delete_after=15)
             search = resolved
+        if state.is_loading:
+            # O rezolvare e deja in curs. Inainte, !nplay pornea a doua in
+            # paralel: doua cereri catre acelasi YouTube care ne limiteaza, si
+            # doua redari care se calcau. Trece prima in coada si va porni de
+            # indata ce se termina incarcarea curenta.
+            state.queue.insert(0, {'query': search, 'title': search})
+            await ctx.send("Se incarca deja o piesa — a ta urmeaza imediat.",
+                           delete_after=10)
+            return await update_player_ui(ctx)
         state.skip_request = True
         await process_play(ctx, search)
 
@@ -310,7 +332,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         state.always_on = not state.always_on
         if state.always_on:
             cancel_timeout(ctx)
-            state.autoplay = True; state.loop_mode = 0
+            set_autoplay(state, True, by_user=True); state.loop_mode = 0
             state.show_queue = True
             state.breaker_until = 0.0
             state.idle_quiet_until = 0.0
@@ -320,7 +342,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             await ctx.send("24/7 ON - autoplay activat.", delete_after=5)
             await update_player_ui(ctx)
         else:
-            state.autoplay = False
+            set_autoplay(state, False, by_user=True)
             state.show_queue = False
             await ctx.send("24/7 OFF.", delete_after=5)
             await update_player_ui(ctx)
