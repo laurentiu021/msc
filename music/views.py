@@ -63,7 +63,10 @@ class MusicControlView(discord.ui.View):
             for i, item in enumerate(state.queue[:25]):
                 options.append(discord.SelectOption(
                     label=f"{i+1}. {item_title(item, 95)}",
-                    value=str(i),
+                    # Valoarea e interogarea, nu poziția: coada se poate schimba
+                    # intre randare si click (refill de autoplay, skip, remove)
+                    # si un index pozitional ar sari la alta piesa.
+                    value=str(item.get('query', ''))[:100],
                 ))
             select = discord.ui.Select(
                 placeholder="Sari la o piesa...", options=options,
@@ -75,14 +78,18 @@ class MusicControlView(discord.ui.View):
     async def _jump_callback(self, interaction: discord.Interaction):
         state = get_state(self.ctx.guild.id)
         try:
-            idx = int(interaction.data['values'][0])
-            if idx < 0 or idx >= len(state.queue):
-                await interaction.response.send_message("Piesa nu mai exista.", ephemeral=True, delete_after=3)
+            wanted = interaction.data['values'][0]
+            idx = next((i for i, it in enumerate(state.queue)
+                        if str(it.get('query', ''))[:100] == wanted), None)
+            if idx is None:
+                await interaction.response.send_message(
+                    "Piesa nu mai e in coada.", ephemeral=True, delete_after=3)
                 return
             state.queue = state.queue[idx:]
-            state.skip_request = True
-            if self.ctx.voice_client and self.ctx.voice_client.is_playing():
-                self.ctx.voice_client.stop()
+            vc = self.ctx.voice_client
+            if vc and (vc.is_playing() or vc.is_paused()):
+                state.skip_request = True
+                vc.stop()
             await self._safe_defer(interaction)
         except Exception as e:
             log.warning(f"Jump select error: {e}")

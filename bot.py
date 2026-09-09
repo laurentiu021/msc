@@ -251,6 +251,10 @@ async def on_voice_state_update(member, before, after):
         if state.preloaded:
             cleanup_file(state.preloaded.get('filename'), bot.loop)
             state.preloaded = None
+        if state.current_file:
+            cleanup_file(state.current_file, bot.loop)
+            state.current_file = None
+        player.bump_play_generation(state)
         cancel_timeout(member.guild)
 
     if not member.bot and before.channel:

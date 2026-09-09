@@ -1,17 +1,13 @@
-"""Motor de redare: process_play, play_next, preload, trigger_radio."""
+"""Motor de redare: process_play, play_next, trigger_radio."""
 import discord
-import yt_dlp
 import asyncio
 import os
 import time
-import random
-from music.config import YDL_OPTS_SEARCH, YDL_OPTS_DOWNLOAD, FFMPEG_OPTS, log
-from music.config import (get_opts_with_cookies, has_real_formats,
-                          count_real_formats, yt_client_args, WEB_CLIENTS)
-from music.config import (
-    YT_REQUEST_MIN_INTERVAL_SEC,
-    YT_REQUEST_MAX_INTERVAL_SEC,
-)
+from music.config import FFMPEG_OPTS, log
+from music.config import (cookies_available, count_real_formats,
+                          has_real_formats, make_download_opts,
+                          make_search_opts, yt_client_args, WEB_CLIENTS)
+from music import ytdlp
 from music.state import get_state
 from music.utils import is_clean, cleanup_file, item_title
 from music.autoplay import prefill_autoplay_queue
@@ -51,7 +47,8 @@ def make_after_play(ctx, state, filename):
         if state.play_generation != generation:
             # Oprire deliberata: altcineva preia redarea si fisierul.
             return
-        cleanup_file(filename, _loop)
+        if state.loop_mode != 1:
+            cleanup_file(filename, _loop)
         play_next(ctx)
 
     return after_play
@@ -62,42 +59,10 @@ update_player_ui = None
 start_timeout = None
 cancel_timeout = None
 _loop = None
-_YT_REQ_LOCK = asyncio.Lock()
-_NEXT_YT_REQUEST_AT = 0.0
-
-
-def _is_youtube_pressure_error(error: Exception) -> bool:
-    e = str(error).lower()
-    patterns = (
-        "http error 429",
-        "too many requests",
-        "rate limit",
-        "sign in to confirm",
-        "forbidden",
-        "http error 403",
-    )
-    return any(p in e for p in patterns)
-
-
-async def _wait_for_youtube_slot():
-    global _NEXT_YT_REQUEST_AT
-    async with _YT_REQ_LOCK:
-        now = time.time()
-        wait_for = _NEXT_YT_REQUEST_AT - now
-        if wait_for > 0:
-            log.info(f"YouTube throttling active: waiting {wait_for:.1f}s")
-            await asyncio.sleep(wait_for)
-        min_delay = max(0.0, YT_REQUEST_MIN_INTERVAL_SEC)
-        max_delay = max(min_delay, YT_REQUEST_MAX_INTERVAL_SEC)
-        _NEXT_YT_REQUEST_AT = time.time() + random.uniform(min_delay, max_delay)
-
-
 async def _yt_extract_info(ydl_opts, query_or_url, download=False, stage=""):
-    await _wait_for_youtube_slot()
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        return await _loop.run_in_executor(
-            None, lambda: ydl.extract_info(query_or_url, download=download)
-        )
+    """Delegat catre music.ytdlp: un singur throttle pentru tot botul."""
+    return await ytdlp.extract(ydl_opts, query_or_url, download=download,
+                               loop=_loop, stage=stage)
 
 
 def init(bot_ref, ui_func, start_to, cancel_to):
@@ -151,7 +116,7 @@ async def _play_next_async(ctx):
         if next_item:
             log.info(f"play_next: {item_title(next_item, 40)}")
             await process_play(ctx, next_item['query'], is_radio=False)
-            if state.autoplay and len(state.queue) < 6 and state.last_url:
+            if state.autoplay and len(state.queue) < 3 and state.last_url:
                 try:
                     await prefill_autoplay_queue(state, _loop)
                     log.info(f"Refill dupa skip: coada={len(state.queue)}")
@@ -180,45 +145,6 @@ def play_next(ctx):
         except RuntimeError:
             return
     asyncio.run_coroutine_threadsafe(_play_next_async(ctx), _loop)
-
-
-async def preload_next(ctx):
-    state = get_state(ctx.guild.id)
-    if not state.queue or state.preloaded:
-        return
-    next_query = state.queue[0]['query']
-    try:
-        info = await _yt_extract_info(
-            YDL_OPTS_SEARCH, next_query, download=False, stage="preload_search"
-        )
-        entries = info.get('entries', [info])
-        selected = entries[0]
-        for entry in entries:
-            if is_clean(entry.get('title', ''), entry.get('duration'), state.last_title):
-                selected = entry
-                break
-        web_url = selected.get('webpage_url') or \
-            f"https://www.youtube.com/watch?v={selected.get('id', '')}"
-        with yt_dlp.YoutubeDL(YDL_OPTS_DOWNLOAD) as ydl_dl:
-            dl_info = await _yt_extract_info(
-                YDL_OPTS_DOWNLOAD, web_url, download=True, stage="preload_download"
-            )
-            filename = ydl_dl.prepare_filename(dl_info)
-            # Postprocessor-ul poate schimba extensia
-            if not os.path.exists(filename):
-                base = os.path.splitext(filename)[0]
-                for ext in ['.opus', '.m4a', '.webm', '.mp3', '.ogg']:
-                    if os.path.exists(base + ext):
-                        filename = base + ext
-                        break
-        if filename and os.path.exists(filename):
-            state.preloaded = {
-                'query': next_query, 'filename': filename,
-                'info': selected, 'web_url': web_url,
-            }
-            log.info(f"Preloaded: {selected.get('title', '?')[:40]}")
-    except Exception as e:
-        log.debug(f"Preload esuat: {e}")
 
 
 async def process_play(ctx, query, is_radio=False):
@@ -258,48 +184,53 @@ async def process_play(ctx, query, is_radio=False):
     filename = None
     formats_to_try = [
         'bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
-        'bestaudio',
         'best[protocol=m3u8_native]/best[protocol=m3u8]',
-        'worstaudio',
-        'best',
-        'worst',
     ]
 
     try:
-        preloaded = state.preloaded
-        if preloaded and preloaded['query'] == query:
-            filename = preloaded['filename']
-            selected = preloaded['info']
-            web_url = preloaded['web_url']
-            state.preloaded = None
-            log.info(f"Folosesc preloaded: {selected.get('title', '?')[:40]}")
+        # Repetare (loop pe piesa) sau re-adaugarea aceluiasi URL: fisierul e
+        # deja pe disc, deci nu mai cerem nimic de la YouTube.
+        if (query and query == state.last_url and state.current_file
+                and os.path.exists(state.current_file)):
+            log.info("Refolosesc fisierul deja descarcat (loop / acelasi URL)")
+            filename = state.current_file
+            reused = True
+            web_url = state.last_url
+            selected = {
+                'title': state.last_title,
+                'duration': state.last_duration,
+                'thumbnail': state.last_thumbnail,
+                'channel': state.last_channel,
+                'webpage_url': state.last_url,
+            }
         else:
-            if preloaded:
-                cleanup_file(preloaded.get('filename'), _loop)
-                state.preloaded = None
+            reused = False
 
+        if state.preloaded:
+            # Nu mai preîncarcam nimic; daca a rămas ceva dintr-o versiune veche
+            # a botului, il curatam.
+            cleanup_file(state.preloaded.get('filename'), _loop)
+            state.preloaded = None
+
+        if not reused:
             # Cookies primele, pentru ca de pe IP-ul de datacenter al Railway
             # calea de guest ajunge la 429 pe webpage -> lipsa Visitor Data ->
             # niciun GVS PO Token -> zero formate redabile. Guest ramane in
             # coada pentru cand IP-ul nu e limitat.
             _CLIENT_CHAINS = (
-                COOKIE_CHAIN + GUEST_CHAIN
-                if get_opts_with_cookies()[0] is not None
-                else GUEST_CHAIN
+                COOKIE_CHAIN + GUEST_CHAIN if cookies_available() else GUEST_CHAIN
             )
             selected = None
             successful_client = None
             successful_cookies = False
             for clients, use_cookies in _CLIENT_CHAINS:
                 label = '+'.join(clients)
-                search_opts = dict(YDL_OPTS_SEARCH)
-                search_opts['extractor_args'] = yt_client_args(*clients)
-                if use_cookies:
-                    cookie_search, _ = get_opts_with_cookies()
-                    if not cookie_search:
-                        continue
-                    search_opts = cookie_search
-                    search_opts['extractor_args'] = yt_client_args(*clients)
+                if use_cookies and not cookies_available():
+                    continue
+                search_opts = make_search_opts(
+                    with_cookies=use_cookies,
+                    extractor_args=yt_client_args(*clients),
+                )
 
                 try:
                     info = await _yt_extract_info(
@@ -311,7 +242,7 @@ async def process_play(ctx, query, is_radio=False):
                         fmts = entry.get('formats', [])
                         real = count_real_formats(fmts)
                         log.info(f"[{label}|cookies={use_cookies}] Video {entry.get('id','?')}: {len(fmts)} formats ({real} real)")
-                        if is_clean(entry.get('title', ''), entry.get('duration'), state.last_title):
+                        if is_clean(entry.get('title'), entry.get('duration'), state.last_title):
                             selected = entry
                             break
                     if not selected:
@@ -338,9 +269,16 @@ async def process_play(ctx, query, is_radio=False):
                 await asyncio.sleep(5)
                 retry_url = web_url if web_url.startswith('http') else \
                     f"https://www.youtube.com/watch?v={vid_id}"
-                retry_opts = dict(YDL_OPTS_SEARCH)
-                retry_opts['extractor_args'] = yt_client_args(*WEB_CLIENTS)
-                retry_opts['default_search'] = None  # use URL directly
+                # Retry-ul vechi refolosea acelasi lant SI arunca cookie-urile,
+                # deci difera de incercarea eșuata doar prin cele 5 secunde.
+                # ignore_no_formats_error=False ca sa aflam motivul REAL
+                # ("Sign in to confirm you're not a bot" era doar warning).
+                retry_opts = make_search_opts(
+                    with_cookies=cookies_available(),
+                    extractor_args=yt_client_args(*WEB_CLIENTS),
+                    default_search=None,
+                    ignore_no_formats_error=False,
+                )
                 try:
                     retry_info = await _yt_extract_info(
                         retry_opts, retry_url, download=False, stage="retry_mweb"
@@ -368,30 +306,29 @@ async def process_play(ctx, query, is_radio=False):
                     break
                 for fmt in formats_to_try:
                     try:
-                        if use_cookies_dl:
-                            _, dl_opts = get_opts_with_cookies()
-                            if not dl_opts:
-                                break  # no cookies available
-                            dl_opts['format'] = fmt
-                            if successful_client:
-                                dl_opts['extractor_args'] = yt_client_args(*successful_client)
-                            log.info(f"Download WITH cookies, client={'+'.join(successful_client) if successful_client else 'default'}, format={fmt}")
-                        else:
-                            dl_opts = YDL_OPTS_DOWNLOAD.copy()
-                            dl_opts['format'] = fmt
-                            if successful_client:
-                                dl_opts['extractor_args'] = yt_client_args(*successful_client)
-                        with yt_dlp.YoutubeDL(dl_opts) as ydl_dl:
-                            dl_info = await _yt_extract_info(
-                                dl_opts, web_url, download=True, stage=f"download_{fmt}"
-                            )
-                            filename = ydl_dl.prepare_filename(dl_info)
-                            if not os.path.exists(filename):
-                                base = os.path.splitext(filename)[0]
-                                for ext in ['.opus', '.m4a', '.webm', '.mp3', '.ogg']:
-                                    if os.path.exists(base + ext):
-                                        filename = base + ext
-                                        break
+                        if use_cookies_dl and not cookies_available():
+                            break
+                        overrides = {'format': fmt}
+                        if successful_client:
+                            overrides['extractor_args'] = yt_client_args(*successful_client)
+                        dl_opts = make_download_opts(with_cookies=use_cookies_dl,
+                                                     **overrides)
+                        client_label = ('+'.join(successful_client)
+                                        if successful_client else 'default')
+                        log.info(f"Download cookies={use_cookies_dl}, "
+                                 f"client={client_label}, format={fmt}")
+                        # O singura instanta YoutubeDL descarca SI construieste
+                        # numele fisierului; inainte erau doua, iar cea externa
+                        # exista doar pentru prepare_filename.
+                        dl_info, filename = await ytdlp.extract_and_prepare_filename(
+                            dl_opts, web_url, loop=_loop, stage=f"download_{fmt}"
+                        )
+                        if not os.path.exists(filename):
+                            base = os.path.splitext(filename)[0]
+                            for ext in ['.opus', '.m4a', '.webm', '.mp3', '.ogg']:
+                                if os.path.exists(base + ext):
+                                    filename = base + ext
+                                    break
                         if filename and os.path.exists(filename):
                             break
                     except Exception as e:
@@ -463,9 +400,6 @@ async def process_play(ctx, query, is_radio=False):
                         await update_player_ui(ctx)
             except Exception:
                 pass  # Non-critical, don't break playback
-
-        if state.queue:
-            _loop.create_task(preload_next(ctx))
 
     except asyncio.CancelledError:
         # O comanda noua ne-a anulat. CancelledError e BaseException, deci fara

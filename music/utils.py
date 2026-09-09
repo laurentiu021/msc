@@ -2,7 +2,8 @@
 import os
 import asyncio
 import discord
-from music.config import BLACKLIST, DOWNLOAD_DIR, log
+from music.config import (BLACKLIST, DOWNLOAD_DIR, MAX_TRACK_SECONDS,
+                          MIN_TRACK_SECONDS, log)
 
 
 async def safe_delete(msg):
@@ -29,7 +30,7 @@ def item_title(item, limit: int | None = None) -> str:
 
 
 def is_clean(title, duration, last_title: str) -> bool:
-    if duration and (duration > 660 or duration < 30):
+    if duration and (duration > MAX_TRACK_SECONDS or duration < MIN_TRACK_SECONDS):
         return False
     if not title:
         # Fara titlu nu putem filtra nimic; il tratam ca nepotrivit ca sa nu

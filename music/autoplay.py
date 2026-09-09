@@ -1,9 +1,10 @@
 """Logica autoplay: YouTube Mix (preferat) + fallback-uri."""
 import re
-import yt_dlp
-from music.config import YDL_OPTS_SEARCH, BLACKLIST, log
+from music.config import (BLACKLIST, MAX_TRACK_SECONDS, MIN_TRACK_SECONDS,
+                          cookies_available, log, make_search_opts)
 from music.state import GuildState
 from music import youtube_api as yt_api
+from music import ytdlp
 
 
 # Cat de multe piese de la acelasi artist sunt permise in coada/history
@@ -18,14 +19,33 @@ def _extract_video_id(url: str) -> str | None:
     return None
 
 
-def _artist_from_title(title: str) -> str:
+def _artist_from_title(title) -> str:
     """Extrage posibil nume de artist din titlu (partea dinainte de '-')."""
+    title = str(title or '')
     if ' - ' in title:
         return title.split(' - ', 1)[0].strip().lower()
     return ''
 
 
-async def prefill_autoplay_queue(state: GuildState, bot_loop, target: int = 6):
+def artist_key(title, channel='') -> str:
+    """Cheia de diversitate, folosita IDENTIC la numarare si la verificare.
+
+    Inainte, seed-ul folosea prefixul titlului si verificarea folosea canalul.
+    Cele doua spatii de nume nu se intersectau: plafonul se scurgea (numarul
+    pe canal se re-descoperea din titlu la refill-ul urmator) si totodata
+    infometa coada, fiindca un canal de label colapsa 50 de artisti pe o cheie.
+    """
+    from_title = _artist_from_title(title)
+    if from_title:
+        return from_title
+    name = str(channel or '').strip().lower()
+    for suffix in (' - topic', 'vevo', ' official', ' music'):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)].strip()
+    return name
+
+
+async def prefill_autoplay_queue(state: GuildState, bot_loop, target: int = 12):
     """Populeaza coada pana la target piese.
     
     Strategii in ordine:
@@ -38,7 +58,10 @@ async def prefill_autoplay_queue(state: GuildState, bot_loop, target: int = 6):
     if needed <= 0:
         return
 
-    origin_url = state.history[0]['url'] if state.history else state.last_url
+    # state.history[0] e cea mai VECHE intrare pastrata (append la coada,
+    # trim din fata), deci radio-ul rămânea pinuit pe prima piesa a sesiunii si
+    # apoi trage cu 20 in urma. Seed-ul trebuie sa fie piesa curenta.
+    origin_url = state.last_url or (state.history[-1]['url'] if state.history else None)
     if not origin_url:
         log.warning("Autoplay: no origin URL")
         return
@@ -54,16 +77,16 @@ async def prefill_autoplay_queue(state: GuildState, bot_loop, target: int = 6):
         vid = _extract_video_id(h.get('url') or '')
         if vid:
             skip_ids.add(vid)
-        artist_key = _artist_from_title(h.get('title') or '').lower()
-        if artist_key:
-            artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
+        key = artist_key(h.get('title'), h.get('channel', ''))
+        if key:
+            artist_counts[key] = artist_counts.get(key, 0) + 1
     for item in state.queue:
         vid = _extract_video_id(item.get('query', ''))
         if vid:
             skip_ids.add(vid)
-        artist_key = _artist_from_title(item.get('title') or '').lower()
-        if artist_key:
-            artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
+        key = artist_key(item.get('title'), item.get('channel', ''))
+        if key:
+            artist_counts[key] = artist_counts.get(key, 0) + 1
 
     added = 0
 
@@ -89,19 +112,29 @@ async def prefill_autoplay_queue(state: GuildState, bot_loop, target: int = 6):
         log.info(f"Autoplay: total +{added} piese (coada: {len(state.queue)})")
 
 
-def _add_to_queue(state, vid_id, title, skip_ids, artist_counts=None, channel='') -> bool:
+def _add_to_queue(state, vid_id, title, skip_ids, artist_counts=None, channel='',
+                  duration=None, live_status=None) -> bool:
     """Adauga un video in coada daca trece filtrele."""
     if not vid_id or vid_id in skip_ids:
         return False
-    if any(w in title.lower() for w in BLACKLIST):
+    title_text = str(title or '')
+    if not title_text:
+        # Fara titlu nu putem nici filtra, nici afisa elementul.
         return False
-    # Limit same-artist pieces (use channel name or title prefix)
+    if any(w in title_text.lower() for w in BLACKLIST):
+        return False
+    # Live si durate absurde, respinse aici si nu doar la descarcare: altfel
+    # ajungeau in coada si abia process_play le refuza, dupa ce pierdea cereri.
+    if live_status in ('is_live', 'is_upcoming', 'post_live'):
+        return False
+    if duration and (duration > MAX_TRACK_SECONDS or duration < MIN_TRACK_SECONDS):
+        return False
     if artist_counts is not None:
-        artist_key = (channel or _artist_from_title(title) or '').strip().lower()
-        if artist_key:
-            if artist_counts.get(artist_key, 0) >= MAX_SAME_ARTIST:
+        key = artist_key(title_text, channel)
+        if key:
+            if artist_counts.get(key, 0) >= MAX_SAME_ARTIST:
                 return False
-            artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
+            artist_counts[key] = artist_counts.get(key, 0) + 1
     state.queue.append({
         'query': f"https://www.youtube.com/watch?v={vid_id}",
         'title': title or 'Autoplay'
@@ -135,15 +168,12 @@ async def _try_api_related(state, bot_loop, origin_id, skip_ids, needed, artist_
 async def _try_ytdlp_mix(state, bot_loop, origin_id, skip_ids, needed, artist_counts=None):
     """yt-dlp: YouTube Mix (RD playlist). Radio curat, stil pastrat."""
     mix_url = f"https://www.youtube.com/watch?v={origin_id}&list=RD{origin_id}"
-    opts = YDL_OPTS_SEARCH.copy()
-    opts['noplaylist'] = False
-    opts['extract_flat'] = True
-    opts['playlistend'] = 50
+    # Cookies + throttle: calea asta ocolea complet limitatorul de rata si mergea
+    # doar ca guest, adica exact combinatia care nu functioneaza de pe Railway.
+    opts = make_search_opts(with_cookies=cookies_available(), noplaylist=False,
+                            extract_flat=True, playlistend=50)
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = await bot_loop.run_in_executor(
-                None, lambda: ydl.extract_info(mix_url, download=False)
-            )
+        info = await ytdlp.extract(opts, mix_url, loop=bot_loop, stage='autoplay_mix')
         entries = info.get('entries') or []
         log.info(f"Autoplay Mix: {len(entries)} entries")
         added = 0
@@ -152,8 +182,10 @@ async def _try_ytdlp_mix(state, bot_loop, origin_id, skip_ids, needed, artist_co
                 break
             # Mix entries may have 'channel' or 'uploader'
             channel = e.get('channel') or e.get('uploader') or ''
-            if _add_to_queue(state, e.get('id', ''), e.get('title', ''),
-                             skip_ids, artist_counts, channel):
+            if _add_to_queue(state, e.get('id', ''), e.get('title'),
+                             skip_ids, artist_counts, channel,
+                             duration=e.get('duration'),
+                             live_status=e.get('live_status')):
                 added += 1
         if added:
             log.info(f"Autoplay Mix: +{added}")
@@ -193,13 +225,10 @@ async def _try_ytdlp_search(state, bot_loop, title, skip_ids, needed, artist_cou
     if not title:
         return 0
     clean = _clean_title(title)
-    opts = YDL_OPTS_SEARCH.copy()
-    opts['extract_flat'] = True
+    opts = make_search_opts(with_cookies=cookies_available(), extract_flat=True)
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = await bot_loop.run_in_executor(
-                None, lambda: ydl.extract_info(f"ytsearch10:{clean} music", download=False)
-            )
+        info = await ytdlp.extract(opts, f"ytsearch10:{clean} music",
+                                   loop=bot_loop, stage='autoplay_search')
         entries = info.get('entries') or []
         log.info(f"Autoplay yt-dlp search: {len(entries)} for '{clean[:30]}'")
         added = 0
@@ -207,8 +236,10 @@ async def _try_ytdlp_search(state, bot_loop, title, skip_ids, needed, artist_cou
             if added >= needed:
                 break
             channel = e.get('channel') or e.get('uploader') or ''
-            if _add_to_queue(state, e.get('id', ''), e.get('title', ''),
-                             skip_ids, artist_counts, channel):
+            if _add_to_queue(state, e.get('id', ''), e.get('title'),
+                             skip_ids, artist_counts, channel,
+                             duration=e.get('duration'),
+                             live_status=e.get('live_status')):
                 added += 1
         if added:
             log.info(f"Autoplay yt-dlp search: +{added}")

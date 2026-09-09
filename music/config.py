@@ -1,7 +1,10 @@
 """Constante si configurare muzica."""
+import copy
 import hashlib
 import os
 import logging
+
+import yt_dlp
 
 log = logging.getLogger('gogu.music')
 
@@ -54,8 +57,7 @@ YDL_OPTS_SEARCH = {
     'noplaylist': True,
     'quiet': False,
     'no_warnings': False,
-    'default_search': 'ytsearch',
-    'nocheckcertificate': True,
+    'default_search': 'ytsearch5',
     'source_address': '0.0.0.0',
     'socket_timeout': 10,
     'skip_download': True,
@@ -64,13 +66,21 @@ YDL_OPTS_SEARCH = {
     'extractor_args': _YT_EXTRACTOR_ARGS,
 }
 
+MAX_TRACK_SECONDS = 660
+MIN_TRACK_SECONDS = 30
+MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
+
 YDL_OPTS_DOWNLOAD = {
     'format': 'bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
+    # Refuza live-urile si piesele absurd de lungi INAINTE de descarcare.
+    'match_filter': yt_dlp.utils.match_filter_func(
+        f'!is_live & !live_from_start & duration < {MAX_TRACK_SECONDS}'
+    ),
+    'max_filesize': MAX_DOWNLOAD_BYTES,
     'outtmpl': f'{DOWNLOAD_DIR}/%(id)s.%(ext)s',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
-    'nocheckcertificate': True,
     'source_address': '0.0.0.0',
     'retries': 3,
     'socket_timeout': 15,
@@ -158,15 +168,40 @@ def apply_cookies(path: str | None = None):
         log.info(f"YouTube cookies available as fallback: {candidate}")
 
 
+def cookies_available() -> bool:
+    return _cookies_path is not None
+
+
+def make_search_opts(with_cookies: bool = False, **overrides) -> dict:
+    """Opts de CAUTARE proaspete la fiecare apel.
+
+    Copie adanca, intentionat: YoutubeDL MUTEAZA dict-ul primit (ii injecteaza
+    outtmpl, http_headers, js_runtimes si altele). Cu .copy() superficial,
+    YDL_OPTS_SEARCH — care nu are deliberat outtmpl — capata template-ul implicit
+    al yt-dlp, relativ la CWD, si fiecare consumator il moștenea. La fel,
+    extractor_args era UN singur obiect partajat intre toate apelurile.
+    """
+    opts = copy.deepcopy(YDL_OPTS_SEARCH)
+    if with_cookies and _cookies_path:
+        opts['cookiefile'] = _cookies_path
+    opts.update(overrides)
+    return opts
+
+
+def make_download_opts(with_cookies: bool = False, **overrides) -> dict:
+    """Opts de DESCARCARE proaspete la fiecare apel (vezi make_search_opts)."""
+    opts = copy.deepcopy(YDL_OPTS_DOWNLOAD)
+    if with_cookies and _cookies_path:
+        opts['cookiefile'] = _cookies_path
+    opts.update(overrides)
+    return opts
+
+
 def get_opts_with_cookies():
-    """Returneaza opts CU cookies — fallback pt age-restricted/privat."""
+    """(search, download) cu cookies, sau (None, None) daca nu avem."""
     if not _cookies_path:
         return None, None
-    search = dict(YDL_OPTS_SEARCH)
-    search['cookiefile'] = _cookies_path
-    download = dict(YDL_OPTS_DOWNLOAD)
-    download['cookiefile'] = _cookies_path
-    return search, download
+    return make_search_opts(with_cookies=True), make_download_opts(with_cookies=True)
 
 
 def is_playable_audio_format(f: dict) -> bool:

@@ -105,10 +105,26 @@ async def update_player_ui(ctx, send_new=False):
     view = MusicControlView(ctx)
 
     if send_new:
+        if state.current_view is not None:
+            try:
+                state.current_view.stop()
+            except Exception:
+                pass
         await safe_delete(state.current_msg)
-        state.current_msg = await ctx.send(embed=embed, view=view)
+        try:
+            state.current_msg = await ctx.send(embed=embed, view=view)
+            state.current_view = view
+        except discord.HTTPException as e:
+            # Ramura asta nu avea niciun guard, desi cea de edit avea. Un 403
+            # dupa o schimbare de permisiuni ridica excepția din interiorul
+            # try-ului de redare din process_play, care apoi sterge fisierul pe
+            # care FFmpeg il streameaza si avanseaza coada.
+            log.warning(f"Nu am putut trimite player-ul: {e}")
+            state.current_msg = None
+            state.current_view = None
     elif state.current_msg:
         try:
             await state.current_msg.edit(embed=embed, view=view)
+            state.current_view = view
         except discord.HTTPException:
             pass

@@ -1,14 +1,20 @@
 """Toate comenzile muzicale."""
-import discord
-import yt_dlp
 import asyncio
 import os
-import time
 import random
 import re
+import time
 from urllib.parse import urlparse
-from music.config import YDL_OPTS_SEARCH, FFMPEG_OPTS, log
+
+import discord
+import yt_dlp
+
+from music.config import (FFMPEG_OPTS, cookies_available, log,
+                          make_search_opts)
 from music.state import get_state
+from music.utils import safe_delete, format_time, cleanup_file, item_title
+from music.autoplay import prefill_autoplay_queue
+from music import ytdlp
 import music.player as player_mod
 
 # Doar aceste host-uri sunt acceptate ca URL. Fara allowlist, orice string cu
@@ -46,8 +52,6 @@ def sanitize_query(raw: str) -> tuple[str | None, str | None]:
         return None, (f"Host neacceptat: `{host}`. "
                       f"Accept doar YouTube, Spotify si Deezer.")
     return q, None
-from music.utils import safe_delete, format_time, cleanup_file, item_title
-from music.autoplay import prefill_autoplay_queue
 
 
 def setup_music_commands(bot, process_play, play_next, update_player_ui, start_timeout, cancel_timeout):
@@ -90,32 +94,30 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             search = await _resolve_platform_url(search)
 
         if 'list=' in search and 'youtube.com' in search:
-            ydl_opts_pl = YDL_OPTS_SEARCH.copy()
-            ydl_opts_pl['extract_flat'] = True
-            ydl_opts_pl['playlistend'] = 30
-            ydl_opts_pl['noplaylist'] = False
+            ydl_opts_pl = make_search_opts(
+                with_cookies=cookies_available(),
+                extract_flat=True, playlistend=30, noplaylist=False,
+            )
             try:
-                with yt_dlp.YoutubeDL(ydl_opts_pl) as ydl:
-                    info = await bot.loop.run_in_executor(
-                        None, lambda: ydl.extract_info(search, download=False)
-                    )
-                    entries = info.get('entries', [])
-                    if not entries: raise ValueError("Playlist gol")
-                    first = entries.pop(0)
-                    for e in entries:
-                        url = e.get('url') or e.get('id')
-                        if url:
-                            if not url.startswith('http'):
-                                url = f"https://www.youtube.com/watch?v={url}"
-                            state.queue.append({'query': url, 'title': e.get('title') or 'Necunoscut'})
-                    first_url = first.get('url') or first.get('id')
-                    if first_url and not first_url.startswith('http'):
-                        first_url = f"https://www.youtube.com/watch?v={first_url}"
-                    if vc.is_playing() or vc.is_paused() or state.is_loading:
-                        state.queue.insert(0, {'query': first_url, 'title': first.get('title') or 'Necunoscut'})
-                        await update_player_ui(ctx)
-                    else:
-                        await process_play(ctx, first_url)
+                info = await ytdlp.extract(ydl_opts_pl, search,
+                                           loop=bot.loop, stage='playlist')
+                entries = info.get('entries', [])
+                if not entries: raise ValueError("Playlist gol")
+                first = entries.pop(0)
+                for e in entries:
+                    url = e.get('url') or e.get('id')
+                    if url:
+                        if not url.startswith('http'):
+                            url = f"https://www.youtube.com/watch?v={url}"
+                        state.queue.append({'query': url, 'title': e.get('title') or 'Necunoscut'})
+                first_url = first.get('url') or first.get('id')
+                if first_url and not first_url.startswith('http'):
+                    first_url = f"https://www.youtube.com/watch?v={first_url}"
+                if vc.is_playing() or vc.is_paused() or state.is_loading:
+                    state.queue.insert(0, {'query': first_url, 'title': first.get('title') or 'Necunoscut'})
+                    await update_player_ui(ctx)
+                else:
+                    await process_play(ctx, first_url)
             except Exception as e:
                 log.error(f"Eroare playlist: {e}")
                 state.last_raw_error = str(e)[:600]
@@ -139,6 +141,10 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         if state.preloaded:
             cleanup_file(state.preloaded.get('filename'), bot.loop)
             state.preloaded = None
+        if state.current_file:
+            cleanup_file(state.current_file, bot.loop)
+            state.current_file = None
+        player_mod.bump_play_generation(state)
         cancel_timeout(ctx)
         if ctx.voice_client: await ctx.voice_client.disconnect()
         await safe_delete(state.current_msg)
