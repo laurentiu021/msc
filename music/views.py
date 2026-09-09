@@ -105,25 +105,32 @@ class MusicControlView(discord.ui.View):
     @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, custom_id="skip", row=0)
     async def skip_btn(self, interaction: discord.Interaction, button):
         state = get_state(self.ctx.guild.id)
-        state.skip_request = True
-        if self.ctx.voice_client and self.ctx.voice_client.is_playing():
-            self.ctx.voice_client.stop()
+        vc = self.ctx.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            state.skip_request = True
+            vc.stop()
         await self._safe_defer(interaction)
 
     @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, custom_id="stop", row=0)
     async def stop_btn(self, interaction: discord.Interaction, button):
+        await self._safe_defer(interaction)
         state = get_state(self.ctx.guild.id)
         state.queue.clear()
         state.autoplay = False
         state.loop_mode = 0
         state.is_loading = False
+        state.always_on = False
         import music.player as _p
+        _p.bump_play_generation(state)
         _p.cancel_timeout(self.ctx)
+        if state.preloaded:
+            from music.utils import cleanup_file
+            cleanup_file(state.preloaded.get('filename'), self.ctx.bot.loop)
+            state.preloaded = None
         if self.ctx.voice_client:
             await self.ctx.voice_client.disconnect()
         await safe_delete(state.current_msg)
         state.current_msg = None
-        await self._safe_defer(interaction)
 
     @discord.ui.button(label="Autoplay", style=discord.ButtonStyle.secondary, custom_id="autoplay", row=1)
     async def autoplay_btn(self, interaction: discord.Interaction, button):
@@ -138,7 +145,6 @@ class MusicControlView(discord.ui.View):
                 except Exception as e:
                     log.warning(f"Prefill esuat: {e}")
         else:
-            state.queue.clear()
             state.show_queue = False
         await self._safe_defer(interaction)
         from music.ui import update_player_ui

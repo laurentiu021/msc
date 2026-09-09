@@ -26,6 +26,36 @@ from music import youtube_api as yt_api
 COOKIE_CHAIN = [(WEB_CLIENTS, True)]
 GUEST_CHAIN = [(WEB_CLIENTS, False)]
 
+# Cat sta intrerupatorul inchis dupa 5 erori consecutive.
+BREAKER_COOLDOWN_SEC = 900
+
+
+def bump_play_generation(state) -> int:
+    """Invalideaza callback-ul after_play al piesei curente.
+
+    VoiceClient.stop() declanseaza ALWAYS callback-ul, deci fara asta orice
+    oprire deliberata (seek, nplay, inlocuire) avansa coada si stergea
+    fisierul care tocmai pornea.
+    """
+    state.play_generation += 1
+    return state.play_generation
+
+
+def make_after_play(ctx, state, filename):
+    """Callback de sfarsit de piesa, valid doar pentru generatia curenta."""
+    generation = bump_play_generation(state)
+
+    def after_play(err):
+        if err:
+            log.error(f"Eroare redare: {err}")
+        if state.play_generation != generation:
+            # Oprire deliberata: altcineva preia redarea si fisierul.
+            return
+        cleanup_file(filename, _loop)
+        play_next(ctx)
+
+    return after_play
+
 # Referinte setate din bot.py la startup
 bot = None
 update_player_ui = None
@@ -203,10 +233,14 @@ async def process_play(ctx, query, is_radio=False):
         state.is_loading = False
         state._consecutive_errors = 0
         state.autoplay = False
+        # Pauza reala: fara ea, timer-ul de 24/7 punea autoplay=True dupa 60s si
+        # ciclul de 5 erori repornea la infinit, batand un IP deja limitat.
+        state.breaker_until = time.time() + BREAKER_COOLDOWN_SEC
         try:
-            error_type, user_msg = diagnose_error(
-                state._last_notified_error or "unknown"
-            )
+            # diagnose_error primeste textul BRUT, nu cheia proprie de tip:
+            # cheia ("cookies", "ratelimit", ...) nu se re-mapeaza pe ea insasi
+            # si raportarea ieseau mereu "unknown".
+            error_type, _ = diagnose_error(state.last_raw_error or "unknown")
             await ctx.send(
                 f"⛔ **M-am oprit dupa 5 erori consecutive.**\n"
                 f"Ultima problema detectata: *{error_type}*\n"
@@ -219,6 +253,8 @@ async def process_play(ctx, query, is_radio=False):
         start_timeout(ctx)
         return
 
+    state.is_loading = True
+    failure = None
     filename = None
     formats_to_try = [
         'bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
@@ -286,6 +322,7 @@ async def process_play(ctx, query, is_radio=False):
                         successful_cookies = use_cookies
                         break
                 except Exception as e:
+                    state.last_raw_error = str(e)[:600]
                     log.warning(f"Search failed with client={label}: {e}")
 
             if not selected:
@@ -320,6 +357,7 @@ async def process_play(ctx, query, is_radio=False):
                 except ValueError:
                     raise
                 except Exception as e:
+                    state.last_raw_error = str(e)[:600]
                     log.warning(f"Retry failed for {vid_id}: {e}")
                     raise ValueError("YouTube a blocat acest video (0 formate reale)")
 
@@ -357,6 +395,7 @@ async def process_play(ctx, query, is_radio=False):
                         if filename and os.path.exists(filename):
                             break
                     except Exception as e:
+                        state.last_raw_error = str(e)[:600]
                         log.warning(f"Download esuat (cookies={use_cookies_dl}, fmt='{fmt}'): {e}")
 
         if not filename or not os.path.exists(filename):
@@ -377,6 +416,10 @@ async def process_play(ctx, query, is_radio=False):
         if not vc.is_connected():
             raise ConnectionError("Voice deconectat in timpul descarcarii.")
         if vc.is_playing():
+            # Oprire deliberata: invalidam callback-ul piesei vechi INAINTE de
+            # stop, altfel el avanseaza coada si sterge fisierul pe care tocmai
+            # il pornim (bug-ul de la !nplay).
+            bump_play_generation(state)
             vc.stop()
             await asyncio.sleep(0.3)
         if not vc.is_connected():
@@ -385,12 +428,7 @@ async def process_play(ctx, query, is_radio=False):
         state.last_start_time = time.time()
         state.current_file = filename
         captured_filename = filename
-
-        def after_play(err):
-            if err:
-                log.error(f"Eroare redare: {err}")
-            cleanup_file(captured_filename, _loop)
-            play_next(ctx)
+        after_play = make_after_play(ctx, state, captured_filename)
 
         try:
             source = await discord.FFmpegOpusAudio.from_probe(filename, **FFMPEG_OPTS)
@@ -399,8 +437,8 @@ async def process_play(ctx, query, is_radio=False):
             log.warning("OpusAudio esuat, fallback PCM", exc_info=True)
             vc.play(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTS), after=after_play)
 
-        state.is_loading = False
         state._consecutive_errors = 0
+        state.breaker_until = 0.0
         state._last_notified_error = None
         await update_player_ui(ctx, send_new=True)
 
@@ -429,23 +467,36 @@ async def process_play(ctx, query, is_radio=False):
         if state.queue:
             _loop.create_task(preload_next(ctx))
 
+    except asyncio.CancelledError:
+        # O comanda noua ne-a anulat. CancelledError e BaseException, deci fara
+        # aceasta ramura si fara finally-ul de mai jos is_loading ramanea True
+        # pentru totdeauna si botul tacea, conectat, la orice !play.
+        cleanup_file(filename, _loop)
+        raise
     except Exception as e:
         log.error(f"Eroare process_play: {e}", exc_info=True)
         cleanup_file(filename, _loop)
-        state.is_loading = False
         state._consecutive_errors += 1
+        failure = e
+    finally:
+        state.is_loading = False
 
-        # Trimite mesaj user-friendly pe Discord (o singura data per tip de eroare)
-        error_type, user_msg = diagnose_error(e)
-        if state._last_notified_error != error_type:
-            state._last_notified_error = error_type
-            try:
-                await ctx.send(user_msg, delete_after=60)
-            except discord.HTTPException:
-                pass
+    if failure is None:
+        return
 
-        await asyncio.sleep(min(2 * state._consecutive_errors, 15))
-        if state.autoplay or state.queue:
-            play_next(ctx)
-        else:
-            start_timeout(ctx)
+    # Diagnoza pe textul BRUT de la yt-dlp, nu pe mesajul nostru in romana:
+    # altfel toate erorile ieseau "Eroare necunoscuta" si sfatul despre
+    # reinnoirea cookie-urilor nu putea fi afisat niciodata.
+    error_type, user_msg = diagnose_error(state.last_raw_error or failure)
+    if state._last_notified_error != error_type:
+        state._last_notified_error = error_type
+        try:
+            await ctx.send(user_msg, delete_after=60)
+        except discord.HTTPException:
+            pass
+
+    await asyncio.sleep(min(2 * state._consecutive_errors, 15))
+    if state.autoplay or state.queue:
+        play_next(ctx)
+    else:
+        start_timeout(ctx)

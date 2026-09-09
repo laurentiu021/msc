@@ -5,8 +5,9 @@ import asyncio
 import os
 import time
 import random
-from music.config import YDL_OPTS_SEARCH, log
+from music.config import YDL_OPTS_SEARCH, FFMPEG_OPTS, log
 from music.state import get_state
+import music.player as player_mod
 from music.utils import safe_delete, format_time, cleanup_file
 from music.autoplay import prefill_autoplay_queue
 
@@ -102,8 +103,12 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
     async def skip(ctx):
         await safe_delete(ctx.message)
         state = get_state(ctx.guild.id)
-        state.skip_request = True
-        if ctx.voice_client and ctx.voice_client.is_playing(): ctx.voice_client.stop()
+        vc = ctx.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            state.skip_request = True
+            vc.stop()
+        else:
+            await ctx.send("Nu se reda nimic.", delete_after=5)
 
     @bot.command()
     async def nplay(ctx, *, search):
@@ -181,18 +186,18 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             return await ctx.send("Format invalid. Ex: !seek 1:30", delete_after=5)
         if state.last_duration and seconds >= state.last_duration:
             return await ctx.send("Depaseste durata piesei.", delete_after=5)
+        filename = state.current_file
+        if not filename or not os.path.exists(filename):
+            return await ctx.send("Nu am fisierul piesei ca sa pot cauta in el.", delete_after=5)
+        # Invalidam callback-ul piesei curente INAINTE de stop: altfel el avansa
+        # coada si stergea exact fisierul in care cautam.
+        player_mod.bump_play_generation(state)
         vc.stop()
         await asyncio.sleep(0.3)
         state.last_start_time = time.time() - seconds
-        state.is_loading = False
-        filename = state.current_file
-        def after_play(err):
-            if err: log.error(f"Eroare seek: {err}")
-            play_next(ctx)
-        seek_opts = {
-            'before_options': f'-ss {seconds}',
-            'options': '-vn -b:a 128k -ar 48000 -ac 2',
-        }
+        after_play = player_mod.make_after_play(ctx, state, filename)
+        seek_opts = dict(FFMPEG_OPTS)
+        seek_opts['before_options'] = f'-ss {seconds}'
         try:
             source = await discord.FFmpegOpusAudio.from_probe(filename, **seek_opts)
             vc.play(source, after=after_play)
@@ -210,6 +215,8 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             cancel_timeout(ctx)
             state.autoplay = True; state.loop_mode = 0
             state.show_queue = True
+            state.breaker_until = 0.0
+            state.idle_quiet_until = 0.0
             if not state.queue and state.last_url:
                 try: await prefill_autoplay_queue(state, bot.loop)
                 except Exception: pass
@@ -217,7 +224,6 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             await update_player_ui(ctx)
         else:
             state.autoplay = False
-            state.queue.clear()
             state.show_queue = False
             await ctx.send("24/7 OFF.", delete_after=5)
             await update_player_ui(ctx)

@@ -32,6 +32,30 @@ class GuildState:
         self._consecutive_errors = 0
         self._last_notified_error: str | None = None
 
+        # Token de generatie pentru callback-ul after_play. VoiceClient.stop()
+        # declanseaza ALWAYS callback-ul, deci un stop deliberat (seek, nplay,
+        # inlocuirea piesei) facea coada sa avanseze si stergea fisierul care
+        # tocmai pornea. Cine opreste intentionat incrementeaza generatia;
+        # callback-ul vechi vede alt numar si iese fara sa faca nimic.
+        self.play_generation = 0
+
+        # Pauza dupa 5 erori consecutive. Fara ea, timer-ul de 24/7 reactiva
+        # autoplay la fiecare 60s si intrerupatorul nu putea tine niciodata.
+        self.breaker_until = 0.0
+
+        # Pauza dupa un prefill de autoplay care n-a intors nimic, ca sa nu
+        # batem YouTube-ul din minut in minut cand ne blocheaza.
+        self.idle_quiet_until = 0.0
+
+        # Ultimul mesaj de eroare BRUT de la yt-dlp. Mesajele noastre in romana
+        # il inlocuiau inainte sa ajunga la diagnoza, deci fiecare eroare ieseau
+        # ca "Eroare necunoscuta" si sfatul despre cookies nu putea fi afisat.
+        self.last_raw_error: str | None = None
+
+        # View-ul curent, ca sa poata fi oprit inainte de a fi inlocuit.
+        # Message.delete() nu il scoate din ViewStore-ul lui discord.py.
+        self.current_view = None
+
 
 guild_states: dict[int, GuildState] = {}
 

@@ -4,6 +4,7 @@ import sys
 import logging
 import asyncio
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -144,31 +145,63 @@ def cancel_timeout(ctx):
 
 
 async def idle_timer(ctx):
-    await asyncio.sleep(60)
+    """Detecteaza inactivitatea. NU reda nimic: doar programeaza si se re-armeaza.
+
+    Inainte, aceasta functie facea ea insasi redarea, in interiorul task-ului pe
+    care fiecare comanda il anuleaza. CancelledError e BaseException, deci
+    process_play murea fara sa elibereze is_loading, si botul tacea la orice
+    !play. Acum redarea pleaca in propriul task, iar timer-ul se re-armeaza
+    intotdeauna, altfel 24/7 murea definitiv la primul prefill fara rezultate.
+    """
     state = get_state(ctx.guild.id)
-    vc = ctx.voice_client
-    if state.always_on:
-        if vc and vc.is_connected() and not vc.is_playing() and not vc.is_paused():
-            if state.last_url and not state.is_loading:
-                state.autoplay = True
-                if not state.queue:
-                    try:
-                        await prefill_autoplay_queue(state, bot.loop)
-                    except Exception:
-                        pass
-                if state.queue:
-                    state.is_loading = True
-                    next_item = state.queue.pop(0)
-                    await player.process_play(ctx, next_item['query'], is_radio=True)
-        return
-    if vc and vc.is_connected() and not vc.is_playing() and not vc.is_paused():
-        await vc.disconnect()
-        await safe_delete(state.current_msg)
-        state.current_msg = await ctx.send(
-            "Am iesit - inactiv 1 minut.", delete_after=15
-        )
-        state.queue.clear()
-        state.history.clear()
+    cancelled = False
+    try:
+        await asyncio.sleep(60)
+        vc = ctx.voice_client
+        connected = bool(vc and vc.is_connected())
+        idle = connected and not vc.is_playing() and not vc.is_paused()
+
+        if state.always_on:
+            if not connected or not idle or state.is_loading:
+                return
+            now = time.time()
+            if now < state.breaker_until or now < state.idle_quiet_until:
+                return
+            if not state.last_url:
+                return
+            state.autoplay = True
+            if not state.queue:
+                try:
+                    await prefill_autoplay_queue(state, bot.loop)
+                except Exception as e:
+                    music_log.warning(f"Prefill 24/7 esuat: {e}")
+            if state.queue:
+                player.play_next(ctx)
+            else:
+                # Nimic de redat: taci 5 minute in loc sa bati YouTube-ul
+                # din minut in minut cat timp ne blocheaza.
+                state.idle_quiet_until = time.time() + 300
+                music_log.info("24/7: nimic de redat, reincerc in 5 minute")
+            return
+
+        if idle:
+            await vc.disconnect()
+            await safe_delete(state.current_msg)
+            state.current_msg = await ctx.send(
+                "Am iesit - inactiv 1 minut.", delete_after=15
+            )
+            state.queue.clear()
+            state.history.clear()
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
+    finally:
+        # Re-armare doar daca nu am fost anulati (altfel cancel_timeout n-ar
+        # avea niciun efect) si doar in 24/7, unde botul trebuie sa rezista.
+        # call_soon amana pana task-ul e done, ca start_timeout sa nu se
+        # anuleze pe el insusi.
+        if not cancelled and state.always_on:
+            bot.loop.call_soon(start_timeout, ctx)
 
 
 player.init(bot, update_player_ui, start_timeout, cancel_timeout)
@@ -206,8 +239,15 @@ async def on_voice_state_update(member, before, after):
         cancel_timeout(member.guild)
 
     if not member.bot and before.channel:
+        state = get_state(member.guild.id)
+        # 24/7 inseamna exact "stai conectat", deci nu plecam.
+        if state.always_on:
+            return
         bot_in_channel = any(m == bot.user for m in before.channel.members)
-        if bot_in_channel and len(before.channel.members) == 1:
+        # Numaram doar oamenii: "len(members) == 1" nu se declansa deloc daca
+        # in canal mai statea un al doilea bot, si Gogu cânta la pereti.
+        humans_left = [m for m in before.channel.members if not m.bot]
+        if bot_in_channel and not humans_left:
             await asyncio.sleep(20)
             vc = member.guild.voice_client
             if vc and vc.channel == before.channel:
