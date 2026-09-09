@@ -1,5 +1,6 @@
 """Functii utilitare: cleanup, format, filtrare."""
 import os
+import re
 import asyncio
 import discord
 from music.config import (BLACKLIST, DOWNLOAD_DIR, MAX_TRACK_SECONDS,
@@ -12,6 +13,27 @@ async def safe_delete(msg):
             await msg.delete()
         except discord.HTTPException:
             pass
+
+
+def clean_search_title(title) -> str:
+    """Curata un titlu pentru cautare.
+
+    'Los Del Rio - Macarena (Official Video)' -> 'Los Del Rio - Macarena'
+    Exista o singura data: autoplay.py si youtube_api.py aveau fiecare varianta
+    proprie, cu liste diferite de cuvinte, deci aceeasi piesa era curatata
+    diferit in functie de cine o cerea si cota de API se ducea pe cozi murdare.
+    """
+    title = str(title or '')
+    clean = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
+    clean = re.sub(
+        r'(official|video|audio|lyrics|lyric|hd|hq|4k|mv|music\s*video|'
+        r'visualizer|visualiser|clip|feat\.?|ft\.?|prod\.?|remix|'
+        r'challenge|reaction|tutorial|cover|live|performance|vevo)',
+        '', clean, flags=re.I
+    ).strip()
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    clean = re.sub(r'\s*[-|]+\s*$', '', clean).strip()
+    return clean if len(clean) >= 3 else title
 
 
 def item_title(item, limit: int | None = None) -> str:

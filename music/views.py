@@ -160,6 +160,9 @@ class MusicControlView(discord.ui.View):
 
     @discord.ui.button(label="Autoplay", style=discord.ButtonStyle.secondary, custom_id="autoplay", row=1)
     async def autoplay_btn(self, interaction: discord.Interaction, button):
+        # Ack-ul primul: Discord da drumul la doar 3 secunde, iar prefill-ul de
+        # mai jos face cereri de retea care pot depasi usor acest buget.
+        await self._safe_defer(interaction)
         state = get_state(self.ctx.guild.id)
         state.autoplay = not state.autoplay
         if state.autoplay:
@@ -172,7 +175,6 @@ class MusicControlView(discord.ui.View):
                     log.warning(f"Prefill esuat: {e}")
         else:
             state.show_queue = False
-        await self._safe_defer(interaction)
         from music.ui import update_player_ui
         await update_player_ui(self.ctx)
 

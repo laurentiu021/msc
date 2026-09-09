@@ -57,6 +57,27 @@ def sanitize_query(raw: str) -> tuple[str | None, str | None]:
 def setup_music_commands(bot, process_play, play_next, update_player_ui, start_timeout, cancel_timeout):
     """Inregistreaza toate comenzile muzicale pe bot."""
 
+    async def _ensure_voice(ctx):
+        """Conecteaza-te la canalul autorului. None daca nu se poate.
+
+        connect() nu avea niciun guard: fara permisiunea Connect utilizatorul
+        aștepta 30 de secunde fara niciun raspuns.
+        """
+        if ctx.voice_client:
+            return ctx.voice_client
+        try:
+            return await ctx.author.voice.channel.connect(timeout=15.0)
+        except asyncio.TimeoutError:
+            await ctx.send("Nu am reusit sa intru in voce (timeout).", delete_after=10)
+        except discord.ClientException as e:
+            log.warning(f"Voice connect: {e}")
+            await ctx.send("Sunt deja conectat altundeva.", delete_after=10)
+        except discord.HTTPException as e:
+            log.warning(f"Voice connect HTTP: {e}")
+            await ctx.send("Nu am permisiunea sa intru in canalul tau de voce.",
+                           delete_after=10)
+        return None
+
     async def _resolve_platform_url(query: str) -> str:
         for platform in ['open.spotify.com/', 'spotify:', 'deezer.com/']:
             if platform in query:
@@ -86,7 +107,9 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             return await ctx.send(reason, delete_after=10)
         if not ctx.author.voice:
             return await ctx.send("Intra pe voce!", delete_after=5)
-        vc = ctx.voice_client or await ctx.author.voice.channel.connect()
+        vc = await _ensure_voice(ctx)
+        if vc is None:
+            return
         state = get_state(ctx.guild.id)
         cancel_timeout(ctx)
 
@@ -168,7 +191,9 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         if reason:
             return await ctx.send(reason, delete_after=10)
         if not ctx.author.voice: return await ctx.send("Intra pe voce!", delete_after=5)
-        vc = ctx.voice_client or await ctx.author.voice.channel.connect()
+        vc = await _ensure_voice(ctx)
+        if vc is None:
+            return
         state = get_state(ctx.guild.id)
         cancel_timeout(ctx)
         if any(p in search for p in ['spotify.com/', 'deezer.com/']):

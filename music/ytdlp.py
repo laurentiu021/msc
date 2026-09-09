@@ -22,6 +22,12 @@ from music.config import (YT_REQUEST_MAX_INTERVAL_SEC,
 _LOCK = asyncio.Lock()
 _NEXT_ALLOWED_AT = 0.0
 
+# Plafon absolut per cerere. socket_timeout acopera doar inactivitatea pe socket:
+# un stream care curge foarte lent, sau un manifest live, putea tine un thread
+# din executor ocupat pe viata procesului, fara nimic in loguri.
+EXTRACT_TIMEOUT_SEC = 90
+DOWNLOAD_TIMEOUT_SEC = 240
+
 
 async def wait_for_slot():
     """Asteapta pana e permisa urmatoarea cerere catre YouTube."""
@@ -51,11 +57,18 @@ async def extract(opts: dict, query: str, *, download: bool = False,
     """
     await wait_for_slot()
     loop = loop or asyncio.get_running_loop()
+    budget = DOWNLOAD_TIMEOUT_SEC if download else EXTRACT_TIMEOUT_SEC
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            return await loop.run_in_executor(
-                None, lambda: ydl.extract_info(query, download=download)
+            return await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, lambda: ydl.extract_info(query, download=download)
+                ),
+                timeout=budget,
             )
+    except asyncio.TimeoutError as e:
+        raise TimeoutError(
+            f"yt-dlp a depasit {budget}s la {stage or 'cerere'}") from e
     finally:
         # Si pe eroare: o cerere care a picat a consumat oricum cota YouTube.
         _reserve_next_slot()
@@ -74,10 +87,16 @@ async def extract_and_prepare_filename(opts: dict, query: str, *, loop=None,
     loop = loop or asyncio.get_running_loop()
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = await loop.run_in_executor(
-                None, lambda: ydl.extract_info(query, download=True)
+            info = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, lambda: ydl.extract_info(query, download=True)
+                ),
+                timeout=DOWNLOAD_TIMEOUT_SEC,
             )
             return info, ydl.prepare_filename(info)
+    except asyncio.TimeoutError as e:
+        raise TimeoutError(
+            f"descarcarea a depasit {DOWNLOAD_TIMEOUT_SEC}s") from e
     finally:
         _reserve_next_slot()
         if stage:

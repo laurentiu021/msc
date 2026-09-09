@@ -378,8 +378,23 @@ class _Health(BaseHTTPRequestHandler):
 
 
 async def _shutdown():
-    """Inchide curat: iese din voce inainte de a inchide gateway-ul."""
+    """Inchide curat: sterge panoul, iese din voce, apoi inchide gateway-ul."""
     log.info("Opresc botul (SIGTERM/SIGINT)...")
+    # View-urile au timeout=None dar nu sunt inregistrate ca persistente, deci
+    # dupa repornire butoanele vechi nu mai sunt ascultate de nimeni si Discord
+    # arata "This interaction failed". Le luam de pe masa la oprire.
+    for state in list(guild_states.values()):
+        if state.current_view is not None:
+            try:
+                state.current_view.stop()
+            except Exception:
+                pass
+        await safe_delete(state.current_msg)
+        state.current_msg = None
+        state.current_view = None
+        if state.current_file:
+            cleanup_file(state.current_file)
+            state.current_file = None
     for vc in list(bot.voice_clients):
         try:
             await vc.disconnect(force=True)

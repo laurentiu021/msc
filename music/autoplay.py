@@ -3,6 +3,7 @@ import re
 from music.config import (BLACKLIST, MAX_TRACK_SECONDS, MIN_TRACK_SECONDS,
                           cookies_available, log, make_search_opts)
 from music.state import GuildState
+from music.utils import clean_search_title
 from music import youtube_api as yt_api
 from music import ytdlp
 
@@ -94,13 +95,22 @@ async def prefill_autoplay_queue(state: GuildState, bot_loop, target: int = 12):
     if added < needed:
         added += await _try_ytdlp_mix(state, bot_loop, origin_id, skip_ids, needed - added, artist_counts)
 
-    # Strategy 2: YouTube API related (search dupa artist — mai putin divers)
+    # Strategiile de API costa cota (100 unitati fiecare cerere de search, plus
+    # detaliile videoclipului). Le oprim dupa prima care nu aduce nimic: un
+    # prefill eșuat consuma sute de unitati din cele 10.000 pe zi, degeaba.
+    api_spent = 0
     if yt_api.is_available() and added < needed:
-        added += await _try_api_related(state, bot_loop, origin_id, skip_ids, needed - added, artist_counts)
+        got = await _try_api_related(state, bot_loop, origin_id, skip_ids,
+                                     needed - added, artist_counts)
+        added += got
+        api_spent += 1
+        if got == 0:
+            log.info("Autoplay: API related n-a adus nimic, nu mai cheltui cota")
 
     # Strategy 3: YouTube API search (dupa titlu)
-    if yt_api.is_available() and added < needed:
-        added += await _try_api_search(state, bot_loop, state.last_title, skip_ids, needed - added, artist_counts)
+    if yt_api.is_available() and added < needed and api_spent < 2 and added > 0:
+        added += await _try_api_search(state, bot_loop, state.last_title, skip_ids,
+                                       needed - added, artist_counts)
 
     # Strategy 4: yt-dlp search (ultima sansa)
     if added < needed:

@@ -9,6 +9,7 @@ import urllib.parse
 import json
 import re
 from music.config import log, BLACKLIST
+from music.utils import clean_search_title
 
 API_KEY = os.getenv('YOUTUBE_API_KEY')
 _BASE = 'https://www.googleapis.com/youtube/v3'
@@ -233,46 +234,30 @@ def get_related_videos(video_id: str, max_results: int = 15) -> list[dict]:
     return results[:max_results]
 
 
+def _song_part(title: str) -> str:
+    """Partea de titlu de dupa numele artistului, cand exista un separator."""
+    cleaned = clean_search_title(title)
+    if ' - ' in cleaned:
+        return cleaned.split(' - ', 1)[1]
+    return cleaned
+
+
 def _titles_too_similar(title_a: str, title_b: str) -> bool:
-    """Verifica daca doua titluri sunt prea similare (aceeasi piesa, alta versiune)."""
-    a = _clean_search_title(title_a).lower().split()
-    b = _clean_search_title(title_b).lower().split()
+    """Aceeasi piesa in alta versiune? Comparam PIESA, nu artistul.
+
+    Inainte se comparau titlurile intregi, deci doua piese diferite ale
+    aceluiasi artist puteau depasi pragul doar din numele lui: pentru un artist
+    din trei cuvinte, 3 tokeni comuni din 4 dau 0.75 si a doua piesa era
+    respinsa. Radio-ul rămânea astfel fara candidati exact la artistii pe care
+    ii ascultai.
+    """
+    a = _song_part(title_a).lower().split()
+    b = _song_part(title_b).lower().split()
     if not a or not b:
         return False
     common = set(a) & set(b)
     shorter = min(len(a), len(b))
-    # If 70%+ of words match, it's probably the same song
     return shorter > 0 and len(common) / shorter >= 0.7
-
-
-def get_playlist_items(playlist_id: str, max_results: int = 50) -> list[dict]:
-    """Extrage video-uri dintr-un playlist. Costa 1 unitate.
-    Folosit pentru YouTube Mix (RD playlists) si playlists normale.
-    """
-    data = _api_get('playlistItems', {
-        'part': 'snippet',
-        'playlistId': playlist_id,
-        'maxResults': min(max_results, 50),
-    })
-    if not data:
-        return []
-
-    results = []
-    for item in data.get('items', []):
-        snippet = item.get('snippet', {})
-        vid_id = snippet.get('resourceId', {}).get('videoId')
-        if not vid_id:
-            continue
-        title = snippet.get('title', '')
-        if title in ('Deleted video', 'Private video'):
-            continue
-        results.append({
-            'id': vid_id,
-            'title': title,
-            'channel': snippet.get('videoOwnerChannelTitle', ''),
-            'thumbnail': snippet.get('thumbnails', {}).get('high', {}).get('url', ''),
-        })
-    return results
 
 
 def _parse_duration(iso: str) -> int:

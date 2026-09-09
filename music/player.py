@@ -26,6 +26,22 @@ GUEST_CHAIN = [(WEB_CLIENTS, False)]
 BREAKER_COOLDOWN_SEC = 900
 
 
+def _scrub(text) -> str:
+    """Scoate URL-ul de proxy din textul erorii inainte sa ajunga pe Discord.
+
+    yt-dlp include proxy-ul configurat in mesajele lui de eroare, iar YT_PROXY
+    poate conține user:parola.
+    """
+    out = str(text)
+    proxy = os.getenv('YT_PROXY')
+    if proxy:
+        out = out.replace(proxy, '<proxy>')
+        host = proxy.split('@')[-1]
+        if host and host != proxy:
+            out = out.replace(host, '<proxy>')
+    return out
+
+
 def bump_play_generation(state) -> int:
     """Invalideaza callback-ul after_play al piesei curente.
 
@@ -367,11 +383,19 @@ async def process_play(ctx, query, is_radio=False):
         captured_filename = filename
         after_play = make_after_play(ctx, state, captured_filename)
 
+        source = None
         try:
             source = await discord.FFmpegOpusAudio.from_probe(filename, **FFMPEG_OPTS)
             vc.play(source, after=after_play)
         except Exception:
             log.warning("OpusAudio esuat, fallback PCM", exc_info=True)
+            # Daca from_probe a reusit dar vc.play a crapat, procesul FFmpeg
+            # pornit de el rămânea in viata; il inchidem inainte de fallback.
+            if source is not None:
+                try:
+                    source.cleanup()
+                except Exception:
+                    pass
             vc.play(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTS), after=after_play)
 
         state._consecutive_errors = 0
@@ -407,6 +431,12 @@ async def process_play(ctx, query, is_radio=False):
         # pentru totdeauna si botul tacea, conectat, la orice !play.
         cleanup_file(filename, _loop)
         raise
+    except ConnectionError as e:
+        # !stop, deconectare sau mutare din canal in timpul descarcarii. Nu e o
+        # defectiune: inainte urca numaratoarea de erori spre intrerupator si ii
+        # arunca utilizatorului "Eroare necunoscuta" pentru propria lui comanda.
+        log.info(f"Redare intrerupta: {e}")
+        cleanup_file(filename, _loop)
     except Exception as e:
         log.error(f"Eroare process_play: {e}", exc_info=True)
         cleanup_file(filename, _loop)
@@ -421,7 +451,7 @@ async def process_play(ctx, query, is_radio=False):
     # Diagnoza pe textul BRUT de la yt-dlp, nu pe mesajul nostru in romana:
     # altfel toate erorile ieseau "Eroare necunoscuta" si sfatul despre
     # reinnoirea cookie-urilor nu putea fi afisat niciodata.
-    error_type, user_msg = diagnose_error(state.last_raw_error or failure)
+    error_type, user_msg = diagnose_error(_scrub(state.last_raw_error or failure))
     if state._last_notified_error != error_type:
         state._last_notified_error = error_type
         try:
