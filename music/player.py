@@ -7,7 +7,7 @@ import time
 import random
 from music.config import YDL_OPTS_SEARCH, YDL_OPTS_DOWNLOAD, FFMPEG_OPTS, log
 from music.config import (get_opts_with_cookies, has_real_formats,
-                          count_real_formats, yt_client_args)
+                          count_real_formats, yt_client_args, WEB_CLIENTS)
 from music.config import (
     YT_REQUEST_MIN_INTERVAL_SEC,
     YT_REQUEST_MAX_INTERVAL_SEC,
@@ -17,6 +17,14 @@ from music.utils import is_clean, cleanup_file
 from music.autoplay import prefill_autoplay_queue
 from music.errors import diagnose_error
 from music import youtube_api as yt_api
+
+# Lanturile de clienti, la nivel de modul ca sa fie verificabile de teste.
+# Cerem ambii clienti in ACEEASI cerere: yt-dlp cumuleaza formatele, deci pool-ul
+# e mult mai mare pe acelasi numar de cereri. Masurat in producție: mweb singur a
+# dat 5 formate / 1 redabil, perechea a dat 40 / 13. Un singur format redabil e o
+# marja prea subtire pentru redare.
+COOKIE_CHAIN = [(WEB_CLIENTS, True)]
+GUEST_CHAIN = [(WEB_CLIENTS, False)]
 
 # Referinte setate din bot.py la startup
 bot = None
@@ -234,23 +242,14 @@ async def process_play(ctx, query, is_radio=False):
                 cleanup_file(preloaded.get('filename'), _loop)
                 state.preloaded = None
 
-            # Search cu multiple strategii pana gasim formate reale.
-            # Doar clienti web, singurii pentru care bgutil poate emite PO Token.
-            # Cerem ambii clienti in ACEEASI cerere: yt-dlp cumuleaza formatele,
-            # deci pool-ul e mult mai mare pe acelasi numar de cereri. Masurat:
-            # mweb singur a dat 5 formate / 1 redabil, perechea a dat 40 / 13.
-            # Un singur format redabil e o marja prea subtire pentru redare.
-            _WEB_CLIENTS = ('mweb', 'web_safari')
-            _COOKIE_CHAIN = [(_WEB_CLIENTS, True)]
-            _GUEST_CHAIN = [(_WEB_CLIENTS, False)]
             # Cookies primele, pentru ca de pe IP-ul de datacenter al Railway
             # calea de guest ajunge la 429 pe webpage -> lipsa Visitor Data ->
             # niciun GVS PO Token -> zero formate redabile. Guest ramane in
             # coada pentru cand IP-ul nu e limitat.
             _CLIENT_CHAINS = (
-                _COOKIE_CHAIN + _GUEST_CHAIN
+                COOKIE_CHAIN + GUEST_CHAIN
                 if get_opts_with_cookies()[0] is not None
-                else _GUEST_CHAIN
+                else GUEST_CHAIN
             )
             selected = None
             successful_client = None
@@ -303,7 +302,7 @@ async def process_play(ctx, query, is_radio=False):
                 retry_url = web_url if web_url.startswith('http') else \
                     f"https://www.youtube.com/watch?v={vid_id}"
                 retry_opts = dict(YDL_OPTS_SEARCH)
-                retry_opts['extractor_args'] = yt_client_args(*_WEB_CLIENTS)
+                retry_opts['extractor_args'] = yt_client_args(*WEB_CLIENTS)
                 retry_opts['default_search'] = None  # use URL directly
                 try:
                     retry_info = await _yt_extract_info(

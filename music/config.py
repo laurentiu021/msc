@@ -32,9 +32,15 @@ def yt_client_args(*clients):
 # (yt_dlp.extractor.youtube.pot.utils.WEBPO_CLIENTS).
 # android_vr / ios sunt inutilizabile aici: din yt-dlp 2026.08 cer si ele GVS PO
 # Token, iar acela vine din DroidGuard/iOSGuard, nu din BotGuard-ul lui bgutil.
-# Fara token, formatele lor sunt pur si simplu omise. Testul din
-# tests/test_extractor_args.py refuza orice client din afara listei.
-_YT_EXTRACTOR_ARGS = yt_client_args('mweb', 'web_safari')
+# Fara token, formatele lor sunt pur si simplu omise.
+#
+# WEB_CLIENTS e singura definitie a clientilor folositi la runtime — atat pentru
+# opts-urile de mai jos, cat si pentru lanturile din player.py. Cand era duplicata
+# in player.py, testul verifica doar copia din config si o schimbare in player
+# trecea nedetectata. tests/test_extractor_args.py verifica acum ambele.
+WEB_CLIENTS = ('mweb', 'web_safari')
+
+_YT_EXTRACTOR_ARGS = yt_client_args(*WEB_CLIENTS)
 
 # Proxy optional — setat via env var YT_PROXY (ex: socks5://host:port)
 _proxy = os.getenv('YT_PROXY')

@@ -57,9 +57,9 @@ def test_every_client_can_get_a_po_token_from_bgutil():
     from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
     from yt_dlp.extractor.youtube.pot.utils import WEBPO_CLIENTS
 
-    for name, opts in (('SEARCH', YDL_OPTS_SEARCH),
-                       ('DOWNLOAD', YDL_OPTS_DOWNLOAD)):
-        for client in _resolved_clients(opts['extractor_args']):
+    def check(name, clients):
+        assert clients, f'{name}: niciun client'
+        for client in clients:
             spec = INNERTUBE_CLIENTS.get(client)
             assert spec, f'{name}: {client!r} nu e un client yt-dlp valid'
             inner = spec['INNERTUBE_CONTEXT']['client']['clientName']
@@ -67,6 +67,23 @@ def test_every_client_can_get_a_po_token_from_bgutil():
                 f'{name}: {client} -> {inner} nu e in WEBPO_CLIENTS, '
                 f'deci bgutil nu-i poate emite GVS PO Token'
             )
+
+    for name, opts in (('SEARCH', YDL_OPTS_SEARCH),
+                       ('DOWNLOAD', YDL_OPTS_DOWNLOAD)):
+        check(name, _resolved_clients(opts['extractor_args']))
+
+    # Lanturile din player.py sunt cele folosite EFECTIV la runtime. Cand erau
+    # definite local in process_play, testul verifica doar copia din config si o
+    # schimbare in player trecea nedetectata — exact regresia pe care testul
+    # trebuie sa o previna.
+    from music import player
+    for name, chain in (('COOKIE_CHAIN', player.COOKIE_CHAIN),
+                        ('GUEST_CHAIN', player.GUEST_CHAIN)):
+        assert chain, f'{name} e gol'
+        for clients, _use_cookies in chain:
+            check(name, list(clients))
+            check(f'{name} via yt_client_args',
+                  _resolved_clients(yt_client_args(*clients)))
 
 
 def test_download_format_selector_prefers_opus():
