@@ -36,21 +36,23 @@ try:
     print('  bgutil-ytdlp-pot-provider: LOADED')
 except ImportError as e:
     print(f'  bgutil-ytdlp-pot-provider: NOT FOUND ({e})')
-import os
-print(f'  GETPOT_BGUTIL_BASE_URL={os.getenv(\"GETPOT_BGUTIL_BASE_URL\", \"NOT SET\")}')
+import importlib.metadata as _md
+print('  bgutil plugin version:', _md.version('bgutil-ytdlp-pot-provider'))
+print('  base_url: plugin default http://127.0.0.1:4416')
 " 2>&1 || echo "[STARTUP] Plugin check failed"
 
 # Quick verbose test to see if PO Token is being generated (always run for debug)
 # DISABLED — probe consumes the fresh YouTube session and causes 429 for the bot
 # echo "[STARTUP] Running verbose yt-dlp probe..."
 
-# Verify PO Token server is responding
+# Verify PO Token server is responding. /ping is the endpoint the plugin itself
+# probes and it returns the server version, so this doubles as a version check.
 if command -v curl &> /dev/null; then
-    POT_TEST=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:4416/token 2>/dev/null || echo "failed")
-    if [ "$POT_TEST" = "failed" ]; then
-        echo "[STARTUP] WARNING: PO Token server health check failed"
+    POT_PING=$(curl -s --max-time 5 http://127.0.0.1:4416/ping 2>/dev/null || echo "failed")
+    if [ "$POT_PING" = "failed" ] || [ -z "$POT_PING" ]; then
+        echo "[STARTUP] WARNING: PO Token server /ping unreachable"
     else
-        echo "[STARTUP] PO Token server reachable (HTTP $POT_TEST)"
+        echo "[STARTUP] PO Token server /ping: $POT_PING"
     fi
 fi
 

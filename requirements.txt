@@ -1,6 +1,11 @@
 discord.py[voice]>=2.3.0
-yt-dlp[default]
-bgutil-ytdlp-pot-provider
+# Pinned: floating versions made builds unreproducible and let the image sit on a
+# stale yt-dlp for months (Docker layer cache never re-ran the install).
+yt-dlp[default]==2026.8.19
+# 2.0.0 patches GHSA-qpv9-8xfj-xx9m (RCE via 0.0.0.0 bind) and carries the 1.3.2
+# WebPO homepage-challenge minting that mitigates GVS 403s. Keep in sync with the
+# server tag pinned in the Dockerfile.
+bgutil-ytdlp-pot-provider==2.0.0
 PySocks
 PyNaCl
 python-dotenv>=1.0.0
