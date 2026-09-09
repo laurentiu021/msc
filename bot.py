@@ -79,10 +79,11 @@ except Exception as e:
 # Test yt-dlp (rapid, cu timeout) — prin SOCKS5 poate bloca minute dacă proxy-ul e lent; nu întârzie niciodată login-ul Discord.
 def _ytdlp_startup_probe():
     import yt_dlp
+    from music.config import yt_client_args
     test_opts = {
         'quiet': True, 'no_warnings': True, 'skip_download': True,
         'format': 'best', 'socket_timeout': 8,
-        'extractor_args': {'youtube': 'player_client=mweb,web_safari'},
+        'extractor_args': yt_client_args('android_vr', 'web_safari'),
     }
     if _yt_proxy:
         test_opts['proxy'] = _yt_proxy

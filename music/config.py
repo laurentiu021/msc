@@ -13,12 +13,23 @@ BLACKLIST = [
     "asmr", "karaoke", "instrumental", "tutorial",
 ]
 
-# PO Token provider pe port 4416 (bgutil in acelasi container)
-# mweb = client principal (cu PO Token via bgutil plugin)
-# web_safari = fallback (HLS m3u8, nu cere PO Token pt GVS deocamdata)
-_YT_EXTRACTOR_ARGS = {
-    'youtube': 'player_client=mweb,web_safari',
-}
+def yt_client_args(*clients):
+    """Construieste extractor_args pentru API-ul Python al yt-dlp.
+
+    ATENTIE, capcana: API-ul cere dict-de-dict. Forma de linie de comanda
+    ({'youtube': 'player_client=mweb'}) e primita fara nicio eroare, dar
+    ignorata complet, iar yt-dlp foloseste clientii impliciti. Din cauza ei
+    lanturile de clienti de mai jos rulau toate acelasi set implicit,
+    multiplicand cererile degeaba si provocand 429 si 403.
+    Vezi tests/test_extractor_args.py.
+    """
+    return {'youtube': {'player_client': list(clients)}}
+
+
+# android_vr e singurul client care nu cere nici cookies, nici PO Token
+# (yt-dlp PO Token Guide). Limita lui: videoclipurile "Made for kids" nu sunt
+# accesibile — de aceea web_safari ramane in coada, scutit de GVS token pe HLS.
+_YT_EXTRACTOR_ARGS = yt_client_args('android_vr', 'web_safari')
 
 # Proxy optional — setat via env var YT_PROXY (ex: socks5://host:port)
 _proxy = os.getenv('YT_PROXY')

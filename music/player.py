@@ -6,7 +6,7 @@ import os
 import time
 import random
 from music.config import YDL_OPTS_SEARCH, YDL_OPTS_DOWNLOAD, FFMPEG_OPTS, log
-from music.config import get_opts_with_cookies, has_real_formats
+from music.config import get_opts_with_cookies, has_real_formats, yt_client_args
 from music.config import (
     YT_REQUEST_MIN_INTERVAL_SEC,
     YT_REQUEST_MAX_INTERVAL_SEC,
@@ -234,22 +234,24 @@ async def process_play(ctx, query, is_radio=False):
                 state.preloaded = None
 
             # Search cu multiple strategii pana gasim formate reale.
+            # Ordinea e masurata, nu presupusa: pe acelasi videoclip, fara
+            # cookies si fara PO Token server, android_vr a dat 27 formate
+            # (4 audio-only, opus 139kbps), iar web_embedded, tv, mweb si
+            # web_safari au dat toate 4 formate / 0 reale.
             _GUEST_CHAIN = [
-                ('mweb', False),                  # mweb + PO Token (bgutil plugin)
-                ('web_safari', False),            # HLS fallback (nu cere PO Token pt GVS)
-                ('android_vr', False),            # android_vr (nu cere PO Token, limitat)
-                ('tv_embedded', False),           # tv_embedded (fara SABR deocamdata)
+                ('android_vr', False),            # nici cookies, nici PO Token
+                ('web_safari', False),            # HLS scutit de GVS token
+                ('mweb', False),                  # GVS token via bgutil
             ]
             _COOKIE_CHAIN = [
                 ('mweb', True),
                 ('web_safari', True),
             ]
-            # Cookies primele cand exista. De pe IP-ul de datacenter al Railway,
-            # calea de guest ajunge invariabil la 429 pe webpage -> lipsa Visitor
-            # Data -> niciun GVS PO Token -> 0 formate reale. Incercata prima,
-            # pierde ~8s si trage 4 rafale de cereri care chiar ele provoaca 429.
+            # Guest primul: daca merge, cookies-urile devin inutile si scapam de
+            # intretinerea lor. Cookies ramane plasa de siguranta, pentru cazuri
+            # ca "Made for kids", pe care android_vr nu le poate atinge.
             _CLIENT_CHAINS = (
-                _COOKIE_CHAIN + _GUEST_CHAIN
+                _GUEST_CHAIN + _COOKIE_CHAIN
                 if get_opts_with_cookies()[0] is not None
                 else _GUEST_CHAIN
             )
@@ -258,13 +260,13 @@ async def process_play(ctx, query, is_radio=False):
             successful_cookies = False
             for clients, use_cookies in _CLIENT_CHAINS:
                 search_opts = dict(YDL_OPTS_SEARCH)
-                search_opts['extractor_args'] = {'youtube': f'player_client={clients}'}
+                search_opts['extractor_args'] = yt_client_args(clients)
                 if use_cookies:
                     cookie_search, _ = get_opts_with_cookies()
                     if not cookie_search:
                         continue
                     search_opts = cookie_search
-                    search_opts['extractor_args'] = {'youtube': f'player_client={clients}'}
+                    search_opts['extractor_args'] = yt_client_args(clients)
 
                 try:
                     info = await _yt_extract_info(
@@ -306,7 +308,7 @@ async def process_play(ctx, query, is_radio=False):
                 retry_url = web_url if web_url.startswith('http') else \
                     f"https://www.youtube.com/watch?v={vid_id}"
                 retry_opts = dict(YDL_OPTS_SEARCH)
-                retry_opts['extractor_args'] = {'youtube': 'player_client=mweb'}
+                retry_opts['extractor_args'] = yt_client_args('android_vr')
                 retry_opts['default_search'] = None  # use URL directly
                 try:
                     retry_info = await _yt_extract_info(
@@ -343,13 +345,13 @@ async def process_play(ctx, query, is_radio=False):
                                 break  # no cookies available
                             dl_opts['format'] = fmt
                             if successful_client:
-                                dl_opts['extractor_args'] = {'youtube': f'player_client={successful_client}'}
+                                dl_opts['extractor_args'] = yt_client_args(successful_client)
                             log.info(f"Download WITH cookies, client={successful_client or 'default'}, format={fmt}")
                         else:
                             dl_opts = YDL_OPTS_DOWNLOAD.copy()
                             dl_opts['format'] = fmt
                             if successful_client:
-                                dl_opts['extractor_args'] = {'youtube': f'player_client={successful_client}'}
+                                dl_opts['extractor_args'] = yt_client_args(successful_client)
                         with yt_dlp.YoutubeDL(dl_opts) as ydl_dl:
                             dl_info = await _yt_extract_info(
                                 dl_opts, web_url, download=True, stage=f"download_{fmt}"
