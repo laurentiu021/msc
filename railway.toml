@@ -3,5 +3,9 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
+# /health raspunde 503 pana cand gateway-ul Discord e conectat, deci un deploy
+# care nu ajunge sa se logheze e prins aici in loc sa fie raportat ca reusit.
+healthcheckPath = "/health"
+healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

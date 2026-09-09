@@ -1,59 +1,63 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-echo "[STARTUP] Starting PO Token server..."
-node /opt/pot-provider/server/build/main.js --port 4416 &
-POT_PID=$!
+POT_PORT="${POT_PORT:-4416}"
+POT_URL="http://127.0.0.1:${POT_PORT}"
 
-sleep 3
+# Serverul de PO Token, supravegheat. Inainte era pornit o singura data si
+# nimeni nu se mai uita la el: daca procesul node murea, botul rămânea "sanatos"
+# si fiecare redare eseua cu 403, la infinit, fara nimic in loguri.
+supervise_pot() {
+    while true; do
+        node /opt/pot-provider/server/build/main.js --port "$POT_PORT" || true
+        echo "[SUPERVISOR] PO Token server a ieșit (cod $?). Repornesc in 5s."
+        sleep 5
+    done
+}
 
-if kill -0 $POT_PID 2>/dev/null; then
-    echo "[STARTUP] PO Token server running on port 4416 (PID: $POT_PID)"
-else
-    echo "[STARTUP] WARNING: PO Token server failed to start"
-fi
+echo "[STARTUP] Pornesc PO Token server pe portul ${POT_PORT}..."
+supervise_pot &
+POT_SUPERVISOR_PID=$!
 
-# Verify Deno is available (required for yt-dlp JS challenges)
-if command -v deno &> /dev/null; then
-    echo "[STARTUP] Deno available: $(deno --version | head -1)"
-else
-    echo "[STARTUP] WARNING: Deno not found — YouTube JS challenges may fail"
-fi
-
-# Verify yt-dlp version
-echo "[STARTUP] yt-dlp version: $(python -c 'import yt_dlp; print(yt_dlp.version.__version__)')"
-
-echo "[STARTUP] Starting Gogu music bot..."
-
-# Verify bgutil-ytdlp-pot-provider plugin is detected by yt-dlp
-echo "[STARTUP] yt-dlp PO Token plugins:"
-python -c "
-import yt_dlp
-ydl = yt_dlp.YoutubeDL({'quiet': True})
-# Check if pot provider is loaded
-try:
-    from yt_dlp_plugins.extractor import getpot_bgutil
-    print('  bgutil-ytdlp-pot-provider: LOADED')
-except ImportError as e:
-    print(f'  bgutil-ytdlp-pot-provider: NOT FOUND ({e})')
-import importlib.metadata as _md
-print('  bgutil plugin version:', _md.version('bgutil-ytdlp-pot-provider'))
-print('  base_url: plugin default http://127.0.0.1:4416')
-" 2>&1 || echo "[STARTUP] Plugin check failed"
-
-# Quick verbose test to see if PO Token is being generated (always run for debug)
-# DISABLED — probe consumes the fresh YouTube session and causes 429 for the bot
-# echo "[STARTUP] Running verbose yt-dlp probe..."
-
-# Verify PO Token server is responding. /ping is the endpoint the plugin itself
-# probes and it returns the server version, so this doubles as a version check.
-if command -v curl &> /dev/null; then
-    POT_PING=$(curl -s --max-time 5 http://127.0.0.1:4416/ping 2>/dev/null || echo "failed")
-    if [ "$POT_PING" = "failed" ] || [ -z "$POT_PING" ]; then
-        echo "[STARTUP] WARNING: PO Token server /ping unreachable"
-    else
-        echo "[STARTUP] PO Token server /ping: $POT_PING"
+# Asteptare pe starea REALA, nu `sleep 3`. Serverul are nevoie de ~5s la boot,
+# deci verificarea fixa raporta fals "unreachable" la fiecare pornire mai lenta.
+POT_READY=0
+for _ in $(seq 1 60); do
+    if curl -fsS --max-time 2 "${POT_URL}/ping" >/dev/null 2>&1; then
+        POT_READY=1
+        break
     fi
+    sleep 0.5
+done
+
+if [ "$POT_READY" = "1" ]; then
+    echo "[STARTUP] PO Token server gata: $(curl -fsS --max-time 2 "${POT_URL}/ping")"
+else
+    echo "[STARTUP] AVERTISMENT: PO Token server nu a raspuns in 30s."
+    echo "[STARTUP] Botul porneste oricum, dar descarcarile vor primi 403."
 fi
 
+if command -v deno >/dev/null 2>&1; then
+    echo "[STARTUP] Deno disponibil: $(deno --version | head -1)"
+else
+    echo "[STARTUP] AVERTISMENT: Deno lipseste — provocarile JS de la YouTube vor eșua"
+fi
+
+echo "[STARTUP] yt-dlp: $(python -c 'import yt_dlp; print(yt_dlp.version.__version__)')"
+
+# Pluginul de PO Token e detectat de yt-dlp?
+python - <<'PY' || echo "[STARTUP] Verificarea pluginului a eșuat"
+import importlib.metadata as md
+try:
+    from yt_dlp_plugins.extractor import getpot_bgutil  # noqa: F401
+    print('[STARTUP] bgutil-ytdlp-pot-provider: INCARCAT', md.version('bgutil-ytdlp-pot-provider'))
+except ImportError as e:
+    print(f'[STARTUP] bgutil-ytdlp-pot-provider: LIPSESTE ({e})')
+PY
+
+echo "[STARTUP] Pornesc botul Gogu..."
+
+# exec: python devine PID 1 si primeste direct SIGTERM de la Railway, iar bot.py
+# isi inchide conexiunea de voce curat. Supervizorul rămâne copil si e oprit de
+# runtime odata cu containerul.
 exec python bot.py

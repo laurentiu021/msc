@@ -1,4 +1,7 @@
-discord.py[voice]>=2.3.0
+# Pinuit din acelasi motiv ca yt-dlp: cu un layer cache, "cea mai noua la
+# momentul build-ului" inseamna o versiune diferita la fiecare rebuild, fara
+# nicio schimbare in repo care sa explice de ce s-a stricat ceva.
+discord.py[voice]==2.7.1
 # Pinned: floating versions made builds unreproducible and let the image sit on a
 # stale yt-dlp for months (Docker layer cache never re-ran the install).
 yt-dlp[default]==2026.8.19
@@ -6,7 +9,7 @@ yt-dlp[default]==2026.8.19
 # WebPO homepage-challenge minting that mitigates GVS 403s. Keep in sync with the
 # server tag pinned in the Dockerfile.
 bgutil-ytdlp-pot-provider==2.0.0
-PySocks
-PyNaCl
-python-dotenv>=1.0.0
-psutil
+PySocks==1.7.1
+PyNaCl==1.5.0
+python-dotenv==1.2.3
+psutil==7.2.2

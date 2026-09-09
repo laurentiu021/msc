@@ -377,6 +377,33 @@ class _Health(BaseHTTPRequestHandler):
         pass
 
 
+async def _shutdown():
+    """Inchide curat: iese din voce inainte de a inchide gateway-ul."""
+    log.info("Opresc botul (SIGTERM/SIGINT)...")
+    for vc in list(bot.voice_clients):
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            pass
+    await bot.close()
+
+
+async def _runner():
+    # discord.py nu instaleaza handler de SIGTERM, deci la fiecare redeploy
+    # Railway omora procesul brusc, fara sa inchida conexiunea de voce — de
+    # aceea botul aparea uneori inca "in canal" dupa repornire.
+    loop = asyncio.get_running_loop()
+    for sig in ('SIGTERM', 'SIGINT'):
+        try:
+            import signal
+            loop.add_signal_handler(getattr(signal, sig),
+                                    lambda: asyncio.create_task(_shutdown()))
+        except (NotImplementedError, AttributeError, RuntimeError):
+            pass  # Windows nu suporta add_signal_handler pentru SIGTERM
+    async with bot:
+        await bot.start(TOKEN)
+
+
 def main():
     port = int(os.getenv("PORT", "8080"))
     threading.Thread(
@@ -384,7 +411,10 @@ def main():
         daemon=True,
     ).start()
     log.info("Connecting to Discord Gateway...")
-    bot.run(TOKEN, log_handler=None)
+    try:
+        asyncio.run(_runner())
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

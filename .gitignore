@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 cookies.txt
 .env
+.cookies_seed
+data/

@@ -1,0 +1,28 @@
+# `COPY . .` baga tot contextul in imagine. Fara lista asta, un build rulat
+# dintr-un checkout local include .env cu DISCORD_TOKEN, cookies.txt cu o
+# sesiune Google activa si intreg istoricul .git — toate ajung in straturile
+# imaginii, de unde pot fi extrase de oricine o poate trage.
+.git
+.gitignore
+.dockerignore
+
+.env
+.env.*
+!.env.example
+cookies.txt
+*.cookies
+.cookies_seed
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+downloads/
+data/
+*.log
+logs.*.json
+
+tests/
+README.md

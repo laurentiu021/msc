@@ -111,6 +111,15 @@ def _cookie_file_paths():
     return os.path.join(base, 'cookies.txt'), os.path.join(base, '.cookies_seed')
 
 
+def _count_cookie_entries(path: str) -> int:
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            return len([l for l in fh.read().strip().splitlines()
+                        if l.strip() and not l.startswith('#')])
+    except OSError:
+        return 0
+
+
 def seed_cookies_from_env(raw: str) -> tuple[str | None, int]:
     """Scrie cookie-urile din env, dar NU peste o versiune rotita de yt-dlp.
 
@@ -136,9 +145,7 @@ def seed_cookies_from_env(raw: str) -> tuple[str | None, int]:
                    if l.strip() and not l.startswith('#')])
 
     if previous == fingerprint and os.path.exists(path):
-        rotated = len([l for l in open(path, encoding='utf-8', errors='replace')
-                       .read().strip().splitlines()
-                       if l.strip() and not l.startswith('#')])
+        rotated = _count_cookie_entries(path)
         log.info(f"Cookies pastrate din {path} ({rotated} intrari, rotite de yt-dlp); "
                  f"env neschimbat")
         return path, rotated

@@ -1,5 +1,9 @@
 FROM python:3.12-slim
 
+# pipefail: fara el, un curl eșuat trimite pagina de eroare in bash, care iese
+# cu 0, si build-ul continua mai departe cu un repo de Node lipsa.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg libsodium-dev curl git unzip \
     && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
@@ -7,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Deno (required by yt-dlp for YouTube JS challenges)
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y
 
 WORKDIR /app
 
