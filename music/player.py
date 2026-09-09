@@ -236,14 +236,13 @@ async def process_play(ctx, query, is_radio=False):
 
             # Search cu multiple strategii pana gasim formate reale.
             # Doar clienti web, singurii pentru care bgutil poate emite PO Token.
-            _COOKIE_CHAIN = [
-                ('mweb', True),                   # dovedit in producție: 39 formate reale
-                ('web_safari', True),             # HLS ca rezerva
-            ]
-            _GUEST_CHAIN = [
-                ('mweb', False),
-                ('web_safari', False),
-            ]
+            # Cerem ambii clienti in ACEEASI cerere: yt-dlp cumuleaza formatele,
+            # deci pool-ul e mult mai mare pe acelasi numar de cereri. Masurat:
+            # mweb singur a dat 5 formate / 1 redabil, perechea a dat 40 / 13.
+            # Un singur format redabil e o marja prea subtire pentru redare.
+            _WEB_CLIENTS = ('mweb', 'web_safari')
+            _COOKIE_CHAIN = [(_WEB_CLIENTS, True)]
+            _GUEST_CHAIN = [(_WEB_CLIENTS, False)]
             # Cookies primele, pentru ca de pe IP-ul de datacenter al Railway
             # calea de guest ajunge la 429 pe webpage -> lipsa Visitor Data ->
             # niciun GVS PO Token -> zero formate redabile. Guest ramane in
@@ -257,37 +256,38 @@ async def process_play(ctx, query, is_radio=False):
             successful_client = None
             successful_cookies = False
             for clients, use_cookies in _CLIENT_CHAINS:
+                label = '+'.join(clients)
                 search_opts = dict(YDL_OPTS_SEARCH)
-                search_opts['extractor_args'] = yt_client_args(clients)
+                search_opts['extractor_args'] = yt_client_args(*clients)
                 if use_cookies:
                     cookie_search, _ = get_opts_with_cookies()
                     if not cookie_search:
                         continue
                     search_opts = cookie_search
-                    search_opts['extractor_args'] = yt_client_args(clients)
+                    search_opts['extractor_args'] = yt_client_args(*clients)
 
                 try:
                     info = await _yt_extract_info(
-                        search_opts, query, download=False, stage=f"search_{clients}"
+                        search_opts, query, download=False, stage=f"search_{label}"
                     )
                     entries = info.get('entries', [info])
                     selected = None
                     for entry in entries:
                         fmts = entry.get('formats', [])
                         real = count_real_formats(fmts)
-                        log.info(f"[{clients}|cookies={use_cookies}] Video {entry.get('id','?')}: {len(fmts)} formats ({real} real)")
+                        log.info(f"[{label}|cookies={use_cookies}] Video {entry.get('id','?')}: {len(fmts)} formats ({real} real)")
                         if is_clean(entry.get('title', ''), entry.get('duration'), state.last_title):
                             selected = entry
                             break
                     if not selected:
                         selected = entries[0]
                     if has_real_formats(selected.get('formats', [])):
-                        log.info(f"Found real formats with client={clients}, cookies={use_cookies}")
+                        log.info(f"Found real formats with client={label}, cookies={use_cookies}")
                         successful_client = clients
                         successful_cookies = use_cookies
                         break
                 except Exception as e:
-                    log.warning(f"Search failed with client={clients}: {e}")
+                    log.warning(f"Search failed with client={label}: {e}")
 
             if not selected:
                 raise ValueError("Nu am gasit niciun rezultat")
@@ -303,7 +303,7 @@ async def process_play(ctx, query, is_radio=False):
                 retry_url = web_url if web_url.startswith('http') else \
                     f"https://www.youtube.com/watch?v={vid_id}"
                 retry_opts = dict(YDL_OPTS_SEARCH)
-                retry_opts['extractor_args'] = yt_client_args('mweb')
+                retry_opts['extractor_args'] = yt_client_args(*_WEB_CLIENTS)
                 retry_opts['default_search'] = None  # use URL directly
                 try:
                     retry_info = await _yt_extract_info(
@@ -337,13 +337,13 @@ async def process_play(ctx, query, is_radio=False):
                                 break  # no cookies available
                             dl_opts['format'] = fmt
                             if successful_client:
-                                dl_opts['extractor_args'] = yt_client_args(successful_client)
-                            log.info(f"Download WITH cookies, client={successful_client or 'default'}, format={fmt}")
+                                dl_opts['extractor_args'] = yt_client_args(*successful_client)
+                            log.info(f"Download WITH cookies, client={'+'.join(successful_client) if successful_client else 'default'}, format={fmt}")
                         else:
                             dl_opts = YDL_OPTS_DOWNLOAD.copy()
                             dl_opts['format'] = fmt
                             if successful_client:
-                                dl_opts['extractor_args'] = yt_client_args(successful_client)
+                                dl_opts['extractor_args'] = yt_client_args(*successful_client)
                         with yt_dlp.YoutubeDL(dl_opts) as ydl_dl:
                             dl_info = await _yt_extract_info(
                                 dl_opts, web_url, download=True, stage=f"download_{fmt}"

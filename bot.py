@@ -49,16 +49,12 @@ for f in os.listdir(DOWNLOAD_DIR):
         pass
 
 # Write YouTube cookies if provided via env var
-_yt_cookies = os.getenv("YT_COOKIES_CONTENT")
-if _yt_cookies:
-    _yt_cookies = _yt_cookies.replace("\\n", "\n").replace("\\t", "\t")
-    with open("cookies.txt", "w") as f:
-        f.write(_yt_cookies)
-    lines = [l for l in _yt_cookies.strip().splitlines()
-             if l.strip() and not l.startswith('#')]
-    log.info(f"YouTube cookies written ({len(lines)} entries)")
-    from music.config import apply_cookies
-    apply_cookies()
+from music.config import apply_cookies, seed_cookies_from_env
+
+_cookie_path, _cookie_entries = seed_cookies_from_env(os.getenv("YT_COOKIES_CONTENT"))
+if _cookie_path:
+    log.info(f"YouTube cookies active ({_cookie_entries} entries)")
+    apply_cookies(_cookie_path)
 else:
     log.warning("YT_COOKIES_CONTENT not set — YouTube may block requests")
 

@@ -1,4 +1,5 @@
 """Constante si configurare muzica."""
+import hashlib
 import os
 import logging
 
@@ -80,12 +81,75 @@ if _proxy:
 # Cookies disponibile ca fallback (pt content care cere cont: age-restricted, privat)
 _cookies_path = None
 
-def apply_cookies():
+# Directorul volumului persistent, daca exista. yt-dlp rescrie fisierul de
+# cookies cu valorile rotite de YouTube (__Secure-1PSIDTS si SIDCC se schimba
+# des). Pe disc efemer rotatia se pierde la fiecare restart si se revine la
+# valorile din env, care imbatranesc pana cand YouTube le refuza. Pe volum,
+# rotatia supravietuieste si cookie-urile tin mult mai mult.
+COOKIE_DIR = os.getenv('COOKIE_DIR', '/data')
+
+
+def _cookie_file_paths():
+    """(fisier_cookies, fisier_amprenta) — pe volum daca exista, altfel local."""
+    base = COOKIE_DIR if os.path.isdir(COOKIE_DIR) else '.'
+    return os.path.join(base, 'cookies.txt'), os.path.join(base, '.cookies_seed')
+
+
+def seed_cookies_from_env(raw: str) -> tuple[str | None, int]:
+    """Scrie cookie-urile din env, dar NU peste o versiune rotita de yt-dlp.
+
+    Reseed-ul se face doar cand valoarea din env s-a schimbat efectiv, detectat
+    prin amprenta. Altfel un restart ar arunca rotatia si ne-am intoarce la
+    cookie-uri vechi. Returneaza (path, numar_intrari).
+    """
+    if not raw:
+        return None, 0
+    raw = raw.replace('\\n', '\n').replace('\\t', '\t')
+    path, seed_path = _cookie_file_paths()
+    fingerprint = hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+    previous = None
+    if os.path.exists(seed_path):
+        try:
+            with open(seed_path, encoding='utf-8') as fh:
+                previous = fh.read().strip()
+        except OSError:
+            previous = None
+
+    entries = len([l for l in raw.strip().splitlines()
+                   if l.strip() and not l.startswith('#')])
+
+    if previous == fingerprint and os.path.exists(path):
+        rotated = len([l for l in open(path, encoding='utf-8', errors='replace')
+                       .read().strip().splitlines()
+                       if l.strip() and not l.startswith('#')])
+        log.info(f"Cookies pastrate din {path} ({rotated} intrari, rotite de yt-dlp); "
+                 f"env neschimbat")
+        return path, rotated
+
+    try:
+        with open(path, 'w', encoding='utf-8', newline='\n') as fh:
+            fh.write(raw if raw.endswith('\n') else raw + '\n')
+        with open(seed_path, 'w', encoding='utf-8') as fh:
+            fh.write(fingerprint)
+    except OSError as e:
+        log.error(f"Nu pot scrie cookies in {path}: {e}")
+        return None, 0
+
+    log.info(f"Cookies scrise in {path} ({entries} intrari) din env"
+             f"{' — valoare noua, reseed' if previous else ''}")
+    return path, entries
+
+
+def apply_cookies(path: str | None = None):
     """Salveaza path-ul cookies — dar NU le aplica by default."""
     global _cookies_path
-    if os.path.exists('cookies.txt'):
-        _cookies_path = 'cookies.txt'
-        log.info("YouTube cookies available as fallback (not applied by default)")
+    candidate = path or _cookie_file_paths()[0]
+    if not os.path.exists(candidate) and os.path.exists('cookies.txt'):
+        candidate = 'cookies.txt'
+    if os.path.exists(candidate):
+        _cookies_path = candidate
+        log.info(f"YouTube cookies available as fallback: {candidate}")
 
 
 def get_opts_with_cookies():
