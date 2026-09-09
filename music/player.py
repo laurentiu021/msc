@@ -233,15 +233,26 @@ async def process_play(ctx, query, is_radio=False):
                 cleanup_file(preloaded.get('filename'), _loop)
                 state.preloaded = None
 
-            # Search cu multiple strategii pana gasim formate reale
-            _CLIENT_CHAINS = [
+            # Search cu multiple strategii pana gasim formate reale.
+            _GUEST_CHAIN = [
                 ('mweb', False),                  # mweb + PO Token (bgutil plugin)
                 ('web_safari', False),            # HLS fallback (nu cere PO Token pt GVS)
                 ('android_vr', False),            # android_vr (nu cere PO Token, limitat)
                 ('tv_embedded', False),           # tv_embedded (fara SABR deocamdata)
-                ('mweb', True),                   # mweb cu cookies
-                ('web_safari', True),             # web_safari cu cookies
             ]
+            _COOKIE_CHAIN = [
+                ('mweb', True),
+                ('web_safari', True),
+            ]
+            # Cookies primele cand exista. De pe IP-ul de datacenter al Railway,
+            # calea de guest ajunge invariabil la 429 pe webpage -> lipsa Visitor
+            # Data -> niciun GVS PO Token -> 0 formate reale. Incercata prima,
+            # pierde ~8s si trage 4 rafale de cereri care chiar ele provoaca 429.
+            _CLIENT_CHAINS = (
+                _COOKIE_CHAIN + _GUEST_CHAIN
+                if get_opts_with_cookies()[0] is not None
+                else _GUEST_CHAIN
+            )
             selected = None
             successful_client = None
             successful_cookies = False

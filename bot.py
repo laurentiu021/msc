@@ -66,12 +66,13 @@ else:
 try:
     import urllib.request
     import urllib.error
-    req = urllib.request.Request('http://127.0.0.1:4416/token', method='GET')
+    # /ping is the endpoint the bgutil plugin itself probes and it reports the
+    # server version. /token does not exist, so it used to log a useless 404.
+    req = urllib.request.Request('http://127.0.0.1:4416/ping', method='GET')
     with urllib.request.urlopen(req, timeout=5) as resp:
-        log.info(f"PO Token server: status={resp.status}, responding OK")
+        log.info(f"PO Token server OK: {resp.read(200).decode('utf-8', 'replace')}")
 except urllib.error.HTTPError as e:
-    # Some providers return 404 on GET /token but are still reachable/healthy.
-    log.info(f"PO Token server reachable (HTTP {e.code})")
+    log.warning(f"PO Token server answered HTTP {e.code} on /ping")
 except Exception as e:
     log.warning(f"PO Token server NOT responding: {e}")
 
@@ -119,6 +120,9 @@ bot = commands.Bot(
     intents=intents,
     help_command=None,
     description="Gogu — Music Bot",
+    # Fara asta '!PLAY' si '!Play' sunt respinse ca CommandNotFound, iar botul
+    # pare mort fiindca nu intra in voice si nu raspunde nimic.
+    case_insensitive=True,
 )
 
 # --- Music engine init ---
@@ -260,6 +264,8 @@ async def on_ready():
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
+        # Logat, nu ignorat: altfel o comanda greasita e indistinguibila de un bot picat.
+        log.info("Unknown command: %r", (ctx.message.content or "")[:80])
         return
     log.error(f"Command error '{ctx.command}': {error}")
 
