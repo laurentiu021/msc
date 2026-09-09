@@ -83,7 +83,7 @@ def _ytdlp_startup_probe():
     test_opts = {
         'quiet': True, 'no_warnings': True, 'skip_download': True,
         'format': 'best', 'socket_timeout': 8,
-        'extractor_args': yt_client_args('android_vr', 'web_safari'),
+        'extractor_args': yt_client_args('mweb', 'web_safari'),
     }
     if _yt_proxy:
         test_opts['proxy'] = _yt_proxy

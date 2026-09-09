@@ -6,7 +6,8 @@ import os
 import time
 import random
 from music.config import YDL_OPTS_SEARCH, YDL_OPTS_DOWNLOAD, FFMPEG_OPTS, log
-from music.config import get_opts_with_cookies, has_real_formats, yt_client_args
+from music.config import (get_opts_with_cookies, has_real_formats,
+                          count_real_formats, yt_client_args)
 from music.config import (
     YT_REQUEST_MIN_INTERVAL_SEC,
     YT_REQUEST_MAX_INTERVAL_SEC,
@@ -234,24 +235,21 @@ async def process_play(ctx, query, is_radio=False):
                 state.preloaded = None
 
             # Search cu multiple strategii pana gasim formate reale.
-            # Ordinea e masurata, nu presupusa: pe acelasi videoclip, fara
-            # cookies si fara PO Token server, android_vr a dat 27 formate
-            # (4 audio-only, opus 139kbps), iar web_embedded, tv, mweb si
-            # web_safari au dat toate 4 formate / 0 reale.
-            _GUEST_CHAIN = [
-                ('android_vr', False),            # nici cookies, nici PO Token
-                ('web_safari', False),            # HLS scutit de GVS token
-                ('mweb', False),                  # GVS token via bgutil
-            ]
+            # Doar clienti web, singurii pentru care bgutil poate emite PO Token.
             _COOKIE_CHAIN = [
-                ('mweb', True),
-                ('web_safari', True),
+                ('mweb', True),                   # dovedit in producție: 39 formate reale
+                ('web_safari', True),             # HLS ca rezerva
             ]
-            # Guest primul: daca merge, cookies-urile devin inutile si scapam de
-            # intretinerea lor. Cookies ramane plasa de siguranta, pentru cazuri
-            # ca "Made for kids", pe care android_vr nu le poate atinge.
+            _GUEST_CHAIN = [
+                ('mweb', False),
+                ('web_safari', False),
+            ]
+            # Cookies primele, pentru ca de pe IP-ul de datacenter al Railway
+            # calea de guest ajunge la 429 pe webpage -> lipsa Visitor Data ->
+            # niciun GVS PO Token -> zero formate redabile. Guest ramane in
+            # coada pentru cand IP-ul nu e limitat.
             _CLIENT_CHAINS = (
-                _GUEST_CHAIN + _COOKIE_CHAIN
+                _COOKIE_CHAIN + _GUEST_CHAIN
                 if get_opts_with_cookies()[0] is not None
                 else _GUEST_CHAIN
             )
@@ -276,10 +274,7 @@ async def process_play(ctx, query, is_radio=False):
                     selected = None
                     for entry in entries:
                         fmts = entry.get('formats', [])
-                        real = sum(1 for f in fmts if
-                                   f.get('acodec', 'none') != 'none' or
-                                   (f.get('vcodec', 'none') != 'none' and 'storyboard' not in f.get('format_note', '').lower()) or
-                                   'm3u8' in f.get('protocol', ''))
+                        real = count_real_formats(fmts)
                         log.info(f"[{clients}|cookies={use_cookies}] Video {entry.get('id','?')}: {len(fmts)} formats ({real} real)")
                         if is_clean(entry.get('title', ''), entry.get('duration'), state.last_title):
                             selected = entry
@@ -308,17 +303,14 @@ async def process_play(ctx, query, is_radio=False):
                 retry_url = web_url if web_url.startswith('http') else \
                     f"https://www.youtube.com/watch?v={vid_id}"
                 retry_opts = dict(YDL_OPTS_SEARCH)
-                retry_opts['extractor_args'] = yt_client_args('android_vr')
+                retry_opts['extractor_args'] = yt_client_args('mweb')
                 retry_opts['default_search'] = None  # use URL directly
                 try:
                     retry_info = await _yt_extract_info(
                         retry_opts, retry_url, download=False, stage="retry_mweb"
                     )
                     retry_fmts = retry_info.get('formats', [])
-                    retry_real = sum(1 for f in retry_fmts if
-                                    f.get('acodec', 'none') != 'none' or
-                                    (f.get('vcodec', 'none') != 'none' and 'storyboard' not in f.get('format_note', '').lower()) or
-                                    'm3u8' in f.get('protocol', ''))
+                    retry_real = count_real_formats(retry_fmts)
                     log.info(f"[retry mweb] Video {vid_id}: {len(retry_fmts)} formats ({retry_real} real)")
                     if has_real_formats(retry_fmts):
                         selected = retry_info

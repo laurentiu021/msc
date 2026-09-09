@@ -44,13 +44,57 @@ def test_module_level_opts_are_honored():
                        ('DOWNLOAD', YDL_OPTS_DOWNLOAD)):
         clients = _resolved_clients(opts['extractor_args'])
         assert clients, f'{name}: player_client nu ajunge la extractor'
-        assert 'android_vr' in clients, \
-            f'{name}: android_vr lipseste (singurul client fara cookies/PO Token)'
+
+
+def test_every_client_can_get_a_po_token_from_bgutil():
+    """Blocheaza clientii pentru care bgutil NU poate emite PO Token.
+
+    bgutil e BotGuard (web). Un client android/ios are nevoie de DroidGuard,
+    respectiv iOSGuard; fara token, yt-dlp ii omite formatele in silentiu, iar
+    botul raporteaza "formate reale" inexistente si apoi nu descarca nimic.
+    Regula asta trebuie verificata mecanic, nu tinuta minte.
+    """
+    from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
+    from yt_dlp.extractor.youtube.pot.utils import WEBPO_CLIENTS
+
+    for name, opts in (('SEARCH', YDL_OPTS_SEARCH),
+                       ('DOWNLOAD', YDL_OPTS_DOWNLOAD)):
+        for client in _resolved_clients(opts['extractor_args']):
+            spec = INNERTUBE_CLIENTS.get(client)
+            assert spec, f'{name}: {client!r} nu e un client yt-dlp valid'
+            inner = spec['INNERTUBE_CONTEXT']['client']['clientName']
+            assert inner in WEBPO_CLIENTS, (
+                f'{name}: {client} -> {inner} nu e in WEBPO_CLIENTS, '
+                f'deci bgutil nu-i poate emite GVS PO Token'
+            )
 
 
 def test_download_format_selector_prefers_opus():
-    """android_vr ofera opus 251; selectorul nu trebuie sa cada pe altceva."""
     assert YDL_OPTS_DOWNLOAD['format'].startswith('bestaudio[acodec=opus]')
+
+
+def test_unusable_formats_do_not_count_as_real():
+    """Un format fara URL, cu DRM sau storyboard nu inseamna "merge".
+
+    Regresie directa: cu verificarea permisiva, un singur format inutilizabil
+    facea botul sa anunte "5 formats (1 real)", sa opreasca lantul de clienti
+    pe acel client si apoi sa nu descarce nimic.
+    """
+    from music.config import count_real_formats, has_real_formats
+
+    assert not has_real_formats([])
+    assert not has_real_formats([{'acodec': 'opus'}])                      # fara sursa
+    assert not has_real_formats([{'acodec': 'opus', 'url': 'x',
+                                  'has_drm': True}])                       # DRM
+    assert not has_real_formats([{'acodec': 'none', 'vcodec': 'none',
+                                  'url': 'x'}])                            # fara audio
+    assert not has_real_formats([{'acodec': 'opus', 'url': 'x',
+                                  'format_note': 'storyboard'}])
+    assert has_real_formats([{'acodec': 'opus', 'url': 'x'}])
+    assert has_real_formats([{'acodec': 'none', 'vcodec': 'avc1',
+                              'protocol': 'm3u8_native', 'url': 'x'}])
+    assert count_real_formats([{'acodec': 'opus', 'url': 'x'},
+                               {'acodec': 'opus'}]) == 1
 
 
 if __name__ == '__main__':

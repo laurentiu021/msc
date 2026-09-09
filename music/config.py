@@ -26,10 +26,14 @@ def yt_client_args(*clients):
     return {'youtube': {'player_client': list(clients)}}
 
 
-# android_vr e singurul client care nu cere nici cookies, nici PO Token
-# (yt-dlp PO Token Guide). Limita lui: videoclipurile "Made for kids" nu sunt
-# accesibile — de aceea web_safari ramane in coada, scutit de GVS token pe HLS.
-_YT_EXTRACTOR_ARGS = yt_client_args('android_vr', 'web_safari')
+# Doar clienti pentru care bgutil poate emite PO Token, adica familia web:
+# MWEB, WEB, TVHTML5, WEB_EMBEDDED_PLAYER, WEB_REMIX, WEB_CREATOR
+# (yt_dlp.extractor.youtube.pot.utils.WEBPO_CLIENTS).
+# android_vr / ios sunt inutilizabile aici: din yt-dlp 2026.08 cer si ele GVS PO
+# Token, iar acela vine din DroidGuard/iOSGuard, nu din BotGuard-ul lui bgutil.
+# Fara token, formatele lor sunt pur si simplu omise. Testul din
+# tests/test_extractor_args.py refuza orice client din afara listei.
+_YT_EXTRACTOR_ARGS = yt_client_args('mweb', 'web_safari')
 
 # Proxy optional — setat via env var YT_PROXY (ex: socks5://host:port)
 _proxy = os.getenv('YT_PROXY')
@@ -95,17 +99,33 @@ def get_opts_with_cookies():
     return search, download
 
 
+def is_playable_audio_format(f: dict) -> bool:
+    """Format din care se poate chiar cânta.
+
+    Verificarea trebuie sa fie stricta. Cand era permisiva, un singur format
+    inutilizabil raportat ca "real" declara clientul reusit, scurtcircuita
+    lantul si apoi TOATE download-urile eseuau — exact ce a facut android_vr
+    fara GVS PO Token: "5 formats (1 real)", urmat de zero descarcari.
+    """
+    if f.get('has_drm'):
+        return False
+    if not (f.get('url') or f.get('fragments') or f.get('manifest_url')):
+        return False
+    if 'storyboard' in (f.get('format_note') or '').lower():
+        return False
+    if f.get('acodec', 'none') != 'none':
+        return True
+    # HLS muxat: audio e in stream chiar daca acodec lipseste din metadata.
+    return 'm3u8' in (f.get('protocol') or '') and f.get('vcodec', 'none') != 'none'
+
+
+def count_real_formats(formats_list: list) -> int:
+    return sum(1 for f in (formats_list or []) if is_playable_audio_format(f))
+
+
 def has_real_formats(formats_list: list) -> bool:
-    """Verifica daca lista de formate contine formate audio/video reale."""
-    for f in formats_list:
-        # HLS/m3u8 formats are always real (muxed streams)
-        proto = f.get('protocol', '')
-        if 'm3u8' in proto:
-            return True
-        if f.get('acodec', 'none') != 'none' or f.get('vcodec', 'none') != 'none':
-            if 'storyboard' not in f.get('format_note', '').lower():
-                return True
-    return False
+    """Verifica daca lista contine cel putin un format redabil."""
+    return count_real_formats(formats_list) > 0
 
 
 FFMPEG_OPTS = {
