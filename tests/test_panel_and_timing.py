@@ -23,6 +23,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Importul lui bot.py loga o eroare de token altfel; nu se conecteaza nimic.
+os.environ.setdefault('DISCORD_TOKEN', 'test-token-nefolosit')
+
 from music import state as state_mod, ui
 from music.state import (GuildState, mark_paused, mark_resumed)
 from music.utils import playback_remaining
@@ -116,6 +119,17 @@ def test_the_edit_branch_stops_the_old_view():
     assert st.current_view is not None and not isinstance(st.current_view, _OldView)
 
 
+def test_sending_a_new_panel_deletes_the_old_one():
+    """Altfel canalul se umple de panouri, fiecare cu butoane care par vii."""
+    st = _fresh_state()
+    ctx = _FakeCtx(_FakeVoiceClient(playing=True))
+    old = _FakeMessage(ctx.events)
+    st.current_msg = old
+    asyncio.run(ui.update_player_ui(ctx, send_new=True))
+    assert old.deleted, 'panoul vechi a rămas in canal cu butoane moarte'
+    assert st.current_msg is not old, 'nu s-a trimis un panou nou'
+
+
 def test_a_send_in_flight_blocks_a_second_panel():
     st = _fresh_state()
     st.current_msg = None
@@ -139,6 +153,134 @@ def test_the_send_guard_is_released_even_on_a_403():
                                     send_new=True))
     assert st._ui_sending is False, 'garda a rămas pusa: panoul nu mai revine niciodata'
     assert st.current_msg is None
+
+
+# --- eșecurile de TRANSPORT, nu doar cele de protocol ------------------------
+# discord.py NU invelește eșecurile de transport: http.py re-ridica OSError cand
+# errno nu e 54/10054, iar aiohttp.ServerDisconnectedError (un Exception, nu un
+# OSError) nu e prins deloc. Fiecare try din stratul de UI prindea doar
+# discord.HTTPException, deci o conexiune keep-alive inchisa de Discord la momentul
+# nepotrivit scapa in try-ul de redare din process_play — care apoi sterge fisierul
+# pe care FFmpeg il streameaza si avanseaza coada.
+
+def _transport_errors():
+    import aiohttp
+    return [aiohttp.ServerDisconnectedError(),
+            OSError(104, 'Connection reset by peer'),
+            asyncio.TimeoutError()]
+
+
+def test_a_dropped_socket_while_deleting_the_old_panel_releases_the_guard():
+    """Stergerea sta INTRE ridicarea gardului si `finally`.
+
+    `_ui_sending` e scris in exact trei locuri si nimic altceva nu il stinge, deci
+    o eroare scapata de acolo il lasa True pe viata procesului: de atunci fiecare
+    trimitere iese imediat, iar lipsa panoului forteaza `send_new=True`, deci
+    panoul nu mai poate apărea NICIODATA.
+    """
+    for error in _transport_errors():
+        st = _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient(playing=True))
+
+        class _Undeletable:
+            async def delete(self):
+                raise error
+
+            async def edit(self, **kwargs):
+                raise error
+
+        st.current_msg = _Undeletable()
+        asyncio.run(ui.update_player_ui(ctx, send_new=True))
+        assert st._ui_sending is False, (
+            f'{type(error).__name__} a lasat garda pusa: panoul nu mai revine')
+        assert ctx.events == ['send'], (
+            f'{type(error).__name__} a impiedicat trimiterea panoului nou: '
+            f'{ctx.events}')
+
+
+def test_a_transport_error_never_escapes_the_panel_into_playback():
+    """Consecinta imediata: excepția ajungea in try-ul de redare din process_play,
+    care sterge fisierul pornit, bate contorul de erori si avanseaza coada."""
+    for error in _transport_errors():
+        st = _fresh_state()
+
+        class _Broken(_FakeCtx):
+            async def send(self, *a, **k):
+                self.events.append('send')
+                raise error
+
+        ctx = _Broken(_FakeVoiceClient(playing=True))
+        st.current_msg = None
+        # Fara `raises`: orice excepție de aici ar fi chiar defectul.
+        asyncio.run(ui.update_player_ui(ctx, send_new=True))
+        assert st._ui_sending is False
+        assert st.current_msg is None
+
+
+def test_an_edit_transport_error_does_not_escape_either():
+    for error in _transport_errors():
+        st = _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient(playing=True))
+
+        class _BadEdit:
+            async def edit(self, **kwargs):
+                raise error
+
+            async def delete(self):
+                return None
+
+        st.current_msg = _BadEdit()
+        asyncio.run(ui.update_player_ui(ctx, send_new=False))
+        assert ctx.events == [], ctx.events
+
+
+def test_a_vanished_panel_is_forgotten_so_the_next_update_re_sends_it():
+    """Botul producea starea asta singur: mesajul de plecare (delete_after=15)
+    era pastrat ca panou, iar 15 secunde mai tarziu fiecare edit da 404. Inainte
+    era inghitit ca orice eroare HTTP si `current_msg` rămânea plin, deci nici
+    auto-vindecarea (care se uita doar la None) nu se declanșa."""
+    import discord
+
+    st = _fresh_state()
+    ctx = _FakeCtx(_FakeVoiceClient(playing=True))
+
+    class _Gone:
+        async def edit(self, **kwargs):
+            raise discord.NotFound(
+                type('R', (), {'status': 404, 'reason': 'Not Found'})(),
+                'Unknown Message')
+
+        async def delete(self):
+            return None
+
+    st.current_msg = _Gone()
+    asyncio.run(ui.update_player_ui(ctx, send_new=False))
+    assert st.current_msg is None, (
+        'panoul dispărut a rămas inregistrat: fiecare refresh urmator e un '
+        'no-op tacut')
+
+    # Si dovada consecinței: urmatoarea actualizare chiar retrimite panoul.
+    asyncio.run(ui.update_player_ui(ctx, send_new=False))
+    assert 'send' in ctx.events, ctx.events
+
+
+def test_the_goodbye_message_is_not_kept_as_a_panel():
+    """Un mesaj cu delete_after nu e un panou si nu are ce sa fie urmarit ca unul."""
+    import ast
+    import inspect
+
+    import bot as bot_mod
+
+    src = inspect.getsource(bot_mod.idle_timer)
+    for node in ast.walk(ast.parse(src.strip())):
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = {ast.unparse(t) for t in node.targets}
+        if 'state.current_msg' not in targets:
+            continue
+        value = ast.unparse(node.value)
+        assert 'delete_after' not in value, (
+            f'un mesaj temporar e reținut ca panou: {value}')
 
 
 def test_remaining_time_ignores_the_pause():

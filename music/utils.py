@@ -4,17 +4,33 @@ import os
 import re
 import time
 
+import aiohttp
 import discord
 from music.config import (BLACKLIST, DOWNLOAD_CACHE_BYTES, DOWNLOAD_DIR,
                           MAX_TRACK_SECONDS, MIN_TRACK_SECONDS, log)
+
+# Tot ce poate ieși din stratul HTTP al lui discord.py, intr-un singur loc.
+#
+# `discord.HTTPException` singur NU ajunge, si asta a fost greșit in fiecare try
+# din stratul de UI: discord.py nu invelește eșecurile de transport. http.py
+# re-ridica `OSError` cand errno nu e 54/10054, iar `aiohttp.ServerDisconnectedError`
+# (un `Exception`, nu un `OSError`) nu e prins deloc. O conexiune keep-alive
+# inchisa de Discord exact cand scriem un DELETE scapa astfel din stratul de UI in
+# try-ul de redare din process_play, care apoi sterge fisierul pe care FFmpeg il
+# streameaza, bate contorul de erori si avanseaza coada — panoul omoara piesa.
+#
+# Plasa e larga deliberat, dar ENUMERATA: un `except Exception` ar inghiti si
+# defectele noastre (AttributeError, KeyError) pe care vrem sa le vedem.
+DISCORD_ERRORS = (discord.HTTPException, OSError, aiohttp.ClientError,
+                  asyncio.TimeoutError)
 
 
 async def safe_delete(msg):
     if msg:
         try:
             await msg.delete()
-        except discord.HTTPException:
-            pass
+        except DISCORD_ERRORS as e:
+            log.debug(f"Nu am putut sterge un mesaj: {e}")
 
 
 def clean_search_title(title) -> str:

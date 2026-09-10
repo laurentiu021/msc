@@ -221,9 +221,14 @@ async def idle_timer(ctx):
         if decision.action == DISCONNECT:
             await vc.disconnect()
             await safe_delete(state.current_msg)
-            state.current_msg = await ctx.send(
-                "Am iesit - inactiv 1 minut.", delete_after=15
-            )
+            # Mesajul de plecare NU se reține ca panou. Cand era pastrat in
+            # `current_msg`, discord.py il stergea 15 secunde mai tarziu si de
+            # atunci fiecare refresh de panou edita un mesaj inexistent: 404
+            # inghitit, `current_msg` rămas plin, deci nici auto-vindecarea (care
+            # se uita doar la None) nu se declanșa. Panoul cu butoane nu mai
+            # apărea pana la urmatorul !np sau pana la pornirea unei piese.
+            state.current_msg = None
+            await ctx.send("Am iesit - inactiv 1 minut.", delete_after=15)
             state.queue.clear()
             state.history.clear()
     except asyncio.CancelledError:

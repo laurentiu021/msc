@@ -594,6 +594,73 @@ def test_a_guest_download_never_stamps_the_cookie_jar_as_good():
             'mai autentifica')
 
 
+def test_a_cookies_failure_rolls_back_the_jar_and_retries_once():
+    """Tranzactia de cookies nu era legata de redare de niciun test.
+
+    Fara asta, ambele puncte de integrare (revenirea si reincercarea) se pot sterge
+    cu suita verde: in producție, o sesiune invalidata ar arde 5 erori consecutive,
+    ar declanșa intrerupatorul de 900s, ar stinge autoplay si ar cere unui om sa
+    lipeasca cookie-uri noi pe Railway — desi copia buna era chiar pe volum.
+    """
+    with tempfile.TemporaryDirectory() as tmp, _Jar(tmp) as jar:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        config._rolled_back = False
+        st = _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient())
+        attempts = []
+        with _Harness(target) as h:
+            saved = ytdlp_mod.extract
+
+            async def cookies_are_dead(opts, query, download=False, loop=None,
+                                       stage=''):
+                attempts.append(stage)
+                if stage.startswith('extract'):
+                    raise RuntimeError(
+                        "Sign in to confirm you're not a bot. Use --cookies")
+                return await saved(opts, query, download=download, loop=loop,
+                                   stage=stage)
+
+            ytdlp_mod.extract = cookies_are_dead
+            asyncio.run(player.process_play(ctx, 'ceva'))
+
+        assert jar.good() == _LIVE_JAR, 'copia buna a fost atinsa'
+        with open(jar.path, encoding='utf-8') as fh:
+            restored = fh.read()
+        assert restored == _LIVE_JAR, (
+            'jar-ul mort nu a fost inlocuit cu copia buna: revenirea nu a rulat')
+        extracts = [s for s in attempts if s.startswith('extract')]
+        assert len(extracts) >= 2, (
+            f'nu s-a reincercat dupa revenire: {attempts}')
+        assert st._consecutive_errors <= 1, (
+            f'a numarat reincercarea ca eroare separata: {st._consecutive_errors}')
+
+
+def test_the_rollback_retry_happens_at_most_once_per_track():
+    """Altfel o sesiune moarta ar produce o recursie de reincercari."""
+    with tempfile.TemporaryDirectory() as tmp, _Jar(tmp) as jar:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        config._rolled_back = False
+        _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient())
+        attempts = []
+        with _Harness(target):
+            async def always_dead(opts, query, download=False, loop=None, stage=''):
+                attempts.append(stage)
+                raise RuntimeError(
+                    "Sign in to confirm you're not a bot. Use --cookies")
+
+            ytdlp_mod.extract = always_dead
+            asyncio.run(player.process_play(ctx, 'ceva'))
+
+        searches = [s for s in attempts if s == 'search_flat']
+        assert len(searches) == 2, (
+            f'reincercarea nu e limitata la una: {len(searches)} incercari')
+
+
 def test_a_download_that_used_the_jar_does_stamp_it_as_good():
     """Cealalta jumatate: fara ea, "nu promova" ar fi un fix care rupe revenirea.
 

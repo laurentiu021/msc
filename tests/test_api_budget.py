@@ -217,19 +217,161 @@ def test_the_filters_actually_run_on_api_results():
 
 
 def test_autoplay_forwards_the_filter_fields():
-    """Filtrele exista, dar degeaba daca apelantul nu le da valorile."""
-    import ast
-    import inspect
+    """Filtrele exista, dar degeaba daca apelantul nu le da VALORILE.
+
+    Verificarea pe nume de kwarg trecea si daca se transmitea `duration=None`:
+    filtrul de durata sare peste None, deci un live de 45 de minute din API ar
+    intra in coada oricum. Astea conduc functiile reale.
+    """
+    import asyncio
 
     from music import autoplay
+    from music.state import GuildState
 
-    for fn in (autoplay._try_api_related, autoplay._try_api_search):
-        src = inspect.getsource(fn)
-        call = next(n for n in ast.walk(ast.parse(src.strip()))
-                    if isinstance(n, ast.Call)
-                    and getattr(n.func, 'id', '') == '_add_to_queue')
-        passed = {kw.arg for kw in call.keywords}
-        assert {'duration', 'live_status'} <= passed, f'{fn.__name__}: {passed}'
+    live = {'id': 'L', 'title': 'Artist - Live acum', 'channel': 'Canal',
+            'duration': 45 * 60, 'live_status': 'is_live'}
+    ok = {'id': 'B', 'title': 'Alt Artist - Piesa', 'channel': 'Alt Canal',
+          'duration': 210, 'live_status': None}
+
+    class _Loop:
+        async def run_in_executor(self, _executor, fn):
+            return fn()
+
+    cases = (
+        ('related', 'get_related_videos',
+         lambda st: autoplay._try_api_related(st, _Loop(), 'x', set(), 5, {})),
+        ('search', 'search_music',
+         lambda st: autoplay._try_api_search(st, _Loop(), 'Artist - Piesa',
+                                             set(), 5, {})),
+    )
+    for name, seam, call in cases:
+        st = GuildState()
+        st.last_title = 'Artist - Piesa'
+        st.last_channel = 'Canal'
+        saved = getattr(autoplay.yt_api, seam)
+        setattr(autoplay.yt_api, seam, lambda *a, **k: [live, ok])
+        try:
+            added = asyncio.run(call(st))
+        finally:
+            setattr(autoplay.yt_api, seam, saved)
+
+        assert added == 1, f'{name}: a adaugat {added} in loc de 1'
+        assert [item['title'] for item in st.queue] == [ok['title']], (
+            f"{name}: un live de 45 de minute a intrat in coada: {st.queue}")
+
+
+# --- contabilitatea REALA a cotei -------------------------------------------
+# Testele de mai sus inlocuiesc `_api_get`, deci taxarea o facea harness-ul, iar
+# contorul din producție se putea sterge cu suita verde: `units_spent()` ar
+# raporta 0 pe veci, `is_available()` n-ar trece niciodata plafonul, si autoplay ar
+# cumpara cautari de 100 de unitati pana la 403 — pe care il logheaza ca warning si
+# apoi se opreste in tacere. Astea de mai jos patrund pana la urllib.
+
+class _FakeHTTP:
+    """Inlocuieste urllib.request.urlopen, adica stratul de SUB `_api_get`."""
+
+    # Raspunsuri per ENDPOINT: search.list si videos.list au forme diferite
+    # (`id` e un dict la primul si un string la al doilea), deci un singur payload
+    # pentru ambele nu poate fi realist.
+    SEARCH_PAGE = {'items': [
+        {'id': {'videoId': 'a'},
+         'snippet': {'title': 'Artist - Piesa', 'channelTitle': 'Canal',
+                     'thumbnails': {'high': {'url': 'http://t'}}}}]}
+    VIDEOS_PAGE = {'items': [
+        {'id': 'a',
+         'contentDetails': {'duration': 'PT3M30S'},
+         'statistics': {'viewCount': '10', 'likeCount': '2'},
+         'snippet': {'title': 'Artist - Piesa', 'channelTitle': 'Canal',
+                     'liveBroadcastContent': 'none',
+                     'thumbnails': {'high': {'url': 'http://t'}}}}]}
+
+    def __init__(self, pages=None, error=None):
+        self.pages = pages or {'search': self.SEARCH_PAGE,
+                               'videos': self.VIDEOS_PAGE}
+        self.error = error
+        self.urls = []
+
+    def __enter__(self):
+        import json
+        import urllib.request
+
+        self.saved = urllib.request.urlopen
+        outer = self
+
+        class _Resp:
+            def __init__(self_inner, body):
+                self_inner.body = body
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+            def read(self_inner):
+                return json.dumps(self_inner.body).encode()
+
+        def fake_urlopen(req, timeout=None):
+            url = getattr(req, 'full_url', str(req))
+            outer.urls.append(url)
+            if outer.error:
+                raise outer.error
+            endpoint = 'videos' if '/videos?' in url else 'search'
+            return _Resp(outer.pages.get(endpoint, {'items': []}))
+
+        urllib.request.urlopen = fake_urlopen
+        self.saved_key = api.API_KEY
+        api.API_KEY = 'test-key'
+        api._units_spent = 0
+        api._quota_day = api._utc_day()
+        api._cap_logged = False
+        return self
+
+    def __exit__(self, *exc):
+        import urllib.request
+        urllib.request.urlopen = self.saved
+        api.API_KEY = self.saved_key
+        api._units_spent = 0
+        api._quota_day = None
+        return False
+
+
+def test_a_real_search_charges_the_real_counter():
+    """101 = 100 pentru search.list + 1 pentru batch-ul videos.list."""
+    with _FakeHTTP() as http:
+        results = api.search('ceva', max_results=1)
+        assert results and results[0]['duration'] == 210, results
+        assert api.units_spent() == 101, (
+            f'contorul real nu taxeaza cererile: {api.units_spent()}')
+        assert len(http.urls) == 2, http.urls
+
+
+def test_a_failed_request_is_charged_too():
+    """YouTube scade unitatile la PRIMIRE, nu la succes.
+
+    Daca taxarea ar depinde de raspuns, o serie de erori ar consuma cota reala si
+    ar lasa contorul nostru la zero — exact cazul in care plafonul e necesar.
+    """
+    with _FakeHTTP(error=OSError('connection reset')):
+        assert api.search('ceva') == []
+        assert api.units_spent() == 100, api.units_spent()
+
+
+def test_the_cap_closes_after_real_requests():
+    saved_cap = api.DAILY_UNIT_CAP
+    with _FakeHTTP():
+        api.DAILY_UNIT_CAP = 250
+        try:
+            api.search('prima')                # 100 + 1
+            assert api.units_spent() == 101, api.units_spent()
+            assert api.is_available() is True, 'sub plafon trebuie sa mearga'
+            api.search('a doua')               # 202 > 250? nu; a treia trece
+            api.search('a treia')              # 303 -> peste plafon
+            assert api.units_spent() == 303, api.units_spent()
+            assert api.is_available() is False, (
+                f'plafonul nu s-a inchis la {api.units_spent()} unitati')
+        finally:
+            api.DAILY_UNIT_CAP = saved_cap
 
 
 if __name__ == '__main__':

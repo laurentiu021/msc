@@ -189,16 +189,39 @@ def test_the_cache_lives_on_the_volume_when_there_is_one():
 
 
 def test_playback_no_longer_deletes_what_it_just_played():
-    """Regula centrala a cache-ului, verificata pe sursa cailor care o incalcau."""
-    import ast
-    import inspect
+    """Regula centrala a cache-ului, verificata pe FISIER, nu pe nume de functii.
 
-    src = inspect.getsource(player.make_after_play)
-    calls = {ast.unparse(n.func) for n in ast.walk(ast.parse(src.strip()))
-             if isinstance(n, ast.Call)}
-    assert 'trim_cache' in calls, calls
-    assert 'cleanup_file' not in calls, (
-        'sfarsitul de piesa sterge din nou fisierul: cache-ul nu se umple niciodata')
+    Varianta veche cerea doar ca identificatorul `cleanup_file` sa nu apara in
+    sursa lui `make_after_play`. O verificare de nume nu poate exprima "fisierul
+    supravietuieste": un `os.remove(filename)` pus in loc ar fi trecut vesel, iar
+    fiecare piesa ar fi fost stearsa la ~0s dupa final — deci cache-ul nu s-ar mai
+    umple niciodata si a doua redare a oricarei piese (acelasi link, butonul Back,
+    loop pe coada, autoplay care o re-propune) s-ar re-descarca integral.
+    """
+    class _Ctx:
+        guild = type('G', (), {'id': 909})()
+        voice_client = None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'piesa.opus')
+        with open(path, 'wb') as fh:
+            fh.write(b'audio')
+
+        state = GuildState()
+        state.current_file = path
+        trims = []
+        saved = (player.play_next, player.trim_cache, player._loop)
+        player.play_next = lambda *a, **k: None
+        player.trim_cache = lambda *a, **k: trims.append(True)
+        player._loop = None
+        try:
+            player.make_after_play(_Ctx(), state, path)(None)
+        finally:
+            player.play_next, player.trim_cache, player._loop = saved
+
+        assert os.path.exists(path), (
+            'sfarsitul de piesa a sters fisierul: cache-ul nu se umple niciodata')
+        assert trims, 'nu s-a chemat evacuarea pe marime'
 
 
 if __name__ == '__main__':

@@ -5,7 +5,8 @@ import discord
 
 from music.config import log
 from music.state import get_state
-from music.utils import format_time, playback_remaining, safe_delete, item_title
+from music.utils import (DISCORD_ERRORS, format_time, item_title,
+                         playback_remaining, safe_delete)
 
 
 def _format_number(n: int) -> str:
@@ -141,12 +142,19 @@ async def update_player_ui(ctx, send_new=False):
             # concurente ar lasa doua panouri, fiecare cu butoane vii.
             return
         state._ui_sending = True
-        _stop_view(state)
-        await safe_delete(state.current_msg)
         try:
+            _stop_view(state)
+            # Stergerea intra IN try. Sta intre ridicarea gardului si `finally`,
+            # iar `safe_delete` nu putea acoperi tot: cand o eroare de transport
+            # scapa de acolo, `_ui_sending` rămânea True pe viata procesului. E
+            # scris in exact trei locuri (state.py, aici, si finally-ul de mai
+            # jos) si nimic nu il mai stingea, deci de atunci fiecare trimitere
+            # ieșea imediat — iar cum lipsa panoului forteaza `send_new=True`,
+            # panoul nu mai putea apărea niciodata.
+            await safe_delete(state.current_msg)
             state.current_msg = await ctx.send(embed=embed, view=view)
             state.current_view = view
-        except discord.HTTPException as e:
+        except DISCORD_ERRORS as e:
             # Ramura asta nu avea niciun guard, desi cea de edit avea. Un 403
             # dupa o schimbare de permisiuni ridica excepția din interiorul
             # try-ului de redare din process_play, care apoi sterge fisierul pe
@@ -163,5 +171,16 @@ async def update_player_ui(ctx, send_new=False):
             # ViewStore-ul lui discord.py, deci fiecare piesa lasa un view viu.
             _stop_view(state)
             state.current_view = view
-        except discord.HTTPException:
-            pass
+        except discord.NotFound:
+            # Mesajul nu mai exista, deci NU mai avem panou. Inainte era inghitit
+            # ca orice alta eroare HTTP si `current_msg` rămânea sa arate spre el,
+            # iar auto-vindecarea de mai sus se uita doar la None — deci fiecare
+            # refresh urmator era un no-op tacut. Botul producea exact starea asta
+            # singur: mesajul de plecare, trimis cu delete_after=15, era pastrat
+            # ca panou si dispărea 15 secunde mai tarziu.
+            log.info("Panoul nu mai exista pe Discord; il uit ca sa fie retrimis")
+            _stop_view(state)
+            state.current_msg = None
+            state.current_view = None
+        except DISCORD_ERRORS as e:
+            log.debug(f"Nu am putut actualiza panoul: {e}")
