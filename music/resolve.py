@@ -25,7 +25,7 @@ from music.config import (HLS_MAX_BYTES, MAX_DOWNLOAD_BYTES, MAX_TRACK_SECONDS,
                           count_real_formats, duration_within_limits,
                           has_real_formats, last_ydl_reason, log,
                           make_download_opts, make_search_opts,
-                          yt_client_args, WEB_CLIENTS)
+                          search_query, yt_client_args, WEB_CLIENTS)
 from music.errors import YtdlpTimeout, diagnose_error
 from music.utils import AUDIO_EXTS, cached_download, is_clean, item_title
 
@@ -160,9 +160,9 @@ async def search_to_url(query: str, *, avoid_title: str = '',
 
     Cautarea flat intoarce doar metadata de lista (id, titlu, durata,
     live_status), fara sa atinga pagina si API-ul player pentru fiecare rezultat.
-    Cu `default_search='ytsearch5'` si fara extract_flat, yt-dlp extragea integral
-    toate cele cinci rezultate: aproximativ 20 de cereri pentru un singur !play,
-    toate in acelasi slot de throttle si acelasi buget de 90s.
+    Fara extract_flat, yt-dlp extragea integral toate cele cinci rezultate:
+    aproximativ 20 de cereri pentru un singur !play, toate in acelasi slot de
+    throttle si acelasi buget de 90s.
     """
     if str(query).startswith(('http://', 'https://')):
         return query, None
@@ -172,7 +172,12 @@ async def search_to_url(query: str, *, avoid_title: str = '',
         extract_flat=True,
         extractor_args=yt_client_args(*WEB_CLIENTS),
     )
-    info = await ytdlp.extract(opts, query, loop=loop, stage='search_flat')
+    # Prefixul EXPLICIT, nu `default_search`: acela e aplicat de extractorul generic
+    # sub forma unui url_result care trebuie procesat, iar `extract_flat=True`
+    # inseamna "nu procesa niciodata" — combinatia intorcea zero rezultate, fara
+    # nicio eroare. Vezi config.SEARCH_PREFIX.
+    info = await ytdlp.extract(opts, search_query(query), loop=loop,
+                               stage='search_flat')
     entries = [e for e in ((info or {}).get('entries') or []) if e]
     if not entries:
         return None, None            # nimic gasit: eroare, nu refuz
@@ -211,8 +216,7 @@ async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple
         search_opts = make_search_opts(
             with_cookies=use_cookies,
             extractor_args=yt_client_args(*clients),
-            default_search=None,          # avem deja un URL
-        )
+            )
         try:
             info = await ytdlp.extract(search_opts, target_url, loop=loop,
                                        stage=f"extract_{label}")
@@ -255,7 +259,6 @@ async def _retry_for_formats(selected: dict, web_url: str, loop):
     retry_opts = make_search_opts(
         with_cookies=with_cookies,
         extractor_args=yt_client_args(*WEB_CLIENTS),
-        default_search=None,
         ignore_no_formats_error=False,
     )
     try:

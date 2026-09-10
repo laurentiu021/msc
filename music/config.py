@@ -170,12 +170,33 @@ YT_REQUEST_MIN_INTERVAL_SEC = env_num('YT_REQUEST_MIN_INTERVAL_SEC', 1.2,
 YT_REQUEST_MAX_INTERVAL_SEC = env_num('YT_REQUEST_MAX_INTERVAL_SEC', 3.2,
                                       low=0.0, cast=float)
 
+# Cate rezultate cere o cautare de text. Prefixul se pune EXPLICIT in interogare
+# (`ytsearch5:...`), nu prin `default_search`.
+#
+# `default_search` e o capcana in combinatie cu `extract_flat`: nu il aplica
+# YoutubeDL, ci extractorul GENERIC (extractor/generic.py:768-793 in 2026.8.19),
+# care intoarce un `url_result('ytsearch5:' + url)` — adica un rezultat care
+# trebuie PROCESAT mai departe ca sa devina o cautare. Iar `extract_flat=True`
+# inseamna, in propria documentatie a lui yt-dlp, "True: Never process". Deci
+# cautarea de text intorcea un dict fara `entries`, instantaneu, fara nicio eroare
+# si fara niciun warning — botul raspundea "nu am gasit nimic" la orice titlu.
+SEARCH_RESULTS = 5
+SEARCH_PREFIX = f'ytsearch{SEARCH_RESULTS}:'
+
+
+def search_query(text: str) -> str:
+    """Interogarea de trimis lui yt-dlp pentru o cautare de text."""
+    return f'{SEARCH_PREFIX}{text}'
+
+
 # Guest mode + PO Token (fara cookies — mai rapid si mai stabil)
 YDL_OPTS_SEARCH = {
     'noplaylist': True,
     'quiet': False,
     'no_warnings': False,
-    'default_search': 'ytsearch5',
+    # Fara `default_search`: vezi comentariul de mai sus. Prefixul explicit merge
+    # direct la extractorul de cautare al YouTube, deci nu mai exista nicio etapa
+    # de procesare pe care `extract_flat` sa o poata sari.
     'source_address': '0.0.0.0',
     'socket_timeout': 10,
     'skip_download': True,

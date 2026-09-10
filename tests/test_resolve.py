@@ -191,6 +191,73 @@ def test_a_stop_between_stages_aborts_before_the_download():
 
 # --- cautarea -----------------------------------------------------------------
 
+def test_a_text_search_uses_an_explicit_prefix_not_default_search():
+    """`default_search` si `extract_flat` sunt INCOMPATIBILE, in tacere.
+
+    Verificat in yt-dlp 2026.8.19: `default_search` nu e aplicat de YoutubeDL, ci de
+    extractorul GENERIC (extractor/generic.py:768-793), care intoarce
+    `url_result('ytsearch5:' + url)` — adica un rezultat care trebuie PROCESAT ca sa
+    devina o cautare. Iar `extract_flat=True` inseamna, in documentatia lui yt-dlp,
+    "True: Never process".
+
+    Rezultatul: dict fara `entries`, instantaneu, fara nicio excepție si fara niciun
+    warning — botul raspundea "nu am gasit nimic" la ORICE titlu. Fake-ul de mai jos
+    reproduce exact semantica aceea, deci testul pica pe codul vechi.
+    """
+    sent = []
+
+    def generic_semantics(stage, opts):
+        sent.append(opts.get('_query'))
+        return None
+
+    class _EmulatedYtDlp:
+        """Se comporta ca yt-dlp: fara prefix explicit, cautarea nu se intampla."""
+
+        def __init__(self, query):
+            self.query = query
+
+        def result(self, opts):
+            has_prefix = str(self.query).startswith('ytsearch')
+            if not has_prefix and opts.get('extract_flat'):
+                # Exact ce intoarce extractorul generic cand nimeni nu proceseaza
+                # mai departe url_result-ul: niciun `entries`.
+                return {'_type': 'url', 'url': f'ytsearch5:{self.query}',
+                        'extractor': 'generic'}
+            return {'entries': [
+                {'id': 'vid123', 'title': 'Artist - Piesa', 'duration': 200,
+                 'live_status': None,
+                 'url': 'https://www.youtube.com/watch?v=vid123'}]}
+
+    seen_queries = []
+
+    saved = ytdlp_mod.extract
+
+    async def fake_extract(opts, query, download=False, loop=None, stage=''):
+        seen_queries.append(query)
+        return _EmulatedYtDlp(query).result(opts)
+
+    ytdlp_mod.extract = fake_extract
+    try:
+        url, reject = _run(resolve.search_to_url('macarena los del rio'))
+    finally:
+        ytdlp_mod.extract = saved
+
+    assert seen_queries and seen_queries[0].startswith('ytsearch'), (
+        f'cautarea nu duce prefixul explicit: {seen_queries}')
+    assert url == 'https://www.youtube.com/watch?v=vid123', (url, reject)
+    assert reject is None, reject
+
+
+def test_the_search_options_never_set_default_search():
+    """Garda mecanica: reapariția lui ar dezactiva iar cautarea, in tacere."""
+    opts = config.make_search_opts(extract_flat=True)
+    assert 'default_search' not in opts or opts['default_search'] is None, (
+        "`default_search` a revenit in opts-urile de cautare: cu extract_flat=True "
+        "cautarea de text intoarce zero rezultate fara nicio eroare")
+    assert config.SEARCH_PREFIX.startswith('ytsearch'), config.SEARCH_PREFIX
+    assert config.search_query('ceva') == f'{config.SEARCH_PREFIX}ceva'
+
+
 def test_a_url_is_not_searched():
     with _Ytdlp() as yt:
         url, reject = _run(resolve.search_to_url(VIDEO))

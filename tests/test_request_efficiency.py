@@ -61,10 +61,16 @@ def test_tls_verification_is_on():
 
 
 def test_search_asks_for_several_candidates():
-    """Cu ytsearch (un rezultat) filtrul is_clean nu avea din ce alege."""
-    ds = config.make_search_opts()['default_search']
-    assert ds.startswith('ytsearch') and ds != 'ytsearch', ds
-    assert int(ds.replace('ytsearch', '')) >= 3
+    """Cu ytsearch (un singur rezultat) filtrul is_clean nu are din ce alege.
+
+    Numarul sta acum in prefixul EXPLICIT, nu in `default_search`: acela, combinat cu
+    `extract_flat=True`, dezactiva cautarea complet si in tacere. Vezi
+    config.SEARCH_PREFIX si tests/test_resolve.py.
+    """
+    prefix = config.SEARCH_PREFIX
+    assert prefix.startswith('ytsearch') and prefix.endswith(':'), prefix
+    assert config.SEARCH_RESULTS >= 3, config.SEARCH_RESULTS
+    assert prefix == f'ytsearch{config.SEARCH_RESULTS}:', prefix
 
 
 def test_text_search_is_flat_then_one_full_extraction():
