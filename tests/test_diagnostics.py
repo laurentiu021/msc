@@ -209,12 +209,13 @@ def test_watchdog_ignores_playback_failures():
 
 # --- /status ----------------------------------------------------------------
 
-def _get(path):
+def _get(path, token=None, header_token=None):
     """Cheama handler-ul HTTP fara socket: fara server, fara firewall, fara port."""
     import bot as bot_mod
 
     handler = object.__new__(bot_mod._Health)
-    handler.path = path
+    handler.path = path if token is None else f'{path}?token={token}'
+    handler.headers = {'X-Status-Token': header_token} if header_token else {}
     captured = {}
     handler._respond = lambda code, ctype, body: captured.update(
         code=code, content_type=ctype, body=body)
@@ -223,22 +224,90 @@ def _get(path):
     return captured
 
 
+def _with_token(value):
+    """Setter/restaurator pentru STATUS_TOKEN."""
+    saved = os.environ.get('STATUS_TOKEN')
+    if value is None:
+        os.environ.pop('STATUS_TOKEN', None)
+    else:
+        os.environ['STATUS_TOKEN'] = value
+    return saved
+
+
 def test_status_serves_the_cached_snapshot_as_json():
     import json
 
-    diag.store(_snapshot())
-    resp = _get('/status')
-    assert resp['code'] == 200, resp
-    assert resp['content_type'] == 'application/json'
-    payload = json.loads(resp['body'])
-    assert 'problems' in payload and 'guilds_detail' in payload
-    assert 'generated_at' in payload, 'nu se poate spune cat de vechi e raportul'
+    saved = _with_token('secret-de-test')
+    try:
+        diag.store(_snapshot())
+        resp = _get('/status', token='secret-de-test')
+        assert resp['code'] == 200, resp
+        assert resp['content_type'] == 'application/json'
+        payload = json.loads(resp['body'])
+        assert 'problems' in payload and 'guilds_detail' in payload
+        assert 'generated_at' in payload, 'nu se poate spune cat de vechi e raportul'
+    finally:
+        _with_token(saved)
+
+
+def test_status_is_404_without_a_token_configured():
+    """Fail-CLOSED. Portul de healthcheck devine public in clipa in care
+    serviciului i se atașeaza un domeniu, iar repo-ul e public: calea /status e
+    cunoscuta oricui citeste codul. Fara STATUS_TOKEN, endpoint-ul nu exista."""
+    saved = _with_token(None)
+    try:
+        diag.store(_snapshot())
+        assert _get('/status')['code'] == 404
+        assert _get('/status', token='orice')['code'] == 404
+    finally:
+        _with_token(saved)
+
+
+def test_status_rejects_a_wrong_token():
+    saved = _with_token('bun')
+    try:
+        diag.store(_snapshot())
+        assert _get('/status', token='greșit')['code'] == 404
+        assert _get('/status')['code'] == 404, 'a servit fara niciun token'
+        assert _get('/status', header_token='bun')['code'] == 200, 'header-ul nu merge'
+    finally:
+        _with_token(saved)
+
+
+def test_the_status_payload_carries_no_credentials():
+    """Nu are credentiale, dar are ID de guild, ce se reda si calea de cookies —
+    de aceea e in spatele unui token, nu de aceea e nevinovat."""
+    import json
+
+    saved_token = _with_token('t')
+    saved_env = {k: os.environ.get(k) for k in
+                 ('DISCORD_TOKEN', 'YOUTUBE_API_KEY', 'YT_COOKIES_CONTENT')}
+    os.environ['DISCORD_TOKEN'] = 'MTA-token-secret-de-discord'
+    os.environ['YOUTUBE_API_KEY'] = 'AIzaCheieSecretaDeApi'
+    os.environ['YT_COOKIES_CONTENT'] = 'valoare-secreta-de-cookie'
+    try:
+        diag.store(_snapshot())
+        body = json.dumps(json.loads(_get('/status', token='t')['body']))
+        for secret in ('MTA-token-secret-de-discord', 'AIzaCheieSecretaDeApi',
+                       'valoare-secreta-de-cookie'):
+            assert secret not in body, f'{secret[:12]}... a ajuns in /status'
+    finally:
+        _with_token(saved_token)
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def test_status_says_503_before_the_first_heartbeat():
-    diag._CACHE = {}
-    resp = _get('/status')
-    assert resp['code'] == 503, resp
+    saved = _with_token('t')
+    try:
+        diag._CACHE = {}
+        resp = _get('/status', token='t')
+        assert resp['code'] == 503, resp
+    finally:
+        _with_token(saved)
 
 
 def test_status_never_blocks_the_handler():
@@ -257,8 +326,11 @@ def test_status_never_blocks_the_handler():
 
 
 def test_health_stays_plain_text_for_railway():
+    """/health NU cere token: Railway il sondeaza si nu scurge nimic."""
+    saved = _with_token(None)
     diag.store(_snapshot())
     resp = _get('/health')
+    _with_token(saved)
     assert resp['content_type'] == 'text/plain', resp
     assert resp['body'] in (b'ok', b'starting')
 

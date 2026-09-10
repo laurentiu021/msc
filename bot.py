@@ -1,4 +1,5 @@
 """Gogu — Bot de muzică Discord."""
+import hmac
 import json
 import os
 import sys
@@ -9,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 
@@ -464,7 +466,7 @@ class _Health(BaseHTTPRequestHandler):
     timeout = 10                     # o conexiune inactiva nu mai blocheaza thread-ul
 
     def do_GET(self):
-        path = self.path.rstrip('/')
+        path = urlparse(self.path).path.rstrip('/')
         if path == '/status':
             return self._status()
         if path not in ('', '/health'):
@@ -477,7 +479,35 @@ class _Health(BaseHTTPRequestHandler):
         body = b'ok' if ready else b'starting'
         self._respond(200 if ready else 503, 'text/plain', body)
 
+    def _status_authorized(self) -> bool:
+        """Token obligatoriu, comparat in timp constant.
+
+        Fail-CLOSED: fara STATUS_TOKEN in env, /status nu exista. Portul de
+        healthcheck devine public in clipa in care serviciului i se atașeaza un
+        domeniu, iar repo-ul e public — deci calea `/status` e cunoscuta oricui
+        citeste codul. Instantaneul nu contine credentiale, dar contine ID-ul
+        guild-ului, ce se reda acum, coada, calea fisierului de cookies, versiunile
+        bibliotecilor si ultima eroare yt-dlp: informatii operationale care nu au
+        ce sa caute la vedere. `!health` in Discord da acelasi lucru, autentificat
+        de Discord.
+        """
+        expected = (os.getenv('STATUS_TOKEN') or '').strip()
+        if not expected:
+            return False
+        supplied = (self.headers.get('X-Status-Token')
+                    or parse_qs(urlparse(self.path).query).get('token', [''])[0]
+                    or '')
+        # Pe bytes, nu pe str: compare_digest arunca TypeError la orice caracter
+        # non-ASCII, deci un token cu diacritice ar fi crapat handler-ul in loc
+        # sa dea 404.
+        return hmac.compare_digest(supplied.encode('utf-8', 'replace'),
+                                   expected.encode('utf-8', 'replace'))
+
     def _status(self):
+        if not self._status_authorized():
+            # 404, nu 401: un 401 confirma ca endpoint-ul exista.
+            self.send_error(404)
+            return
         # DOAR din cache: serverul e single-threaded pe un thread daemon, deci un
         # apel blocant aici ar intarzia fiecare sonda urmatoare, inclusiv
         # healthcheck-ul.
