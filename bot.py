@@ -385,6 +385,12 @@ async def _reply(ctx, text):
 # viata containerului.
 HEARTBEAT_SEC = 15
 WATCHDOG_STALL_SEC = int(os.getenv('WATCHDOG_STALL_SEC', '300'))
+# Cat timp trebuie sa fie TOATE thread-urile de yt-dlp ocupate de cereri
+# abandonate ca sa acceptam ca executorul nu se mai elibereaza. O citire de o
+# clipa nu e o defectiune: doua descarcari lente pot depasi bugetul de 240s si
+# totusi sa se termine singure la 250s. Peste plafonul de aici nu se mai termina
+# niciodata, iar procesul e viu si inutil.
+WATCHDOG_SATURATED_SEC = int(os.getenv('WATCHDOG_SATURATED_SEC', '300'))
 SNAPSHOT_EVERY_SEC = 60
 SWEEP_EVERY_SEC = 600
 _LAST_BEAT = time.monotonic()
@@ -420,12 +426,33 @@ async def _heartbeat():
         await asyncio.sleep(HEARTBEAT_SEC)
 
 
+def _saturation_start(now: float, leaked: int, max_workers: int,
+                      since: float) -> float:
+    """De cand dureaza saturarea ACTUALA a executorului (0 = nu e saturat).
+
+    Separata si pura pentru ca aici sta jumatatea greu de nimerit: momentul
+    trebuie sa se PĂSTREZE cat timp saturarea tine (altfel nu se acumuleaza
+    niciodata destul) si sa se UITE complet in clipa in care un thread se
+    elibereaza (altfel o saturare veche de o ora ar declanșa repornirea la prima
+    reapariție, oricat de scurta).
+    """
+    if max_workers and leaked >= max_workers:
+        return since or now
+    return 0.0
+
+
 def _should_restart(now: float, last_beat: float, leaked: int, max_workers: int,
-                    boot: float) -> str | None:
+                    boot: float, saturated_since: float = 0.0) -> str | None:
     """Motivul repornirii, sau None. Pura, ca sa poata fi testata fara os._exit.
 
     Strict la defecte locale, auto-provocate. Niciodata la eșecuri de redare: un
     blocaj YouTube ar lua serviciul complet jos exact cand nu e vina noastra.
+
+    `leaked` trebuie sa fie indicatorul INSTANTANEU (ytdlp.leaked_workers), nu
+    totalul de la pornire. Cand era totalul, al doilea timeout din viata
+    containerului — o seara normala de reincercari — armă os._exit(1) la fiecare
+    tick de 15s, pana la epuizarea celor 10 reporniri permise de Railway, si de
+    atunci serviciul rămânea jos.
     """
     if now - boot < WATCHDOG_STALL_SEC:
         # Fereastra de pornire: o problema la boot nu are voie sa arda bugetul
@@ -434,19 +461,24 @@ def _should_restart(now: float, last_beat: float, leaked: int, max_workers: int,
     if now - last_beat > WATCHDOG_STALL_SEC:
         return (f'bucla de evenimente blocata: niciun heartbeat de '
                 f'{round(now - last_beat)}s')
-    if max_workers and leaked >= max_workers:
-        return (f'toate cele {max_workers} thread-uri de yt-dlp sunt abandonate: '
-                f'nicio cerere nu mai poate porni')
+    if max_workers and leaked >= max_workers and saturated_since:
+        held = now - saturated_since
+        if held >= WATCHDOG_SATURATED_SEC:
+            return (f'toate cele {max_workers} thread-uri de yt-dlp sunt '
+                    f'abandonate de {round(held)}s: nicio cerere nu mai poate porni')
     return None
 
 
 def _watchdog():
     """Thread daemon: iese cu cod nenul cand procesul e viu dar inutil."""
+    saturated_since = 0.0
     while True:
         time.sleep(HEARTBEAT_SEC)
-        reason = _should_restart(time.monotonic(), _LAST_BEAT,
-                                 ytdlp_mod.leaked_workers(), ytdlp_mod.MAX_WORKERS,
-                                 _BOOT_MONOTONIC)
+        now = time.monotonic()
+        leaked, workers = ytdlp_mod.leaked_workers(), ytdlp_mod.MAX_WORKERS
+        saturated_since = _saturation_start(now, leaked, workers, saturated_since)
+        reason = _should_restart(now, _LAST_BEAT, leaked, workers,
+                                _BOOT_MONOTONIC, saturated_since)
         if not reason:
             continue
         log.critical(f"WATCHDOG: {reason}. Ies cu cod 1 ca Railway sa reporneasca.")

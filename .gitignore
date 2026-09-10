@@ -1,9 +1,49 @@
+# Repo PUBLIC. Regula: orice fisier care poate conține o sesiune Google, un
+# token, audio descarcat sau un script scris ad-hoc in timpul unei investigatii
+# trebuie sa fie imposibil de comis din greseala cu `git add -A`.
+
+# --- secrete ----------------------------------------------------------------
+# cookies* prinde si copiile: cookies.txt.good (ultimul jar bun), cookies.txt.tmp
+# (scrierea atomica) si orice cookies-de-test.txt facut la depanare. Un singur
+# __Secure-1PSID publicat = cont Google compromis, deci aici plasa e larga
+# intentionat.
+cookies*
+*.cookies
+.cookies_seed
+.env
+.env.*
+
+# --- artefacte de rulare ----------------------------------------------------
 log
 *.log
 downloads/
+data/
+audio/
+*.webm
+*.m4a
+*.opus
+*.mp3
+*.part
+*.ytdl
 __pycache__/
 *.pyc
-cookies.txt
-.env
-.cookies_seed
-data/
+.pytest_cache/
+
+# --- scratch de investigatie ------------------------------------------------
+# Reproducerile si refutarile sunt de unica folosinta: dovedesc un defect, apoi
+# devin un test in tests/. Nu au ce sa caute in istoric.
+_repro_*.py
+_refute_*.py
+_verify_*.py
+_probe_*.py
+_instrument_*.py
+_audit_*.py
+_wi_*.py
+_v_*.py
+_x_*.py
+_zz_*.py
+scratch/
+*.bak
+*.tmp
+*.orig
+*.rej

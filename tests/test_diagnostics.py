@@ -78,6 +78,29 @@ def test_the_snapshot_answers_the_questions_that_matter():
     assert snap['uptime_sec'] >= 0, 'uptime negativ'
 
 
+def test_the_snapshot_separates_the_live_gauge_from_the_history():
+    """Un singur numar nu poate raspunde la ambele intrebari.
+
+    "E infundat ACUM?" decide reporniri; "cat de des se intampla?" explica o
+    seara proasta. Cand era un singur contor cumulativ, prima intrebare primea
+    raspunsul celei de-a doua si watchdog-ul repornea procesul la infinit.
+    """
+    from music import ytdlp
+
+    live, total = ytdlp._mark_leaked()
+    try:
+        snap = _snapshot()
+        assert snap['ytdlp']['leaked_workers'] == live, snap['ytdlp']
+        assert snap['ytdlp']['timeouts_total'] == total, snap['ytdlp']
+    finally:
+        ytdlp._release_leaked(None)
+
+    after = _snapshot()['ytdlp']
+    assert after['leaked_workers'] == live - 1, after
+    assert after['timeouts_total'] == total, \
+        'istoricul a scazut cand thread-ul s-a eliberat'
+
+
 def test_the_proxy_secret_never_reaches_the_output():
     import json
 
@@ -164,9 +187,15 @@ def test_pot_ping_failure_is_reported_not_raised():
 
 # --- watchdog ---------------------------------------------------------------
 
-def _restart(now, last_beat, leaked, max_workers=2, boot=0.0):
+def _restart(now, last_beat, leaked, max_workers=2, boot=0.0,
+             saturated_since=None):
     import bot as bot_mod
-    return bot_mod._should_restart(now, last_beat, leaked, max_workers, boot)
+    if saturated_since is None:
+        # Implicit: saturarea tine de suficient timp, ca testele care verifica
+        # ALTE ramuri sa nu depinda de plafonul de persistenta.
+        saturated_since = now - bot_mod.WATCHDOG_SATURATED_SEC - 1
+    return bot_mod._should_restart(now, last_beat, leaked, max_workers, boot,
+                                   saturated_since)
 
 
 def test_watchdog_stays_quiet_while_healthy():
@@ -185,6 +214,65 @@ def test_watchdog_fires_when_every_ytdlp_thread_is_leaked():
 
 def test_watchdog_tolerates_leaks_below_the_pool_size():
     assert _restart(now=10_000, last_beat=9_999, leaked=1, max_workers=2) is None
+
+
+def test_watchdog_ignores_a_momentary_saturation():
+    """Doua descarcari lente pot depasi bugetul si totusi sa se termine.
+
+    Repornirea la prima citire saturata omoara redarea in curs pentru o stare
+    care se rezolva singura in cateva secunde.
+    """
+    assert _restart(now=10_000, last_beat=9_999, leaked=2, max_workers=2,
+                    saturated_since=9_990) is None
+
+
+def test_watchdog_needs_the_saturation_to_persist():
+    import bot as bot_mod
+    since = 10_000 - bot_mod.WATCHDOG_SATURATED_SEC
+    reason = _restart(now=10_000, last_beat=9_999, leaked=2, max_workers=2,
+                      saturated_since=since)
+    assert reason and 'abandonate' in reason, reason
+
+
+def test_saturation_clock_starts_once_and_resets_on_recovery():
+    """Contorul de persistenta e jumatatea usor de greșit a verificarii.
+
+    Daca s-ar rescrie la fiecare tick, saturarea nu s-ar acumula niciodata si
+    verificarea ar fi moarta. Daca nu s-ar uita la revenire, o saturare veche de
+    o ora ar declanșa repornirea la prima reapariție, oricat de scurta.
+    """
+    import bot as bot_mod
+    start = bot_mod._saturation_start(1_000.0, 2, 2, 0.0)
+    assert start == 1_000.0, start
+    assert bot_mod._saturation_start(1_015.0, 2, 2, start) == 1_000.0, \
+        'momentul se rescrie la fiecare tick: saturarea nu se acumuleaza niciodata'
+    assert bot_mod._saturation_start(1_030.0, 1, 2, start) == 0.0, \
+        'un thread s-a eliberat, dar ceasul de saturare a rămas pornit'
+    assert bot_mod._saturation_start(2_000.0, 2, 2, 0.0) == 2_000.0, \
+        'saturarea noua trebuie masurata de acum, nu de la episodul vechi'
+
+
+def test_a_lifetime_timeout_counter_can_never_arm_the_watchdog():
+    """Contorul citit de watchdog trebuie sa poata SCADEA.
+
+    Bug-ul original: ytdlp.leaked_workers() numara timeout-urile de la pornire,
+    deci al doilea timeout din viata containerului (o seara normala) armă
+    os._exit(1) la fiecare tick de 15s, pana la epuizarea celor 10 reporniri
+    permise de Railway — si de atunci serviciul rămânea jos.
+    """
+    from music import ytdlp
+
+    before = ytdlp.leaked_workers()
+    live, total = ytdlp._mark_leaked()
+    try:
+        assert live == before + 1, (live, before)
+        assert total >= 1
+    finally:
+        ytdlp._release_leaked(None)
+    assert ytdlp.leaked_workers() == before, (
+        'leaked_workers() nu scade la loc, deci e un istoric, nu un indicator')
+    assert ytdlp.leaked_workers_total() == total, \
+        'istoricul nu are voie sa scada'
 
 
 def test_watchdog_is_silent_during_the_boot_window():

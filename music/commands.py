@@ -458,7 +458,8 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         yt = snapshot['ytdlp']
         embed.add_field(
             name="Cereri",
-            value=(f"Thread-uri abandonate: `{yt['leaked_workers']}`/`{yt['max_workers']}`\n"
+            value=(f"Thread-uri blocate acum: `{yt['leaked_workers']}`/`{yt['max_workers']}`\n"
+                   f"Timeout-uri de la pornire: `{yt.get('timeouts_total', 0)}`\n"
                    f"Pauza de throttle: `{yt['throttle_sec_left']}s`"),
             inline=True)
 

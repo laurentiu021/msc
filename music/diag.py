@@ -122,7 +122,12 @@ def build(bot, guild_states, *, now=None, pot=None) -> dict:
         'cookies': {**cookie_status(), 'in_use': cookies_available(),
                     'dir': COOKIE_DIR},
         'ytdlp': {
+            # Instantaneu vs istoric: `leaked_workers` spune daca executorul e
+            # infundat ACUM, `timeouts_total` spune cat de des se intampla. Doar
+            # primul poate declanșa o repornire; doar al doilea explica o seara
+            # cu multe reincercari.
             'leaked_workers': ytdlp.leaked_workers(),
+            'timeouts_total': ytdlp.leaked_workers_total(),
             'max_workers': ytdlp.MAX_WORKERS,
             'throttle_sec_left': _remaining(ytdlp._NEXT_ALLOWED_AT, now),
             'extract_budget_sec': ytdlp.EXTRACT_TIMEOUT_SEC,
@@ -188,7 +193,7 @@ def problems(snapshot: dict) -> list[str]:
     ytdlp_info = snapshot['ytdlp']
     if ytdlp_info['leaked_workers'] >= ytdlp_info['max_workers']:
         out.append(f"toate cele {ytdlp_info['max_workers']} thread-uri de yt-dlp "
-                   f"sunt abandonate: cererile nu mai pornesc")
+                   f"sunt ocupate de cereri abandonate: cererile nu mai pornesc")
     elif ytdlp_info['leaked_workers']:
         out.append(f"{ytdlp_info['leaked_workers']} thread-uri de yt-dlp abandonate")
     api = snapshot['data_api']

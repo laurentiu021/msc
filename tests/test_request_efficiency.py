@@ -310,14 +310,24 @@ def test_no_ytdlp_call_uses_the_default_executor():
     # Pe AST, nu pe text: docstring-ul modulului citeaza chiar forma greșita
     # (`run_in_executor(None, ...)`) ca sa explice de ce e interzisa.
     tree = ast.parse(inspect.getsource(ytdlp))
-    targets = [
-        ast.unparse(node.args[0]) if node.args else 'LIPSA'
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and getattr(node.func, 'attr', None) == 'run_in_executor'
-    ]
-    assert targets, 'nu mai exista niciun apel in executor'
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+
+    # run_in_executor(None, ...) e forma interzisa; cu _EXECUTOR ar fi in regula.
+    targets = [ast.unparse(node.args[0]) if node.args else 'LIPSA'
+               for node in calls
+               if getattr(node.func, 'attr', None) == 'run_in_executor']
     assert all(t == '_EXECUTOR' for t in targets), targets
+
+    # asyncio.to_thread e tot pool-ul implicit, doar cu alt nume.
+    assert not [n for n in calls if getattr(n.func, 'attr', None) == 'to_thread'], \
+        'asyncio.to_thread foloseste tot executorul implicit'
+
+    # Si trebuie sa existe o cale reala de trimitere a muncii, altfel testul ar
+    # trece vesel pe un modul din care s-a sters tot.
+    dispatch = [n for n in calls
+                if getattr(n.func, 'attr', None) == 'submit'
+                and ast.unparse(n.func.value) == '_EXECUTOR']
+    assert dispatch or targets, 'nu mai exista niciun apel in executor'
     assert 0 < ytdlp.MAX_WORKERS <= 8, ytdlp.MAX_WORKERS
 
 

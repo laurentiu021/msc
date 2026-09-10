@@ -28,6 +28,7 @@ import concurrent.futures
 import contextlib
 import os
 import random
+import threading
 import time
 
 import yt_dlp
@@ -55,9 +56,18 @@ MAX_WORKERS = _workers()
 _EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=MAX_WORKERS, thread_name_prefix='ytdlp')
 
-# Cereri abandonate dupa timeout, al caror thread ruleaza inca. Il expunem ca sa
-# fie vizibil in !debug: altfel epuizarea executorului e complet invizibila.
-_leaked = 0
+# Doua numere DIFERITE, si confuzia dintre ele era un defect grav: watchdog-ul
+# citea contorul cumulativ ca pe un indicator instantaneu, deci dupa al doilea
+# timeout din viata containerului (perfect normal intr-o seara) declanșa
+# os._exit(1) la fiecare tick, la infinit, pana la epuizarea celor 10 reporniri
+# permise de Railway.
+#   _leaked_live  = cate thread-uri sunt abandonate CHIAR ACUM (scade cand se
+#                   termina). Asta e singurul numar din care se poate deduce ca
+#                   executorul e infundat.
+#   _leaked_total = cate au fost de la pornire (doar pentru raportare).
+_leak_lock = threading.Lock()
+_leaked_live = 0
+_leaked_total = 0
 
 # Plafon absolut per cerere. socket_timeout acopera doar inactivitatea pe socket:
 # un stream care curge foarte lent, sau un manifest live, putea tine un thread
@@ -67,8 +77,35 @@ DOWNLOAD_TIMEOUT_SEC = 240
 
 
 def leaked_workers() -> int:
-    """Cate cereri au depasit bugetul si si-au lasat thread-ul in urma."""
-    return _leaked
+    """Cate thread-uri sunt abandonate CHIAR ACUM. Indicator, nu istorie."""
+    with _leak_lock:
+        return _leaked_live
+
+
+def leaked_workers_total() -> int:
+    """Cate cereri au depasit bugetul de la pornire. Doar pentru raportare."""
+    with _leak_lock:
+        return _leaked_total
+
+
+def _mark_leaked() -> tuple[int, int]:
+    global _leaked_live, _leaked_total
+    with _leak_lock:
+        _leaked_live += 1
+        _leaked_total += 1
+        return _leaked_live, _leaked_total
+
+
+def _release_leaked(_future) -> None:
+    """Thread-ul abandonat s-a terminat in cele din urma; slotul e liber.
+
+    Rulează in thread-ul executorului, de aceea contorul e sub lock.
+    """
+    global _leaked_live
+    with _leak_lock:
+        _leaked_live = max(0, _leaked_live - 1)
+        left = _leaked_live
+    log.info(f"Thread-ul yt-dlp abandonat s-a incheiat; abandonate acum: {left}")
 
 
 def _interval() -> tuple[float, float]:
@@ -126,7 +163,6 @@ async def extract(opts: dict, query: str, *, download: bool = False,
     Cu want_filename=True intoarce (info, filename): `prepare_filename` cere
     aceeasi instanta care a descarcat, deci se calculeaza in acelasi thread.
     """
-    global _leaked
     loop = loop or asyncio.get_running_loop()
     budget = DOWNLOAD_TIMEOUT_SEC if download else EXTRACT_TIMEOUT_SEC
 
@@ -142,14 +178,22 @@ async def extract(opts: dict, query: str, *, download: bool = False,
             ydl.close()
 
     async with _slot():
+        # Trimitem DIRECT in executor ca sa pastram concurrent.futures.Future:
+        # la timeout, `wait_for` anuleaza doar invelisul asyncio, iar callback-ul
+        # lui s-ar declanșa imediat. Future-ul executorului se incheie abia cand
+        # thread-ul chiar termina — singurul moment in care slotul e liber cu
+        # adevarat, si deci singurul din care se poate scadea contorul.
+        work = _EXECUTOR.submit(_run)
         try:
             info, filename = await asyncio.wait_for(
-                loop.run_in_executor(_EXECUTOR, _run), timeout=budget)
+                asyncio.wrap_future(work, loop=loop), timeout=budget)
         except asyncio.TimeoutError as e:
-            _leaked += 1
+            live, total = _mark_leaked()
+            work.add_done_callback(_release_leaked)
             log.warning(
                 f"yt-dlp a depasit {budget}s la {stage or 'cerere'}; thread-ul "
-                f"continua in fundal (abandonate pana acum: {_leaked}/{MAX_WORKERS})")
+                f"continua in fundal (abandonate acum: {live}/{MAX_WORKERS}, "
+                f"total de la pornire: {total})")
             raise YtdlpTimeout(stage, budget) from e
 
     if stage:

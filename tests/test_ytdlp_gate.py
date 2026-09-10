@@ -133,6 +133,8 @@ def test_timeout_leaves_the_cookie_file_untouched():
         saved_budget = ytdlp.EXTRACT_TIMEOUT_SEC
         ytdlp.EXTRACT_TIMEOUT_SEC = 0.1
         leaked_before = ytdlp.leaked_workers()
+        total_before = ytdlp.leaked_workers_total()
+        during = {}
         _reset_gate()
         try:
             async def main():
@@ -140,6 +142,7 @@ def test_timeout_leaves_the_cookie_file_untouched():
                     await ytdlp.extract({'cookiefile': cookies}, 'q')
                 except TimeoutError:
                     # Exact momentul care conta: thread-ul lucreaza inca.
+                    during['live'] = ytdlp.leaked_workers()
                     with open(cookies, encoding='utf-8') as fh:
                         return fh.read()
                 raise AssertionError('nu a expirat bugetul')
@@ -154,8 +157,17 @@ def test_timeout_leaves_the_cookie_file_untouched():
         assert after_timeout == original, (
             'fisierul de cookies a fost atins la timeout: '
             f'{len(after_timeout)} bytes vs {len(original)}')
-        assert ytdlp.leaked_workers() == leaked_before + 1, \
+        # Doua proprietati diferite, si confundarea lor arma os._exit(1) pe viata:
+        # cat timp thread-ul lucreaza, slotul E ocupat...
+        assert during['live'] == leaked_before + 1, \
             'thread-ul abandonat nu e numarat, deci epuizarea e invizibila'
+        # ...dar cand se termina, slotul se elibereaza. Indicatorul trebuie sa
+        # coboare, altfel watchdog-ul crede la infinit ca executorul e infundat.
+        assert ytdlp.leaked_workers() == leaked_before, (
+            'thread-ul abandonat s-a terminat, dar contorul a rămas sus: '
+            f'{ytdlp.leaked_workers()} vs {leaked_before}')
+        assert ytdlp.leaked_workers_total() == total_before + 1, \
+            'timeout-ul nu a fost inregistrat in istoric'
         assert closes, 'thread-ul nu a mai inchis niciodata instanta'
         assert all('ytdlp' in name for name in closes), \
             f'close() a rulat in afara executorului: {closes}'
