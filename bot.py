@@ -422,9 +422,14 @@ async def on_ready():
     global _tree_synced
     if not _tree_synced:
         try:
-            bot.tree.clear_commands(guild=None)
-            await bot.tree.sync()
+            # NU mai golim arborele. Golirea exista cand nu aveam nicio comanda
+            # slash si voiam sa scapam de resturi; acum `play` e o comanda hibrida,
+            # deci golirea ar sterge exact `/play` inainte de sincronizare si
+            # autocomplete-ul nu ar apărea niciodata in Discord.
+            synced = await bot.tree.sync()
             _tree_synced = True
+            log.info(f"Comenzi slash sincronizate: "
+                     f"{[c.name for c in synced] or 'niciuna'}")
         # OSError e in lista fiindca o cadere de DNS/TCP da ClientConnectorError,
         # care e un OSError, nu un discord.HTTPException — si scapa ca excepție
         # din handler, adica sare peste tot ce urmeaza aici.

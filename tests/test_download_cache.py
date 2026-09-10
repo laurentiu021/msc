@@ -26,8 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from music import config, player, resolve
 from music.state import GuildState
-from music.utils import (cached_download, read_track_meta, sweep_partials,
-                         trim_download_cache, write_track_meta)
+from music.utils import (cached_download, read_track_meta, suggest_tracks,
+                         sweep_partials, trim_download_cache,
+                         write_track_meta)
 
 
 def _write(directory, name, size=1024, age_sec=0.0):
@@ -295,6 +296,148 @@ def test_orphan_metadata_is_swept_at_boot():
         assert sweep_partials(tmp) == 1
         assert not os.path.exists(os.path.splitext(orphan)[0] + '.meta.json')
         assert read_track_meta(keeper), 'a sters metadatele unui fisier existent'
+
+
+# --- sugestii pentru autocomplete-ul lui /play -------------------------------
+# Sursa e cache-ul de pe volum, nu un index separat si nicio cerere catre YouTube:
+# insotitorii descriu deja tot ce s-a ascultat.
+
+def _played(directory, vid, title, age_sec=0.0, **extra):
+    path = _write(directory, f'{vid}.opus', age_sec=age_sec)
+    write_track_meta(path, {'url': f'https://www.youtube.com/watch?v={vid}',
+                            'title': title, **extra})
+    if age_sec:
+        when = time.time() - age_sec
+        os.utime(path, (when, when))
+    return path
+
+
+def test_suggestions_come_from_the_cache_newest_first():
+    with tempfile.TemporaryDirectory() as tmp:
+        _clear_suggest_cache()
+        _played(tmp, 'v1', 'Los Del Rio - Macarena', age_sec=9_000)
+        _played(tmp, 'v2', 'Alt Artist - Alta Piesa', age_sec=10)
+        got = [t['title'] for t in suggest_tracks('', directory=tmp)]
+        assert got == ['Alt Artist - Alta Piesa', 'Los Del Rio - Macarena'], got
+
+
+def test_suggestions_match_without_case_or_diacritics():
+    """Cine tasteaza pe telefon nu pune diacritice."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _clear_suggest_cache()
+        _played(tmp, 'v1', 'Los Del Rio - Macarena')
+        _played(tmp, 'v2', 'Cântă Ceva Frumos')
+        _clear_suggest_cache()
+        assert [t['title'] for t in suggest_tracks('MACARENA', directory=tmp)] ==             ['Los Del Rio - Macarena']
+        _clear_suggest_cache()
+        assert [t['title'] for t in suggest_tracks('canta', directory=tmp)] ==             ['Cântă Ceva Frumos']
+        _clear_suggest_cache()
+        assert suggest_tracks('nu exista', directory=tmp) == []
+
+
+def test_a_file_without_metadata_is_not_suggested():
+    """Nu sugeram ceva ce nu putem descrie: numele fisierului e un ID opac."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _clear_suggest_cache()
+        _write(tmp, 'fara_meta.opus')
+        assert suggest_tracks('', directory=tmp) == []
+
+
+def test_metadata_without_its_audio_is_not_suggested():
+    """Altfel `/play` ar propune o piesa care nu mai e in cache."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _clear_suggest_cache()
+        write_track_meta(os.path.join(tmp, 'fantoma.opus'),
+                         {'url': 'https://www.youtube.com/watch?v=x',
+                          'title': 'Fantoma'})
+        assert suggest_tracks('', directory=tmp) == []
+
+
+def test_suggestions_never_exceed_the_discord_limit():
+    """Discord accepta cel mult 25 de opțiuni."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _clear_suggest_cache()
+        for i in range(40):
+            _played(tmp, f'v{i:02d}', f'Piesa {i:02d}', age_sec=40 - i)
+        _clear_suggest_cache()
+        assert len(suggest_tracks('', directory=tmp)) == 25
+
+
+def test_the_suggestion_list_is_memoized_so_typing_does_not_hammer_the_disk():
+    """Autocomplete-ul se declanșeaza la fiecare tasta, iar Discord da 3 secunde."""
+    import music.utils as utils_mod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _clear_suggest_cache()
+        _played(tmp, 'v1', 'Prima')
+        listings = []
+        saved = utils_mod.os.listdir
+        utils_mod.os.listdir = lambda d: listings.append(d) or saved(d)
+        try:
+            for _ in range(5):
+                suggest_tracks('', directory=tmp)
+        finally:
+            utils_mod.os.listdir = saved
+        assert len(listings) == 1, (
+            f'a citit directorul {len(listings)} ori pentru 5 taste')
+
+
+def test_the_autocomplete_respects_discord_hard_limits():
+    """Peste plafoane, Discord respinge TOT raspunsul: zero sugestii afisate.
+
+    Deci nu e o chestiune de estetica — 26 de opțiuni, sau un titlu de 150 de
+    caractere, inseamna autocomplete complet mut.
+    """
+    from music.commands import (MAX_AUTOCOMPLETE_CHOICES, MAX_CHOICE_CHARS,
+                                autocomplete_choices)
+    import music.utils as utils_mod
+
+    # Cifrele sunt ale lui Discord, nu ale noastre: verificam LITERALII, nu
+    # constantele — un test care citeste constanta se mișca odata cu o valoare
+    # greșita si nu mai apara nimic.
+    assert MAX_AUTOCOMPLETE_CHOICES == 25, MAX_AUTOCOMPLETE_CHOICES
+    assert MAX_CHOICE_CHARS == 100, MAX_CHOICE_CHARS
+
+    with tempfile.TemporaryDirectory() as tmp:
+        saved_dir = utils_mod.DOWNLOAD_DIR
+        utils_mod.DOWNLOAD_DIR = tmp
+        _clear_suggest_cache()
+        try:
+            for i in range(40):
+                _played(tmp, f'v{i:02d}', 'T' * 150 + f' {i}', age_sec=40 - i)
+            _clear_suggest_cache()
+            choices = autocomplete_choices('')
+            assert len(choices) <= MAX_AUTOCOMPLETE_CHOICES, len(choices)
+            assert len(choices) == MAX_AUTOCOMPLETE_CHOICES, (
+                f'a intors doar {len(choices)} din {MAX_AUTOCOMPLETE_CHOICES}')
+            for c in choices:
+                assert len(c.name) <= MAX_CHOICE_CHARS, len(c.name)
+                assert len(c.value) <= MAX_CHOICE_CHARS, len(c.value)
+                assert c.value.startswith('https://'), c.value
+        finally:
+            utils_mod.DOWNLOAD_DIR = saved_dir
+            _clear_suggest_cache()
+
+
+def test_the_autocomplete_survives_an_unreadable_cache_directory():
+    """Un autocomplete care arunca lasa utilizatorul fara nicio sugestie si fara
+    nicio explicatie."""
+    from music.commands import autocomplete_choices
+    import music.utils as utils_mod
+
+    saved_dir = utils_mod.DOWNLOAD_DIR
+    utils_mod.DOWNLOAD_DIR = os.path.join('nu', 'exista')
+    _clear_suggest_cache()
+    try:
+        assert autocomplete_choices('ceva') == []
+    finally:
+        utils_mod.DOWNLOAD_DIR = saved_dir
+        _clear_suggest_cache()
+
+
+def _clear_suggest_cache():
+    import music.utils as utils_mod
+    utils_mod._suggest_cache = (0.0, [])
 
 
 def test_playback_no_longer_deletes_what_it_just_played():

@@ -27,7 +27,7 @@ from music.config import (HLS_MAX_BYTES, MAX_DOWNLOAD_BYTES, MAX_TRACK_SECONDS,
                           make_download_opts, make_search_opts,
                           yt_client_args, WEB_CLIENTS)
 from music.errors import YtdlpTimeout, diagnose_error
-from music.utils import cached_download, is_clean, item_title
+from music.utils import AUDIO_EXTS, cached_download, is_clean, item_title
 
 # Lanturile de clienti. Cerem ambii clienti in ACEEASI cerere: yt-dlp cumuleaza
 # formatele, deci pool-ul e mult mai mare pe acelasi numar de cereri. Masurat in
@@ -57,8 +57,6 @@ DOWNLOAD_ATTEMPTS = [
      HLS_MAX_BYTES),
 ]
 
-# Extensiile pe care le poate scrie yt-dlp cand `prepare_filename` a ghicit alta.
-_AUDIO_EXTS = ('.opus', '.m4a', '.webm', '.mp3', '.ogg')
 
 
 @dataclass
@@ -331,7 +329,7 @@ async def _download(web_url: str, client: tuple | None, prefer_cookies: bool,
                     dl_opts, web_url, loop=loop, stage=f"download_{fmt}")
                 if filename and not os.path.exists(filename):
                     base = os.path.splitext(filename)[0]
-                    for ext in _AUDIO_EXTS:
+                    for ext in AUDIO_EXTS:
                         if os.path.exists(base + ext):
                             filename = base + ext
                             break

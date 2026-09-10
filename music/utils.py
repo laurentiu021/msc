@@ -84,6 +84,12 @@ _META_EXT = '.meta.json'
 _META_FIELDS = ('url', 'title', 'channel', 'duration', 'thumbnail', 'views',
                 'likes')
 
+# Extensiile audio pe care le poate scrie yt-dlp. Definite AICI, nu in resolve.py:
+# le foloseste si bucla de descarcare (cand `prepare_filename` a ghicit alta
+# extensie) si lista de sugestii, iar doua copii ar putea sa divergeze — o piesa
+# `.ogg` ar fi atunci descarcabila dar niciodata sugerata.
+AUDIO_EXTS = ('.opus', '.m4a', '.webm', '.mp3', '.ogg')
+
 
 def _meta_path(audio_path: str) -> str:
     """Un singur loc unde se decide numele fisierului insoțitor."""
@@ -122,6 +128,79 @@ def read_track_meta(audio_path: str) -> dict | None:
     if not isinstance(data, dict) or not data.get('title'):
         return None
     return data
+
+
+# Sugestiile pentru autocomplete-ul lui `/play`. De cand exista insoțitorii, cache-ul
+# de pe volum se descrie singur, deci lista pieselor ascultate e deja pe disc: nicio
+# cerere catre YouTube si niciun index separat de intreținut.
+_SUGGEST_TTL_SEC = 30.0
+_suggest_cache: tuple[float, list[dict]] = (0.0, [])
+
+# Minuscule si fara diacritice, ca potrivirea sa nu depinda de tastatura: cine
+# tasteaza "macarena" trebuie sa gaseasca "Los Del Rio - Macarena".
+_DIACRITICS = str.maketrans('ăâîșțĂÂÎȘȚşţŞŢ', 'aaistAAISTstST')
+
+
+def _fold(text) -> str:
+    return str(text or '').translate(_DIACRITICS).lower()
+
+
+def cached_tracks(directory: str | None = None, *, now=None) -> list[dict]:
+    """Piesele din cache, cea mai recent folosita prima.
+
+    Memoizat 30 de secunde: autocomplete-ul se declanșeaza la FIECARE tasta, iar
+    Discord da doar 3 secunde raspunsului. O listare de director plus cateva citiri
+    de JSON sunt ieftine — dar nu de zece ori pe secunda.
+    """
+    global _suggest_cache
+    directory = directory or DOWNLOAD_DIR
+    now = time.time() if now is None else now
+    stamp, cached = _suggest_cache
+    if cached and now - stamp < _SUGGEST_TTL_SEC:
+        return cached
+
+    entries = []
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return []
+    for name in names:
+        if not name.endswith(_META_EXT):
+            continue
+        stem = os.path.join(directory, name[:-len(_META_EXT)])
+        for ext in AUDIO_EXTS:
+            audio = stem + ext
+            if not os.path.exists(audio):
+                continue
+            meta = read_track_meta(audio)
+            if meta:
+                try:
+                    used = os.path.getmtime(audio)
+                except OSError:
+                    used = 0.0
+                entries.append({**meta, 'used_at': used})
+            break
+    entries.sort(key=lambda item: item['used_at'], reverse=True)
+    _suggest_cache = (now, entries)
+    return entries
+
+
+def suggest_tracks(query: str, limit: int = 25,
+                   directory: str | None = None) -> list[dict]:
+    """Piesele din cache care se potrivesc cu ce s-a tastat pana acum.
+
+    Fara text tastat, primele sunt cele mai recent ascultate — exact ce vrea cineva
+    care deschide `/play` pe telefon ca sa repuna ce s-a dat acum o ora.
+    """
+    text = _fold(query)
+    out = []
+    for track in cached_tracks(directory):
+        if text and text not in _fold(track.get('title')):
+            continue
+        out.append(track)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def cached_download(video_id: str, directory: str | None = None) -> str | None:

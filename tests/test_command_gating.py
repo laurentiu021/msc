@@ -45,13 +45,20 @@ class _FakeVoiceClient:
 
 
 class _FakeCtx:
-    def __init__(self, vc):
+    def __init__(self, vc, interaction=None):
         self.guild = type('G', (), {'id': GUILD_ID})()
         self.voice_client = vc
         self.author = type('A', (), {'voice': type('V', (), {'channel': None})()})()
         self.message = None
         self.bot = type('B', (), {'loop': None})()
         self.sent = []
+        # None = a venit prin `!play`. Un obiect = prin `/play`, si atunci comanda
+        # trebuie sa cheme `defer()` in 3 secunde, altfel Discord o declara eșuata.
+        self.interaction = interaction
+        self.deferred = 0
+
+    async def defer(self, *a, **k):
+        self.deferred += 1
 
     async def send(self, *a, **k):
         self.sent.append(a[0] if a else k)
@@ -71,6 +78,15 @@ class _FakeBot:
             self.registry[kwargs.get('name', fn.__name__)] = fn
             return fn
         return deco
+
+    def hybrid_command(self, *args, **kwargs):
+        """`!play` si `/play` din aceeasi implementare.
+
+        Aici conteaza doar ca inregistrarea se face la fel: testele conduc callback-ul
+        direct, iar decoratorii de app_commands (describe/autocomplete) doar atașeaza
+        atribute pe functie, deci nu au nevoie de un tree real.
+        """
+        return self.command(*args, **kwargs)
 
 
 class _Wiring:
@@ -325,6 +341,99 @@ def test_the_playlist_branch_does_not_steal_a_loading_flag_it_did_not_set():
     assert w.plays == [], (
         f'a pornit un al doilea process_play peste unul in curs: {w.plays}')
     assert len(st.queue) == 2, f'playlist-ul nu a intrat intreg in coada: {st.queue}'
+
+
+# --- /play, aceeasi implementare ca !play ------------------------------------
+
+def test_play_is_registered_as_a_hybrid_command():
+    """O singura implementare, doua interfete.
+
+    Daca `/play` ar fi o comanda separata, ar trebui intreținuta in paralel cu
+    `!play` — iar tot ce s-a reparat azi in calea de redare (garda de playlist,
+    frana de refuzuri, promovarea de cookies) ar trebui reparat de doua ori.
+    """
+    import inspect
+
+    import bot as bot_mod
+    from discord.ext import commands as dpy_commands
+
+    cmd = bot_mod.bot.get_command('play')
+    assert cmd is not None, 'comanda !play a dispărut'
+    assert isinstance(cmd, dpy_commands.HybridCommand), type(cmd)
+    assert cmd.app_command is not None, (
+        'comanda hibrida nu a produs nicio comanda slash')
+    params = inspect.signature(cmd.callback).parameters
+    assert 'search' in params, params
+
+
+def test_a_slash_invocation_defers_before_doing_any_work():
+    """Discord declara eșuata o comanda neconfirmata in 3 secunde.
+
+    Rezolvarea unei piese poate dura zeci de secunde (extractie + descarcare, cu
+    throttle intre ele), deci fara `defer` fiecare `/play` ar arata rupt chiar si
+    cand redarea porneste corect.
+    """
+    st = _fresh_state()
+    st.queue = []
+    ctx = _FakeCtx(_FakeVoiceClient(playing=True), interaction=object())
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['play'](ctx, search='ceva'))
+    assert ctx.deferred == 1, (
+        f'nu a confirmat interactiunea inainte de lucru: deferred={ctx.deferred}')
+
+
+def test_a_prefix_invocation_does_not_try_to_defer():
+    """`!play` nu are nicio interactiune de confirmat."""
+    st = _fresh_state()
+    st.queue = []
+    ctx = _FakeCtx(_FakeVoiceClient(playing=True))
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['play'](ctx, search='ceva'))
+    assert ctx.deferred == 0, 'a incercat sa confirme o interactiune inexistenta'
+
+
+def test_the_command_tree_is_no_longer_wiped_before_syncing():
+    """Golirea exista cand nu aveam nicio comanda slash.
+
+    Lasata la locul ei, ar sterge exact `/play` inainte de sincronizare si
+    autocomplete-ul nu ar apărea niciodata in Discord.
+    """
+    import ast
+    import inspect
+
+    import bot as bot_mod
+
+    src = inspect.getsource(bot_mod.on_ready)
+    calls = {ast.unparse(n.func) for n in ast.walk(ast.parse(src.strip()))
+             if isinstance(n, ast.Call)}
+    assert 'bot.tree.sync' in calls, 'nu se mai sincronizeaza arborele'
+    assert 'bot.tree.clear_commands' not in calls, (
+        'arborele e golit inainte de sync: /play nu ajunge niciodata in Discord')
+
+
+def test_the_autocomplete_never_touches_the_network():
+    """Sugestiile vin din cache-ul de pe volum. Discord da 3 secunde."""
+    import ast
+    import inspect
+
+    from music import commands as commands_mod
+
+    src = inspect.getsource(commands_mod.autocomplete_choices)
+    called = {ast.unparse(n.func) for n in ast.walk(ast.parse(src.strip()))
+              if isinstance(n, ast.Call)}
+    for forbidden in ('ytdlp.extract', 'yt_api.search', 'yt_api.search_music',
+                      'urllib.request.urlopen'):
+        assert forbidden not in called, (
+            f'autocomplete-ul face o cerere de rețea ({forbidden}) la fiecare tasta')
+    assert 'suggest_tracks' in called, called
+
+    # Si adaptorul chiar duce la ea: altfel `/play` ar arata fara nicio sugestie.
+    closure = inspect.getsource(commands_mod.setup_music_commands)
+    adapter = next(n for n in ast.walk(ast.parse(closure.strip()))
+                   if isinstance(n, ast.AsyncFunctionDef)
+                   and n.name == '_suggest_played')
+    assert 'autocomplete_choices' in {
+        ast.unparse(n.func) for n in ast.walk(adapter) if isinstance(n, ast.Call)}
 
 
 def test_play_next_owns_the_loading_flag_it_sets():

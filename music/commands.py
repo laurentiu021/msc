@@ -12,7 +12,8 @@ import discord
 from music.config import (FFMPEG_OPTS, cookies_available, log,
                           make_search_opts)
 from music.state import get_state, guild_states, loading, set_autoplay
-from music.utils import safe_delete, format_time, cleanup_file, item_title
+from music.utils import (cleanup_file, format_time, item_title,
+                         safe_delete, suggest_tracks)
 from music.autoplay import prefill_autoplay_queue
 from music import diag
 from music import ytdlp
@@ -57,6 +58,41 @@ def sanitize_query(raw: str) -> tuple[str | None, str | None]:
         return None, (f"Host neacceptat: `{host}`. "
                       f"Accept doar YouTube, Spotify si Deezer.")
     return q, None
+
+
+# Plafoanele lui Discord pentru autocomplete, nu estimari: cel mult 25 de opțiuni,
+# `name` si `value` cel mult 100 de caractere fiecare. Peste ele, Discord respinge
+# tot raspunsul si utilizatorul nu vede NICIO sugestie.
+MAX_AUTOCOMPLETE_CHOICES = 25
+MAX_CHOICE_CHARS = 100
+
+
+def autocomplete_choices(current: str) -> list:
+    """Sugestiile pentru `/play`, din cache-ul de pe volum.
+
+    Zero cereri catre YouTube: insoțitorii de langa fisierele audio descriu deja tot
+    ce s-a ascultat, iar Discord da doar 3 secunde raspunsului.
+
+    Valoarea trimisa e URL-ul, nu titlul: asa `/play` sare peste cautare, deci o
+    piesa aleasa din sugestii costa zero cereri cap-la-cap.
+
+    Functie de modul, nu closure, ca sa poata fi condusa direct de un test —
+    plafoanele lui Discord sunt exact tipul de detaliu care se rupe in tacere.
+    """
+    # Fara try/except aici: `cached_tracks` intoarce deja o lista goala pe un
+    # director ilizibil, deci un handler in plus ar fi cod mort care doar sugereaza
+    # ca exista o cale de eroare pe care nu o are.
+    # Plafonul se aplica O SINGURA data, in `suggest_tracks`: o a doua tăiere aici
+    # ar fi cod care nu poate schimba nimic.
+    found = suggest_tracks(current or '', limit=MAX_AUTOCOMPLETE_CHOICES)
+    choices = []
+    for track in found:
+        url = (track.get('url') or '')[:MAX_CHOICE_CHARS]
+        if not url:
+            continue
+        title = (track.get('title') or '?')[:MAX_CHOICE_CHARS]
+        choices.append(discord.app_commands.Choice(name=title, value=url))
+    return choices
 
 
 def setup_music_commands(bot, process_play, play_next, update_player_ui, start_timeout, cancel_timeout):
@@ -112,8 +148,25 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         log.info(f"Link de platforma rezolvat ca: {search}")
         return search
 
-    @bot.command()
-    async def play(ctx, *, search):
+    async def _suggest_played(interaction, current: str):
+        """Adaptorul de autocomplete. Logica e in `autocomplete_choices`, testabila."""
+        return autocomplete_choices(current)
+
+    # hybrid_command: o singura implementare, doua interfete. `!play` rămâne exact
+    # cum era, iar `/play` apare cu autocomplete — care pe telefon e diferenta
+    # dintre a tasta un titlu si a-l alege dintr-o lista.
+    @bot.hybrid_command(name='play', description='Reda acum, sau adauga in coada')
+    @discord.app_commands.describe(search='Titlu, link YouTube, sau alege din istoric')
+    @discord.app_commands.autocomplete(search=_suggest_played)
+    async def play(ctx, *, search: str):
+        # Un slash command trebuie confirmat in 3 secunde, altfel Discord il declara
+        # eșuat — iar rezolvarea unei piese poate dura zeci de secunde. `defer` ține
+        # interactiunea deschisa. `ctx.interaction` e None cand vine prin `!play`.
+        if ctx.interaction is not None:
+            try:
+                await ctx.defer()
+            except discord.HTTPException as e:
+                log.debug(f"Nu am putut amana raspunsul la /play: {e}")
         await safe_delete(ctx.message)
         search, reason = sanitize_query(search)
         if reason:
@@ -402,7 +455,9 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
     def _help_embed():
         embed = discord.Embed(
             title="Comenzi Gogu",
-            description="Prefix `!` (si `!PLAY` merge la fel de bine).",
+            description=("Prefix `!` (si `!PLAY` merge la fel de bine).\n"
+                         "`/play` merge si el, cu sugestii din ce s-a ascultat "
+                         "deja — mai comod pe telefon."),
             color=0x2b2d31)
         for section, rows in HELP_SECTIONS:
             embed.add_field(
