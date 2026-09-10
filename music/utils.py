@@ -1,7 +1,9 @@
 """Functii utilitare: cleanup, format, filtrare."""
+import asyncio
 import os
 import re
-import asyncio
+import time
+
 import discord
 from music.config import (BLACKLIST, DOWNLOAD_DIR, MAX_TRACK_SECONDS,
                           MIN_TRACK_SECONDS, log)
@@ -49,6 +51,41 @@ def item_title(item, limit: int | None = None) -> str:
         raw = item or 'Necunoscut'
     text = str(raw)
     return text[:limit] if limit else text
+
+
+def sweep_downloads(keep, max_age_sec: int = 1800, directory: str | None = None) -> int:
+    """Sterge fisierele audio orfane. Returneaza cate a sters.
+
+    Singura curatare a directorului se facea la pornire, iar `cleanup_file`
+    sterge exact un nume primit. Tot ce scapa printre ele — o descarcare
+    intrerupta de un restart, fisierul unei sesiuni terminate prost — rămânea pe
+    disc pana la urmatoarea repornire a containerului.
+
+    `keep` sunt fisierele in uz chiar acum; nu se ating niciodata, indiferent de
+    varsta, pentru ca o piesa poate rula mai mult decat max_age_sec.
+    """
+    directory = directory or DOWNLOAD_DIR
+    protected = {os.path.abspath(p) for p in keep if p}
+    now = time.time()
+    removed = 0
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+    for name in names:
+        path = os.path.abspath(os.path.join(directory, name))
+        if path in protected or not os.path.isfile(path):
+            continue
+        try:
+            if now - os.path.getmtime(path) < max_age_sec:
+                continue
+            os.remove(path)
+            removed += 1
+        except OSError as e:
+            log.debug(f"Nu am putut sterge {name}: {e}")
+    if removed:
+        log.info(f"Curatenie: {removed} fisiere audio orfane sterse")
+    return removed
 
 
 def playback_remaining(now: float, start_time: float, duration: float,

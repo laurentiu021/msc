@@ -1,8 +1,9 @@
 """Constante si configurare muzica."""
 import copy
 import hashlib
-import os
 import logging
+import os
+import time
 
 import yt_dlp
 
@@ -239,6 +240,28 @@ def seed_cookies_from_env(raw: str) -> tuple[str | None, int]:
     log.info(f"Cookies scrise in {path} ({entries} intrari) din env"
              f"{' — valoare noua, reseed' if previous else ''}")
     return path, entries
+
+
+def cookie_status() -> dict:
+    """Starea fisierului de cookies, pentru !health si /status.
+
+    Varsta conteaza la fel de mult ca numarul de intrari: yt-dlp rescrie fisierul
+    la fiecare rotatie de `__Secure-1PSIDTS`, deci un fisier vechi de zile pe un
+    bot care a redat inseamna ca sesiunea nu se mai reinnoieste.
+    """
+    path = _cookies_path or _cookie_file_paths()[0]
+    if not os.path.exists(path):
+        return {'path': path, 'exists': False, 'entries': 0, 'age_sec': None}
+    try:
+        age = max(0.0, time.time() - os.path.getmtime(path))
+    except OSError:
+        age = None
+    return {
+        'path': path,
+        'exists': True,
+        'entries': _count_cookie_entries(path),
+        'age_sec': round(age) if age is not None else None,
+    }
 
 
 def apply_cookies(path: str | None = None):

@@ -10,9 +10,10 @@ import discord
 
 from music.config import (FFMPEG_OPTS, cookies_available, log,
                           make_search_opts)
-from music.state import get_state, loading, set_autoplay
+from music.state import get_state, guild_states, loading, set_autoplay
 from music.utils import safe_delete, format_time, cleanup_file, item_title
 from music.autoplay import prefill_autoplay_queue
+from music import diag
 from music import ytdlp
 import music.player as player_mod
 
@@ -361,7 +362,10 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             "`!seek <1:30>` - Salt la timestamp\n"
             "`!np` - Piesa curenta\n"
             "`!shuffle` / `!clear` / `!remove` / `!move`\n"
-            "`!247` - 24/7 mode + autoplay"
+            "`!247` - 24/7 mode + autoplay\n"
+            "\n**🔧 Diagnostic**\n"
+            "`!health` - De ce nu merge (cookies, PO Token, cota, erori)\n"
+            "`!debug` - Latenta, CPU, RAM"
         )
         embed.set_footer(text="YouTube · Spotify* · Deezer*")
         await ctx.send(embed=embed, delete_after=30)
@@ -380,9 +384,72 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             v_lat = f"{round(raw*1000,1)}ms" if raw and raw != float('inf') else "..."
         proc = psutil.Process(os.getpid())
         mem = proc.memory_info()
+        # cpu_percent(0.1) blocheaza bucla de evenimente 100ms; masuram in executor.
+        cpu = await bot.loop.run_in_executor(None, lambda: proc.cpu_percent(0.1))
         dl = os.listdir(DOWNLOAD_DIR) if os.path.exists(DOWNLOAD_DIR) else []
         embed = discord.Embed(title="Debug", color=0x5865F2)
         embed.add_field(name="Latency", value=f"WS: `{ws}ms` · Voice: `{v_lat}`", inline=True)
-        embed.add_field(name="System", value=f"CPU: `{proc.cpu_percent(0.1)}%` · RAM: `{mem.rss/1024/1024:.0f}MB`", inline=True)
+        embed.add_field(name="System", value=f"CPU: `{cpu}%` · RAM: `{mem.rss/1024/1024:.0f}MB`", inline=True)
         embed.add_field(name="State", value=f"Coada: `{len(state.queue)}` · History: `{len(state.history)}` · Downloads: `{len(dl)}`", inline=False)
+        embed.set_footer(text="Pentru ce se strica de fapt: !health")
         await ctx.send(embed=embed, delete_after=30)
+
+    @bot.command()
+    async def health(ctx):
+        """Ce e in neregula, in vocabularul lucrurilor care chiar cad.
+
+        !debug arata latenta, CPU si RAM — adica nimic din ce se strica. Aici e
+        starea reala: cookies, PO Token, intrerupator, cota API, thread-uri de
+        yt-dlp abandonate si ultima eroare bruta de la yt-dlp.
+        """
+        await safe_delete(ctx.message)
+        snapshot = await diag.refresh(bot, guild_states, bot.loop)
+        issues = diag.problems(snapshot)
+
+        embed = discord.Embed(
+            title="✅ Totul in regula" if not issues else "⚠️ Probleme detectate",
+            color=0x57F287 if not issues else 0xFAA61A,
+        )
+        if issues:
+            embed.description = "\n".join(f"• {line}" for line in issues[:8])
+
+        cookies = snapshot['cookies']
+        age = cookies['age_sec']
+        age_text = 'necunoscut' if age is None else (
+            f"{age // 3600}h" if age >= 3600 else f"{age // 60}m")
+        embed.add_field(
+            name="Acces YouTube",
+            value=(f"Cookies: `{cookies['entries']}` intrari, scrise acum `{age_text}`\n"
+                   f"PO Token: {'`ok`' if snapshot['pot_server']['ok'] else '`CAZUT`'}\n"
+                   f"Data API: `{snapshot['data_api']['units_spent']}`/"
+                   f"`{snapshot['data_api']['daily_cap']}` unitati azi"),
+            inline=False)
+
+        yt = snapshot['ytdlp']
+        embed.add_field(
+            name="Cereri",
+            value=(f"Thread-uri abandonate: `{yt['leaked_workers']}`/`{yt['max_workers']}`\n"
+                   f"Pauza de throttle: `{yt['throttle_sec_left']}s`"),
+            inline=True)
+
+        guild = snapshot['guilds_detail'].get(str(ctx.guild.id), {})
+        embed.add_field(
+            name="Sesiune",
+            value=(f"Coada: `{guild.get('queue', 0)}` · "
+                   f"Erori: `{guild.get('consecutive_errors', 0)}`\n"
+                   f"Intrerupator: `{guild.get('breaker_sec_left', 0)}s` · "
+                   f"Incarcare: `{guild.get('is_loading')}`"),
+            inline=True)
+
+        if guild.get('last_error'):
+            embed.add_field(name="Ultima eroare yt-dlp",
+                            value=f"```{guild['last_error'][:300]}```", inline=False)
+        if guild.get('last_idle_reason'):
+            embed.add_field(name="Ultimul tick de inactivitate",
+                            value=f"`{guild['last_idle_reason']}`", inline=False)
+
+        embed.set_footer(
+            text=f"uptime {snapshot['uptime_sec'] // 60}m · "
+                 f"yt-dlp {snapshot['versions']['yt_dlp']} · "
+                 f"commit {snapshot['commit'] or '?'} · /status pentru JSON")
+        await ctx.send(embed=embed, delete_after=120)

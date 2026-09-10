@@ -12,6 +12,7 @@ from music import ytdlp
 from music.state import begin_loading, end_loading, get_state, loading
 from music.utils import is_clean, cleanup_file, item_title
 from music.autoplay import prefill_autoplay_queue
+from music.diag import scrub as _scrub
 from music.errors import diagnose_error
 from music import youtube_api as yt_api
 
@@ -43,22 +44,6 @@ class TrackRejected(Exception):
 
 # Cate refuzuri consecutive acceptam inainte sa ne oprim din a avansa coada.
 MAX_CONSECUTIVE_REJECTS = 5
-
-
-def _scrub(text) -> str:
-    """Scoate URL-ul de proxy din textul erorii inainte sa ajunga pe Discord.
-
-    yt-dlp include proxy-ul configurat in mesajele lui de eroare, iar YT_PROXY
-    poate conține user:parola.
-    """
-    out = str(text)
-    proxy = os.getenv('YT_PROXY')
-    if proxy:
-        out = out.replace(proxy, '<proxy>')
-        host = proxy.split('@')[-1]
-        if host and host != proxy:
-            out = out.replace(host, '<proxy>')
-    return out
 
 
 async def _resolve_query_to_url(state, query: str) -> str:

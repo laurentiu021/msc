@@ -1,4 +1,5 @@
 """Gogu — Bot de muzică Discord."""
+import json
 import os
 import sys
 import logging
@@ -36,8 +37,10 @@ from music.config import DOWNLOAD_DIR, log as music_log
 from music.state import (get_state, guild_states, mark_paused, mark_resumed,
                          set_autoplay)
 from music.idle import DISCONNECT, RADIO, decide_idle_action
-from music.utils import safe_delete, cleanup_file
+from music.utils import safe_delete, cleanup_file, sweep_downloads
 from music.autoplay import prefill_autoplay_queue
+from music import diag
+from music import ytdlp as ytdlp_mod
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
@@ -139,6 +142,7 @@ bot = commands.Bot(
 )
 
 _tree_synced = False
+_heartbeat_task = None
 
 # --- Music engine init ---
 import music.player as player
@@ -334,6 +338,9 @@ async def on_ready():
             type=discord.ActivityType.listening, name="!mhelp"
         )
     )
+    global _heartbeat_task
+    if _heartbeat_task is None or _heartbeat_task.done():
+        _heartbeat_task = bot.loop.create_task(_heartbeat())
 
 
 @bot.event
@@ -365,7 +372,90 @@ async def _reply(ctx, text):
         pass
 
 
-# --- Entry point ---
+# --- Heartbeat, watchdog si curatenie ---------------------------------------
+# Un proces viu cu /health 200 nu e repornit niciodata de Railway
+# (restartPolicyType = ON_FAILURE, iar healthcheckPath e evaluat doar la deploy).
+# Scenariul concret: thread-urile de yt-dlp abandonate dupa timeout se aduna
+# peste o seara de reincercari pana cand executorul e epuizat; de atunci fiecare
+# cerere aȘteapta un worker care nu se mai elibereaza, `wait_for` expira fara ca
+# corpul sa ruleze, iar botul raspunde la orice !play cu mesajul de timeout, pe
+# viata containerului.
+HEARTBEAT_SEC = 15
+WATCHDOG_STALL_SEC = int(os.getenv('WATCHDOG_STALL_SEC', '300'))
+SNAPSHOT_EVERY_SEC = 60
+SWEEP_EVERY_SEC = 600
+_LAST_BEAT = time.monotonic()
+_BOOT_MONOTONIC = time.monotonic()
+
+
+async def _heartbeat():
+    """Bate la 15s, reface instantaneul la 60s, curata discul la 10 minute.
+
+    Bataia trebuie sa fie desa, ca watchdog-ul sa distinga repede o bucla
+    blocata. Instantaneul nu: el include o sonda catre serverul de PO Token, si
+    n-are rost sa il intrebam de patru ori pe minut.
+    """
+    global _LAST_BEAT
+    last_sweep = 0.0
+    last_snapshot = 0.0
+    while True:
+        try:
+            _LAST_BEAT = time.monotonic()
+            now = time.monotonic()
+            if now - last_snapshot >= SNAPSHOT_EVERY_SEC:
+                last_snapshot = now
+                await diag.refresh(bot, guild_states, bot.loop)
+            if now - last_sweep >= SWEEP_EVERY_SEC:
+                last_sweep = now
+                keep = {st.current_file for st in guild_states.values() if st.current_file}
+                await bot.loop.run_in_executor(None, lambda: sweep_downloads(keep))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Un heartbeat care moare ar declanșa watchdog-ul degeaba.
+            log.warning("Heartbeat a eșuat", exc_info=True)
+        await asyncio.sleep(HEARTBEAT_SEC)
+
+
+def _should_restart(now: float, last_beat: float, leaked: int, max_workers: int,
+                    boot: float) -> str | None:
+    """Motivul repornirii, sau None. Pura, ca sa poata fi testata fara os._exit.
+
+    Strict la defecte locale, auto-provocate. Niciodata la eșecuri de redare: un
+    blocaj YouTube ar lua serviciul complet jos exact cand nu e vina noastra.
+    """
+    if now - boot < WATCHDOG_STALL_SEC:
+        # Fereastra de pornire: o problema la boot nu are voie sa arda bugetul
+        # de 10 reporniri al Railway.
+        return None
+    if now - last_beat > WATCHDOG_STALL_SEC:
+        return (f'bucla de evenimente blocata: niciun heartbeat de '
+                f'{round(now - last_beat)}s')
+    if max_workers and leaked >= max_workers:
+        return (f'toate cele {max_workers} thread-uri de yt-dlp sunt abandonate: '
+                f'nicio cerere nu mai poate porni')
+    return None
+
+
+def _watchdog():
+    """Thread daemon: iese cu cod nenul cand procesul e viu dar inutil."""
+    while True:
+        time.sleep(HEARTBEAT_SEC)
+        reason = _should_restart(time.monotonic(), _LAST_BEAT,
+                                 ytdlp_mod.leaked_workers(), ytdlp_mod.MAX_WORKERS,
+                                 _BOOT_MONOTONIC)
+        if not reason:
+            continue
+        log.critical(f"WATCHDOG: {reason}. Ies cu cod 1 ca Railway sa reporneasca.")
+        try:
+            # Inchiderea curata NU e opționala: fara ea panoul rămâne cu butoane
+            # moarte si Discord arata "This interaction failed".
+            asyncio.run_coroutine_threadsafe(_shutdown(), bot.loop).result(timeout=10)
+        except Exception:
+            log.warning("WATCHDOG: inchiderea curata a eșuat", exc_info=True)
+        os._exit(1)
+
+
 class _Health(BaseHTTPRequestHandler):
     server_version = 'gogu'          # fara banner cu versiunea de Python
     sys_version = ''
@@ -373,13 +463,34 @@ class _Health(BaseHTTPRequestHandler):
     timeout = 10                     # o conexiune inactiva nu mai blocheaza thread-ul
 
     def do_GET(self):
-        if self.path.rstrip('/') not in ('', '/health'):
+        path = self.path.rstrip('/')
+        if path == '/status':
+            return self._status()
+        if path not in ('', '/health'):
             self.send_error(404)
             return
+        # /health rămâne text simplu: exact ce aȘteapta Railway, si nimic care sa
+        # depinda de cookies sau de rețea. Un jar expirat nu are voie sa blocheze
+        # chiar deploy-ul care aduce unul proaspat.
         ready = bool(bot and bot.is_ready() and not bot.is_closed())
         body = b'ok' if ready else b'starting'
-        self.send_response(200 if ready else 503)
-        self.send_header('Content-Type', 'text/plain')
+        self._respond(200 if ready else 503, 'text/plain', body)
+
+    def _status(self):
+        # DOAR din cache: serverul e single-threaded pe un thread daemon, deci un
+        # apel blocant aici ar intarzia fiecare sonda urmatoare, inclusiv
+        # healthcheck-ul.
+        snapshot = diag.cached()
+        if not snapshot:
+            self._respond(503, 'application/json', b'{"error":"no snapshot yet"}')
+            return
+        payload = {**snapshot, 'problems': diag.problems(snapshot)}
+        body = json.dumps(payload, default=str).encode('utf-8')
+        self._respond(200, 'application/json', body)
+
+    def _respond(self, code: int, content_type: str, body: bytes):
+        self.send_response(code)
+        self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -436,6 +547,7 @@ def main():
         target=lambda: HTTPServer(("0.0.0.0", port), _Health).serve_forever(),
         daemon=True,
     ).start()
+    threading.Thread(target=_watchdog, daemon=True).start()
     log.info("Connecting to Discord Gateway...")
     try:
         asyncio.run(_runner())
