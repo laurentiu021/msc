@@ -117,6 +117,27 @@ def test_a_file_being_played_is_never_evicted():
         assert removed == 1, removed
 
 
+def test_an_in_flight_download_is_never_evicted():
+    """`.part` = descarcare IN CURS. Evacuarea nu le excludea.
+
+    Cu cache-ul plin, un transfer mare in desfasurare se stergea singur de sub
+    yt-dlp; `try_rename` eșua apoi si descarcarea aparea drept defectiune tehnica,
+    bătând contorul de erori consecutive. Marimea lui se numara in total — de-aia
+    trebuie evacuat ALTCEVA — dar nu e candidat la stergere.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        in_flight = _write(tmp, 'nou.webm.part', size=5000, age_sec=1)
+        sidecar = _write(tmp, 'nou.ytdl', size=10, age_sec=1)
+        old = _write(tmp, 'vechi.opus', size=5000, age_sec=99_999)
+
+        removed = trim_download_cache(set(), max_bytes=1000, directory=tmp)
+        assert os.path.exists(in_flight), (
+            'a sters fisierul in care yt-dlp scrie chiar acum')
+        assert os.path.exists(sidecar), 'a sters fisierul de stare al descarcarii'
+        assert not os.path.exists(old), 'nu a evacuat nimic din ce putea'
+        assert removed == 1, removed
+
+
 def test_partials_are_swept_at_boot():
     with tempfile.TemporaryDirectory() as tmp:
         part = _write(tmp, 'v0.opus.part')

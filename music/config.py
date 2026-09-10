@@ -484,16 +484,14 @@ def promote_cookies() -> bool:
     return True
 
 
-def rollback_cookies() -> bool:
-    """Revine la ultimul jar bun. Cel mult o data pe proces.
+def restore_good_jar() -> bool:
+    """Copiaza ultima copie buna peste jar-ul curent. Fara nicio numaratoare.
 
-    Rotatia scrisa de yt-dlp e de obicei buna, dar cand YouTube invalideaza
-    sesiunea scrie peste fisier valori care nu mai autentifica. Fara revenire,
-    singura reparatie era un om care lipea cookie-uri noi pe Railway.
+    Separata de `rollback_cookies` pentru ca reparatia de la PORNIRE nu are voie sa
+    consume lovitura de la RUNTIME: cand era un singur apel, un jar rupt gasit la
+    boot consuma `_rolled_back`, iar reincercarea din `process_play` la prima eroare
+    de cookies era moarta pentru tot restul procesului.
     """
-    global _rolled_back
-    if _rolled_back:
-        return False
     path = _cookies_path or _cookie_file_paths()[0]
     good = path + _GOOD_SUFFIX
     if not cookies_valid(good):
@@ -505,8 +503,26 @@ def rollback_cookies() -> bool:
     except OSError as e:
         log.warning(f"Revenirea la cookie-urile bune a eșuat: {e}")
         return False
-    _rolled_back = True
     log.warning(f"Cookies revenite la ultima versiune buna ({good})")
+    return True
+
+
+def rollback_cookies() -> bool:
+    """Revine la ultimul jar bun, cel mult o data intre doua promovari.
+
+    Rotatia scrisa de yt-dlp e de obicei buna, dar cand YouTube invalideaza
+    sesiunea scrie peste fisier valori care nu mai autentifica. Fara revenire,
+    singura reparatie era un om care lipea cookie-uri noi pe Railway.
+
+    Steagul opreste o BUCLA de reveniri in cadrul aceluiasi episod de eșec;
+    `promote_cookies` il re-armeaza dupa o descarcare care a folosit jar-ul.
+    """
+    global _rolled_back
+    if _rolled_back:
+        return False
+    if not restore_good_jar():
+        return False
+    _rolled_back = True
     return True
 
 
@@ -543,7 +559,10 @@ def seed_cookies_from_env(raw: str) -> tuple[str | None, int]:
             log.info(f"Cookies pastrate din {path} ({health['entries']} intrari, "
                      f"critice: {', '.join(health['present'])}); env neschimbat")
             return path, health['entries']
-        if rollback_cookies() and cookies_valid(path):
+        # `restore_good_jar`, nu `rollback_cookies`: reparatia de la pornire nu are
+        # voie sa consume lovitura unica de la runtime, altfel reincercarea din
+        # process_play la prima eroare de cookies e moarta pe tot procesul.
+        if restore_good_jar() and cookies_valid(path):
             rotated = _count_cookie_entries(path)
             log.warning(f"Jar-ul de pe disc era rupt; am revenit la copia buna "
                         f"({rotated} intrari)")

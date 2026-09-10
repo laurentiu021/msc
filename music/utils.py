@@ -190,6 +190,15 @@ def trim_download_cache(keep, max_bytes: int | None = None,
         except OSError:
             continue
         total += size
+        # `.part` si `.ytdl` sunt descarcari IN CURS. `cached_download` le exclude
+        # deja de la servire, dar evacuarea nu le excludea de la stergere: cu un
+        # cache plin, un transfer mare in desfasurare se stergea singur de sub
+        # yt-dlp (verificat: un `.part` de 5MB cu plafon 1MB era sters), apoi
+        # `try_rename` eșua si descarcarea aparea ca defectiune tehnica, bătând
+        # contorul de erori consecutive. Marimea lor se numara in total — de-aia
+        # trebuie evacuat altceva — dar nu sunt candidati.
+        if name.endswith(('.part', '.ytdl')):
+            continue
         if path not in protected:
             entries.append((mtime, size, path))
 

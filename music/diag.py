@@ -191,6 +191,14 @@ def problems(snapshot: dict) -> list[str]:
     cookies = snapshot['cookies']
     if not cookies['exists'] or not cookies['entries']:
         out.append('fara cookies: YouTube va cere verificare de bot')
+    elif not cookies.get('in_use', True):
+        # Starea in care NIMIC nu poate cânta era singura raportata drept sanatoasa:
+        # `problems()` citea doar exists/entries/valid/age_sec, iar `!health` afisa
+        # numarul de intrari si varsta. Se intampla cand YT_COOKIES_CONTENT nu e
+        # setat: `seed_cookies_from_env` intoarce (None, 0), `apply_cookies` nu e
+        # chemat niciodata, si botul merge ca guest — desi pe volum sta un jar bun.
+        out.append(f"cookies EXISTA pe disc ({cookies['entries']} intrari) dar nu "
+                   f"sunt folosite: botul merge ca guest")
     elif not cookies.get('valid', True):
         out.append(f"cookies fara sesiune valida (lipsesc: "
                    f"{', '.join(cookies.get('missing_critical') or [])})")

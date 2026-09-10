@@ -215,9 +215,74 @@ def test_the_watchdog_would_have_killed_a_bot_without_a_heartbeat():
     boot = 10_000.0
     # `_LAST_BEAT` semanat la import = momentul pornirii. Fara nicio bataie,
     # diferenta creste la infinit si arata identic cu o bucla blocata.
-    reason = bot_mod._should_restart(boot + bot_mod.WATCHDOG_STALL_SEC + 16,
+    reason = bot_mod._should_restart(boot + bot_mod.WATCHDOG_BOOT_GRACE_SEC + 16,
                                      boot, 0, 2, boot)
     assert reason and 'heartbeat' in reason, reason
+
+
+def test_the_boot_window_buys_a_real_margin():
+    """Fereastra de pornire trebuie sa fie STRICT mai lunga decat pragul de blocaj.
+
+    `_LAST_BEAT` si `_BOOT_MONOTONIC` sunt semanate din acelasi `time.monotonic()`
+    (delta masurata 0.0s), deci cand fereastra era egala cu pragul, ambele expirau
+    la acelasi tick: tacere pana la boot+300, `os._exit(1)` la boot+301. Cu
+    restartPolicyMaxRetries=10, o auto-omorâre la ~315s epuiza bugetul in ~52 de
+    minute, iar healthcheckPath e evaluat doar la deploy — serviciul rămânea jos
+    pana venea un om.
+    """
+    assert bot_mod.WATCHDOG_BOOT_GRACE_SEC > bot_mod.WATCHDOG_STALL_SEC, (
+        f'fereastra ({bot_mod.WATCHDOG_BOOT_GRACE_SEC}s) nu depaseste pragul '
+        f'({bot_mod.WATCHDOG_STALL_SEC}s): nu cumpara nicio margine')
+
+    boot = 10_000.0
+    # Exact momentul in care vechea varianta se declanșa.
+    just_past_the_threshold = boot + bot_mod.WATCHDOG_STALL_SEC + 1
+    assert bot_mod._should_restart(just_past_the_threshold, boot, 0, 2, boot) is None
+    # Iar dupa fereastra chiar se declanșeaza: marginea nu are voie sa fie infinita.
+    assert bot_mod._should_restart(boot + bot_mod.WATCHDOG_BOOT_GRACE_SEC + 1,
+                                   boot, 0, 2, boot) is not None
+
+
+def test_importing_the_bot_never_touches_the_volume():
+    """Un `import bot` scria pe volumul REAL.
+
+    Reprodus: `sweep_partials`, `trim_download_cache` si `seed_cookies_from_env`
+    rulau la import, deci rularea unui singur fisier de teste rescria jar-ul rotit
+    de yt-dlp cu valoarea veche din env, o promova in `cookies.txt.good`
+    (distrugand si tinta de revenire) si golea tot cache-ul audio. Fara `/data`,
+    `_cookie_file_paths()` cade pe `.`, deci `python tests/run_all.py` in checkout-ul
+    viu ataca starea de producție.
+    """
+    import ast
+    import inspect
+    import pathlib
+
+    src = pathlib.Path(bot_mod.__file__).read_text(encoding='utf-8')
+    tree = ast.parse(src)
+    forbidden = {'sweep_partials', 'trim_download_cache', 'seed_cookies_from_env',
+                 'apply_cookies', 'sweep_borrowed_cookies', 'urlopen'}
+    offenders = []
+    for node in tree.body:                      # doar nivelul de MODUL
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            name = (getattr(inner.func, 'id', None)
+                    or getattr(inner.func, 'attr', None))
+            if name in forbidden and isinstance(node, (ast.Expr, ast.Assign,
+                                                       ast.If, ast.Try)):
+                offenders.append(f'linia {inner.lineno}: {name}()')
+    assert not offenders, (
+        'efecte pe disc/rețea la importul lui bot.py: ' + ', '.join(offenders))
+
+    # Cealalta jumatate: mutandu-le din import, trebuie sa se cheme de undeva.
+    # Fara asta, containerul ar porni fara cookies si fara curatenie — un bot care
+    # nu poate reda nimic, si niciun test nu ar observa.
+    main_src = ast.parse(inspect.getsource(bot_mod.main))
+    called = {getattr(n.func, 'id', None) for n in ast.walk(main_src)
+              if isinstance(n, ast.Call)}
+    for required in ('_prepare_volume', '_run_startup_probe'):
+        assert required in called, (
+            f'main() nu mai cheama {required}(): botul porneste fara cookies')
 
 
 # --- 2. o deconectare nu e o preferinta a utilizatorului ---------------------

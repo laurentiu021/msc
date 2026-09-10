@@ -160,6 +160,22 @@ def test_a_jar_without_session_cookies_is_flagged():
     assert 'SID' in issues, issues
 
 
+def test_cookies_on_disk_but_not_in_use_is_a_problem():
+    """Singura stare in care NIMIC nu poate cânta era raportata drept sanatoasa.
+
+    `seed_cookies_from_env` intoarce (None, 0) cand YT_COOKIES_CONTENT lipseste,
+    deci `apply_cookies` nu e chemat si botul merge ca guest — pe un IP de
+    datacenter, adica refuzat la tot. `problems()` citea doar
+    exists/entries/valid/age_sec, iar `!health` afisa intrari + varsta.
+    """
+    snap = _snapshot()
+    snap['cookies'] = {'exists': True, 'entries': 2, 'age_sec': 60, 'valid': True,
+                       'session_cookies': ['SID'], 'missing_critical': [],
+                       'has_good_copy': True, 'in_use': False}
+    issues = ' | '.join(diag.problems(snap))
+    assert 'guest' in issues, f'starea guest-only nu apare in probleme: {issues}'
+
+
 def test_a_completely_full_disk_is_reported():
     """Singura stare de disc care nu producea nicio linie era cea mai rea.
 

@@ -112,6 +112,34 @@ def test_the_hls_fallback_asks_for_audio_not_video():
             f'plafonul HLS ({cap}) nu e mai strans decat cel normal')
 
 
+def test_the_hls_attempt_can_never_ask_for_muxed_video():
+    """Plafonul de octeti NU se aplica pe HLS, deci selectorul e singura aparare.
+
+    Verificat pe yt-dlp 2026.8.19: `max_filesize` e citit doar de HttpFD si CurlFD;
+    toate formatele HLS de YouTube sunt `m3u8_native` (HlsFD), iar nici
+    downloader/hls.py nici downloader/fragment.py nu il pomenesc. Un
+    `best[protocol^=m3u8]` e o redare muxata video+audio, iar `-vn` arunca imaginea
+    abia DUPA ce a ajuns pe disc: transfer de video nemarginit pe un bot audio.
+    """
+    import inspect
+
+    from yt_dlp.downloader import get_suitable_downloader
+
+    fd = get_suitable_downloader({'protocol': 'm3u8_native', 'url': 'http://x'},
+                                 params={})
+    module_src = inspect.getsource(sys.modules[fd.__module__])
+    assert 'max_filesize' not in module_src, (
+        f'{fd.__name__} pare sa respecte acum max_filesize — daca da, plafonul HLS '
+        f'poate redeveni aparare si comentariul din resolve.py trebuie actualizat')
+
+    for fmt, _cap in resolve.DOWNLOAD_ATTEMPTS:
+        if 'm3u8' not in fmt:
+            continue
+        for alternative in fmt.split('/'):
+            assert alternative.startswith('bestaudio'), (
+                f'alternativa HLS cere video, fara niciun plafon: {alternative}')
+
+
 def test_a_rate_limit_does_not_trigger_a_second_format_attempt():
     """Acelasi 429 nu devine alt raspuns cu alt selector de format."""
     for message, expected in (

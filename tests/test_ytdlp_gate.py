@@ -96,31 +96,132 @@ def test_concurrent_extracts_never_overlap():
             elif kind == 'exit':
                 live['now'] -= 1
 
-    fake = _FakeYtDlpModule(0.15, on_event=on_event)
+    fake = _FakeYtDlpModule(0.05, on_event=on_event)
     saved = _install(fake)
-    saved_min = ytdlp.YT_REQUEST_MIN_INTERVAL_SEC
-    saved_max = ytdlp.YT_REQUEST_MAX_INTERVAL_SEC
-    ytdlp.YT_REQUEST_MIN_INTERVAL_SEC = 0.2
-    ytdlp.YT_REQUEST_MAX_INTERVAL_SEC = 0.2
     _reset_gate()
     try:
         async def main():
-            start = time.monotonic()
             await asyncio.gather(*[
                 ytdlp.extract({}, f'q{i}', stage=f's{i}') for i in range(3)
             ])
-            return time.monotonic() - start
 
-        elapsed = asyncio.run(main())
+        asyncio.run(main())
     finally:
         ytdlp.yt_dlp = saved
-        ytdlp.YT_REQUEST_MIN_INTERVAL_SEC = saved_min
-        ytdlp.YT_REQUEST_MAX_INTERVAL_SEC = saved_max
         _reset_gate()
 
     assert live['max'] == 1, f'{live["max"]} extractii au rulat simultan'
-    floor = 3 * 0.15 + 2 * 0.2
-    assert elapsed >= floor, f'{elapsed:.2f}s < {floor:.2f}s: intervalul nu s-a aplicat'
+
+
+class _FrozenClock:
+    """Ceas si somn injectate: intervalul se VERIFICA, nu se aȘteapta.
+
+    Varianta care masura `time.monotonic()` era instabila prin construcție:
+    rezervarea se calculeaza cu `time.time()`, iar cele doua ceasuri au rezolutii
+    diferite pe Windows, deci un test cu prag de 0.85s cadea cu 0.84s masurat. Un
+    test cu ceas de perete e si lent si nesigur; aici timpul e o valoare pe care o
+    controlam, iar somnul doar avanseaza ceasul.
+    """
+
+    def __init__(self, ytdlp_module):
+        self.module = ytdlp_module
+        self.now = 1_000.0
+        self.sleeps = []
+
+    def __enter__(self):
+        outer = self
+        real_asyncio = self.module.asyncio
+        self._saved = (self.module.time, real_asyncio,
+                       self.module.YT_REQUEST_MIN_INTERVAL_SEC,
+                       self.module.YT_REQUEST_MAX_INTERVAL_SEC)
+
+        class _Time:
+            @staticmethod
+            def time():
+                return outer.now
+
+            @staticmethod
+            def monotonic():
+                return outer.now
+
+        class _Asyncio:
+            """Trece tot la asyncio-ul real, in afara de `sleep`."""
+
+            def __getattr__(self, name):
+                return getattr(real_asyncio, name)
+
+            @staticmethod
+            async def sleep(delay, *args, **kwargs):
+                outer.sleeps.append(delay)
+                outer.now += delay
+                return await real_asyncio.sleep(0)
+
+        self.module.time = _Time()
+        self.module.asyncio = _Asyncio()
+        # Interval fix: verificam poarta, nu generatorul de numere aleatoare.
+        self.module.YT_REQUEST_MIN_INTERVAL_SEC = 2.0
+        self.module.YT_REQUEST_MAX_INTERVAL_SEC = 2.0
+        _reset_gate()
+        return self
+
+    def __exit__(self, *exc):
+        (self.module.time, self.module.asyncio,
+         self.module.YT_REQUEST_MIN_INTERVAL_SEC,
+         self.module.YT_REQUEST_MAX_INTERVAL_SEC) = self._saved
+        _reset_gate()
+        return False
+
+
+def test_the_interval_is_measured_from_the_end_of_the_previous_request():
+    """Un simplu interval distanta doar PLECARILE.
+
+    Prima varianta rezerva urmatorul slot la INTRARE, deci doua extractii lente
+    porneau la 1.2s una de alta si rulau suprapus — exact rafalele pe care
+    throttle-ul exista sa le previna. Rezervarea se scrie in `finally`, dupa ce
+    corpul s-a terminat.
+    """
+    holder = {}
+
+    def slow_body(kind, _thread):
+        # Corpul cererii "dureaza" 5 secunde de ceas injectat. Fara asta, intrarea
+        # si ieșirea cad in aceeasi clipa si diferenta dintre cele doua momente de
+        # rezervare devine invizibila — exact ce facea defectul greu de prins.
+        if kind == 'enter' and holder.get('clock'):
+            holder['clock'].now += 5.0
+
+    fake = _FakeYtDlpModule(0.0, on_event=slow_body)
+    saved = _install(fake)
+    try:
+        with _FrozenClock(ytdlp) as clock:
+            holder['clock'] = clock
+
+            async def main():
+                for i in range(3):
+                    await ytdlp.extract({}, f'q{i}', stage=f's{i}')
+
+            asyncio.run(main())
+            waits = [round(s, 3) for s in clock.sleeps if s > 0]
+
+        assert waits == [2.0, 2.0], (
+            f'poarta nu a aȘteptat intervalul intre cereri: {waits}. '
+            f'Cu rezervarea facuta la INTRARE, corpul de 5s consuma singur '
+            f'intervalul si urmatoarea cerere porneste imediat.')
+    finally:
+        ytdlp.yt_dlp = saved
+        _reset_gate()
+
+
+def test_no_wait_is_needed_for_the_first_request():
+    fake = _FakeYtDlpModule(0.0)
+    saved = _install(fake)
+    try:
+        with _FrozenClock(ytdlp) as clock:
+            asyncio.run(ytdlp.extract({}, 'q', stage='s'))
+            assert [s for s in clock.sleeps if s > 0] == [], (
+                f'prima cerere a fost intarziata degeaba: {clock.sleeps}')
+    finally:
+        ytdlp.yt_dlp = saved
+        _reset_gate()
 
 
 def test_timeout_leaves_the_cookie_file_untouched():

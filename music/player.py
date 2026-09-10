@@ -75,6 +75,22 @@ def _history_entry(state, vid: str) -> dict | None:
     return None
 
 
+def _discard_partial(filename, reused: bool) -> None:
+    """Sterge fisierul doar daca redarea asta chiar l-a descarcat.
+
+    Pe caile de refolosire (hit de cache pe disc, loop pe acelasi URL) `filename`
+    e o intrare de cache care exista de INAINTE. Pana la introducerea cache-ului
+    era intotdeauna un fisier proaspat descarcat, deci stergerea la eroare era
+    corecta; de atunci, orice hit intrerupt (deconectare in timpul cautarii, un
+    ffmpeg care pica) evacua exact intrarea pe care cache-ul exista sa o pastreze.
+    Reprodus: fisier in cache pentru vid123, `!play <text>`, deconectare in timpul
+    cautarii — fisierul dispărea.
+    """
+    if not filename or reused:
+        return
+    cleanup_file(filename, _loop)
+
+
 def trim_cache() -> None:
     """Evacueaza cache-ul audio, protejand ce se reda chiar acum.
 
@@ -397,27 +413,6 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
                                    keys=('channel', 'uploader')) or ''
         state.last_views = _meta(dl_info, selected, keys=('view_count',)) or 0
         state.last_likes = _meta(dl_info, selected, keys=('like_count',)) or 0
-        # Canalul intra si in history: artist_key cade pe el cand titlul nu are
-        # separator, dar intrarile de history nu il purtau, deci plafonul de
-        # diversitate nu se aplica piesele cu titlu de un singur cuvant.
-        state.history.append({'url': web_url, 'title': state.last_title,
-                              'channel': state.last_channel,
-                              'duration': state.last_duration,
-                              'thumbnail': state.last_thumbnail})
-        if len(state.history) > 20:
-            state.history.pop(0)
-
-        # Insoțitorul de langa fisierul audio. Scris la fiecare redare reusita,
-        # inclusiv la un hit de cache: asa un fisier vechi capata metadate cand e
-        # ascultat din nou, iar cache-ul nu mai depinde de cele 20 de intrari de
-        # history — care oricum se golesc la `!stop` si la plecarea din voce.
-        if not write_track_meta(filename, {
-                'url': web_url, 'title': state.last_title,
-                'channel': state.last_channel, 'duration': state.last_duration,
-                'thumbnail': state.last_thumbnail, 'views': state.last_views,
-                'likes': state.last_likes}):
-            log.debug("Metadatele piesei nu au putut fi scrise langa fisier")
-
         if not vc.is_connected():
             raise PlaybackInterrupted("Voice deconectat in timpul descarcarii.")
         if vc.is_playing() or vc.is_paused():
@@ -463,6 +458,33 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
                 except Exception:
                     pass
             vc.play(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTS), after=after_play)
+
+        # History si insoțitorul se scriu DUPA ce redarea a pornit cu adevarat.
+        # Cand erau mai sus, o deconectare intre pregatire si `vc.play` lasa in
+        # history o piesa care nu s-a auzit niciodata — iar history alimenteaza
+        # `skip_ids` si plafonul de artist ai autoplay-ului, deci radio-ul ocolea
+        # apoi o piesa pe care nimeni n-o ascultase.
+        #
+        # Canalul intra si el in history: artist_key cade pe el cand titlul nu are
+        # separator, dar intrarile nu il purtau, deci plafonul de diversitate nu se
+        # aplica pieselor cu titlu de un singur cuvant.
+        state.history.append({'url': web_url, 'title': state.last_title,
+                              'channel': state.last_channel,
+                              'duration': state.last_duration,
+                              'thumbnail': state.last_thumbnail})
+        if len(state.history) > 20:
+            state.history.pop(0)
+
+        # Insoțitorul de langa fisierul audio, scris la fiecare redare reusita —
+        # inclusiv la un hit de cache, ca un fisier vechi sa capete metadate cand e
+        # ascultat din nou si cache-ul sa nu mai depinda de cele 20 de intrari de
+        # history, care oricum se golesc la `!stop` si la plecarea din voce.
+        if not write_track_meta(filename, {
+                'url': web_url, 'title': state.last_title,
+                'channel': state.last_channel, 'duration': state.last_duration,
+                'thumbnail': state.last_thumbnail, 'views': state.last_views,
+                'likes': state.last_likes}):
+            log.debug("Metadatele piesei nu au putut fi scrise langa fisier")
 
         state._consecutive_errors = 0
         state._consecutive_rejects = 0
@@ -521,7 +543,7 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         # O comanda noua ne-a anulat. CancelledError e BaseException, deci fara
         # aceasta ramura si fara finally-ul de mai jos is_loading ramanea True
         # pentru totdeauna si botul tacea, conectat, la orice !play.
-        cleanup_file(filename, _loop)
+        _discard_partial(filename, reused)
         raise
     except PlaybackInterrupted as e:
         # !stop, deconectare sau mutare din canal in timpul descarcarii. Nu e o
@@ -530,17 +552,17 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         # Tip propriu, nu ConnectionError: acela acopera si erorile reale de
         # retea, care trebuie sa rămâna vizibile.
         log.info(f"Redare intrerupta: {e}")
-        cleanup_file(filename, _loop)
+        _discard_partial(filename, reused)
     except TrackRejected as e:
         # Regula noastra, nu defectiune: nu atinge _consecutive_errors si nu
         # trece prin diagnose_error, care ar traduce-o in "Eroare necunoscuta".
         log.info(f"Piesa refuzata: {e}")
-        cleanup_file(filename, _loop)
+        _discard_partial(filename, reused)
         state._consecutive_rejects += 1
         rejected = str(e)
     except Exception as e:
         log.error(f"Eroare process_play: {e}", exc_info=True)
-        cleanup_file(filename, _loop)
+        _discard_partial(filename, reused)
         state._consecutive_errors += 1
         failure = e
     finally:

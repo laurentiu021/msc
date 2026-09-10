@@ -343,6 +343,29 @@ def test_a_successful_promotion_re_arms_the_rollback():
     _in_temp_dir(check)
 
 
+def test_the_boot_repair_does_not_spend_the_runtime_rollback():
+    """Reparatia de la pornire consuma lovitura unica, deci reincercarea din
+    process_play la prima eroare de cookies era moarta pe tot procesul."""
+    def check(d):
+        path, _ = config.seed_cookies_from_env(NETSCAPE)
+        config.apply_cookies(path)
+        config._rolled_back = False
+        config.promote_cookies()
+        # yt-dlp scrie peste jar valori care nu mai autentifica...
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(NO_SESSION)
+        # ...si repornirea gaseste fisierul rupt, cu amprenta env neschimbata.
+        path2, entries = config.seed_cookies_from_env(NETSCAPE)
+        assert path2 == path and entries >= 1, (path2, entries)
+        assert config.cookies_valid(path), 'boot-ul nu a reparat jar-ul'
+        assert config._rolled_back is False, (
+            'boot-ul a consumat lovitura de runtime: reincercarea din process_play '
+            'e moarta pe tot procesul')
+        assert config.rollback_cookies() is True, (
+            'revenirea de la runtime nu mai e disponibila dupa o reparatie de boot')
+    _in_temp_dir(check)
+
+
 def test_there_is_one_cookie_line_parser():
     """Doua copii ale aceluiasi parser ar da doua raspunsuri diferite."""
     import glob

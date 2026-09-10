@@ -45,44 +45,59 @@ from music import diag
 from music import ytdlp as ytdlp_mod
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-if not TOKEN:
-    log.error("DISCORD_TOKEN not set.")
-    sys.exit(1)
 
-# La pornire stergem DOAR descarcarile intrerupte. Stergerea intregului
-# director arunca la fiecare deploy tot ce fusese ascultat, iar pe volum acel
-# audio e chiar cache-ul care face a doua redare gratuita.
-from music.utils import sweep_partials, trim_download_cache
-sweep_partials()
-# Copiile de jar rămase de la un proces omorat: fiecare conține o sesiune
-# Google, deci nu au ce sa zaca pe volum.
-from music.config import sweep_borrowed_cookies
-sweep_borrowed_cookies()
-trim_download_cache(set())
-
-# Write YouTube cookies if provided via env var
 from music.config import apply_cookies, seed_cookies_from_env
+from music.config import sweep_borrowed_cookies
+from music.utils import sweep_partials, trim_download_cache
 
-_cookie_path, _cookie_entries = seed_cookies_from_env(os.getenv("YT_COOKIES_CONTENT"))
-if _cookie_path:
-    log.info(f"YouTube cookies active ({_cookie_entries} entries)")
-    apply_cookies(_cookie_path)
-else:
-    log.warning("YT_COOKIES_CONTENT not set — YouTube may block requests")
 
-# Test PO Token server connectivity
-try:
-    import urllib.request
-    import urllib.error
-    # /ping is the endpoint the bgutil plugin itself probes and it reports the
-    # server version. /token does not exist, so it used to log a useless 404.
-    req = urllib.request.Request('http://127.0.0.1:4416/ping', method='GET')
-    with urllib.request.urlopen(req, timeout=5) as resp:
-        log.info(f"PO Token server OK: {resp.read(200).decode('utf-8', 'replace')}")
-except urllib.error.HTTPError as e:
-    log.warning(f"PO Token server answered HTTP {e.code} on /ping")
-except Exception as e:
-    log.warning(f"PO Token server NOT responding: {e}")
+def _prepare_volume():
+    """Curatenie si cookie-uri la pornire. Chemata din main(), NU la import.
+
+    Cand rula la import, orice `import bot` executa scrieri pe volumul real.
+    Reprodus cu COOKIE_DIR pointat pe un volum de test: rularea unui singur
+    fisier de teste a rescris jar-ul rotit de yt-dlp cu valoarea veche din env,
+    a PROMOVAT valoarea veche in `cookies.txt.good` (distrugand si tinta de
+    revenire) si a golit tot cache-ul audio. Fara `/data`,
+    `_cookie_file_paths()` cade pe `.`, deci `python tests/run_all.py` in
+    checkout-ul viu scria `./cookies.txt` — adica exact modul documentat de a
+    rula suita ataca starea de producție.
+    """
+    # La pornire stergem DOAR descarcarile intrerupte. Stergerea intregului
+    # director arunca la fiecare deploy tot ce fusese ascultat, iar pe volum acel
+    # audio e chiar cache-ul care face a doua redare gratuita.
+    sweep_partials()
+    # Copiile de jar rămase de la un proces omorat: fiecare conține o sesiune
+    # Google, deci nu au ce sa zaca pe volum.
+    sweep_borrowed_cookies()
+    trim_download_cache(set())
+
+    cookie_path, cookie_entries = seed_cookies_from_env(
+        os.getenv("YT_COOKIES_CONTENT"))
+    if cookie_path:
+        log.info(f"YouTube cookies active ({cookie_entries} entries)")
+        apply_cookies(cookie_path)
+    else:
+        # Fara cookies pe un IP de datacenter nu exista nicio cale functionala
+        # catre YouTube. E o eroare, nu un avertisment: chiar daca pe volum sta un
+        # jar valid, `apply_cookies` nu e chemat, deci nu il foloseste nimeni.
+        log.error("YT_COOKIES_CONTENT not set — botul merge ca GUEST, iar de pe "
+                  "un IP de datacenter asta inseamna ca YouTube va refuza tot")
+
+    # Test PO Token server connectivity
+    try:
+        import urllib.error
+        import urllib.request
+        # /ping is the endpoint the bgutil plugin itself probes and it reports the
+        # server version. /token does not exist, so it used to log a useless 404.
+        req = urllib.request.Request('http://127.0.0.1:4416/ping', method='GET')
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            log.info(f"PO Token server OK: "
+                     f"{resp.read(200).decode('utf-8', 'replace')}")
+    except urllib.error.HTTPError as e:
+        log.warning(f"PO Token server answered HTTP {e.code} on /ping")
+    except OSError as e:
+        log.warning(f"PO Token server NOT responding: {e}")
 
 # Proba yt-dlp la pornire: acum OPT-IN, nu opt-out.
 # start.sh isi dezactivase deja proba proprie cu motivul "probe consumes the
@@ -112,12 +127,16 @@ def _probe_clients():
     return WEB_CLIENTS
 
 
-if os.getenv('YTDLP_STARTUP_PROBE', '').strip().lower() in ('1', 'true', 'yes'):
+def _run_startup_probe():
+    """Sonda opt-in de yt-dlp. Si ea din main(), nu la import: face cereri reale."""
+    if os.getenv('YTDLP_STARTUP_PROBE', '').strip().lower() not in ('1', 'true', 'yes'):
+        log.info("yt-dlp startup probe dezactivata (YTDLP_STARTUP_PROBE=1 o activeaza)")
+        return
     # Executor nu-l inchidem cu `with`: altfel ieșirea din bloc ar aștepta
     # thread-ul si timeout-ul de mai jos ar fi decorativ.
-    _probe_ex = ThreadPoolExecutor(max_workers=1)
+    probe_ex = ThreadPoolExecutor(max_workers=1)
     try:
-        total, real = _probe_ex.submit(_ytdlp_startup_probe).result(timeout=20)
+        total, real = probe_ex.submit(_ytdlp_startup_probe).result(timeout=20)
         log.info(f"yt-dlp startup probe: {total} formats ({real} redabile)")
         if real == 0:
             log.warning("yt-dlp startup probe: 0 formate redabile — "
@@ -127,9 +146,7 @@ if os.getenv('YTDLP_STARTUP_PROBE', '').strip().lower() in ('1', 'true', 'yes'):
     except Exception as e:
         log.warning(f"yt-dlp startup probe a esuat: {e}")
     finally:
-        _probe_ex.shutdown(wait=False)
-else:
-    log.info("yt-dlp startup probe dezactivata (YTDLP_STARTUP_PROBE=1 o activeaza)")
+        probe_ex.shutdown(wait=False)
 
 # --- Bot setup ---
 intents = discord.Intents.default()
@@ -471,6 +488,9 @@ WATCHDOG_STALL_SEC = env_num('WATCHDOG_STALL_SEC', 300, low=60)
 # totusi sa se termine singure la 250s. Peste plafonul de aici nu se mai termina
 # niciodata, iar procesul e viu si inutil.
 WATCHDOG_SATURATED_SEC = env_num('WATCHDOG_SATURATED_SEC', 300, low=60)
+# Fereastra de pornire trebuie sa fie STRICT mai lunga decat pragul de blocaj,
+# altfel expira in acelasi tick si nu cumpara nicio margine (vezi _should_restart).
+WATCHDOG_BOOT_GRACE_SEC = WATCHDOG_STALL_SEC + 120
 SNAPSHOT_EVERY_SEC = 60
 SWEEP_EVERY_SEC = 600
 _LAST_BEAT = time.monotonic()
@@ -534,9 +554,16 @@ def _should_restart(now: float, last_beat: float, leaked: int, max_workers: int,
     tick de 15s, pana la epuizarea celor 10 reporniri permise de Railway, si de
     atunci serviciul rămânea jos.
     """
-    if now - boot < WATCHDOG_STALL_SEC:
-        # Fereastra de pornire: o problema la boot nu are voie sa arda bugetul
-        # de 10 reporniri al Railway.
+    if now - boot < WATCHDOG_BOOT_GRACE_SEC:
+        # Fereastra de pornire: o problema la boot nu are voie sa arda bugetul de 10
+        # reporniri al Railway. Cand fereastra era egala cu pragul de blocaj, nu
+        # proteja NIMIC pe ramura de heartbeat: `_LAST_BEAT` si `_BOOT_MONOTONIC`
+        # sunt semanate din acelasi `time.monotonic()` (delta masurata 0.0s), deci
+        # ambele expirau la acelasi tick — tacere pana la boot+300, os._exit(1) la
+        # boot+301, si o cadenta de o auto-omorâre la ~315s de viata a procesului.
+        # Cu restartPolicyMaxRetries=10 asta epuiza bugetul in ~52 de minute, iar
+        # healthcheckPath e evaluat doar la deploy: serviciul rămânea jos pana cand
+        # venea un om.
         return None
     if now - last_beat > WATCHDOG_STALL_SEC:
         return (f'bucla de evenimente blocata: niciun heartbeat de '
@@ -685,6 +712,13 @@ async def _runner():
 
 
 def main():
+    if not TOKEN:
+        log.error("DISCORD_TOKEN not set.")
+        sys.exit(1)
+    # Efectele pe disc si cererile de rețea se fac AICI, nu la import: un
+    # `import bot` (teste, unelte, un REPL) nu are voie sa atinga volumul.
+    _prepare_volume()
+    _run_startup_probe()
     port = env_num('PORT', 8080, low=1, high=65535)
     threading.Thread(
         target=lambda: HTTPServer(("0.0.0.0", port), _Health).serve_forever(),

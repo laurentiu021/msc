@@ -34,7 +34,15 @@ def main() -> int:
         name = os.path.basename(path)
         try:
             proc = subprocess.run(
-                [sys.executable, path], cwd=ROOT, timeout=TIMEOUT_SEC,
+                # -B: fara bytecode scris pe disc. Cache-ul .pyc e invalidat pe
+                # (mtime, size), iar doua editari rapide care intampla sa lase
+                # acelasi numar de octeti — de exemplu inlocuirea unui identificator
+                # cu altul de aceeasi lungime, adica exact ce face o verificare prin
+                # mutatii — pot pastra un .pyc VECHI. Testul ruleaza atunci alt cod
+                # decat cel din fisier, si rezultatul nu inseamna nimic. S-a
+                # intamplat: sursa spunea `restore_good_jar()`, iar bytecode-ul
+                # incarcat chema `rollback_cookies()`.
+                [sys.executable, '-B', path], cwd=ROOT, timeout=TIMEOUT_SEC,
                 capture_output=True,
                 # UTF-8 explicit, nu codecul local: altfel diacriticele din
                 # mesajul de eșec ajung mojibake exact in linia pe care o citim.

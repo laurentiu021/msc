@@ -38,15 +38,22 @@ GUEST_CHAIN = [(WEB_CLIENTS, False)]
 
 # (selector de format, plafon de octeti), in ordinea incercarilor.
 #
-# A doua incercare cere AUDIO din HLS, nu `best`. `best[protocol=m3u8*]` e o
-# redare muxata video+audio, iar `-vn` arunca imaginea abia DUPA ce a ajuns pe
-# disc: un bot audio descarca astfel zeci de MB de video pe un IP care ne
-# limiteaza. Plafonul ei e mai strans, fiindca HLS-ul e o plasa de siguranta, nu
-# calea normala.
+# A doua incercare cere DOAR audio din HLS. `best[protocol^=m3u8]` era ultima
+# alternativa si e o redare muxata video+audio, iar `-vn` arunca imaginea abia
+# DUPA ce a ajuns pe disc: un bot audio descarca astfel zeci de MB de video pe un
+# IP care ne limiteaza.
+#
+# ATENTIE: plafonul de octeti NU se aplica pe HLS. Verificat pe yt-dlp 2026.8.19 —
+# `max_filesize` e citit doar de HttpFD (downloader/http.py) si de CurlFD; toate
+# formatele HLS de YouTube sunt `m3u8_native`, adica HlsFD, iar nici
+# downloader/hls.py nici downloader/fragment.py nu il pomenesc. Deci singurul lucru
+# care marginea un transfer HLS e DOWNLOAD_TIMEOUT_SEC, si de aceea selectorul
+# trebuie sa fie strict audio: comentariul de aici obișnuia sa promita un plafon pe
+# care codul nu il aplica.
 DOWNLOAD_ATTEMPTS = [
     ('bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
      MAX_DOWNLOAD_BYTES),
-    ('bestaudio[protocol^=m3u8]/bestaudio*[protocol^=m3u8]/best[protocol^=m3u8]',
+    ('bestaudio[protocol^=m3u8]/bestaudio*[protocol^=m3u8]',
      HLS_MAX_BYTES),
 ]
 

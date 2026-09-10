@@ -657,6 +657,54 @@ def test_the_reject_brake_is_a_real_pause_under_247():
             f'radioul nu mai revine niciodata: {later.reason}')
 
 
+def test_an_interrupted_cache_hit_does_not_evict_the_cached_file():
+    """Caile de eroare stergeau un fisier pe care redarea asta nu il descarcase.
+
+    Pana la introducerea cache-ului, `filename` era intotdeauna proaspat descarcat,
+    deci stergerea la eroare era corecta. De atunci, orice hit intrerupt
+    (deconectare in timpul cautarii, un ffmpeg care pica) evacua exact intrarea pe
+    care cache-ul exista sa o pastreze. Reprodus: fisier in cache, `!play <text>`,
+    deconectare in timpul cautarii — fisierul dispărea.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        utils.write_track_meta(target, {'url': 'https://www.youtube.com/watch?v=vid123',
+                                        'title': 'Artistul - Piesa', 'duration': 200})
+        st = _fresh_state()
+        deleted = []
+
+        class _Dropping(_FakeVoiceClient):
+            """Se deconecteaza exact intre cache hit si pornirea redarii."""
+
+            def __init__(self):
+                super().__init__()
+                self.checks = 0
+
+            def is_connected(self):
+                self.checks += 1
+                return self.checks < 3
+
+        ctx = _FakeCtx(_Dropping())
+        saved_dir = utils.DOWNLOAD_DIR
+        utils.DOWNLOAD_DIR = tmp
+        try:
+            with _Harness(target) as h:
+                player.cleanup_file = lambda f, *a, **k: deleted.append(f)
+                asyncio.run(player.process_play(
+                    ctx, 'https://www.youtube.com/watch?v=vid123'))
+        finally:
+            utils.DOWNLOAD_DIR = saved_dir
+
+        assert h.download_calls == [], 'nu era un hit de cache'
+        assert deleted == [], (
+            f'a sters o intrare de cache pe care nu a descarcat-o: {deleted}')
+        assert os.path.exists(target), 'fisierul din cache a dispărut'
+        assert st.history == [], (
+            'a inregistrat in history o piesa care nu s-a auzit niciodata')
+
+
 # --- promovarea copiei bune de cookies --------------------------------------
 # `cookies_valid` e pur STRUCTURALA: se uita doar la numele din jar. Putrezirea
 # tipica pastreaza numele si omoara valorile, deci un jar deja refuzat de YouTube
