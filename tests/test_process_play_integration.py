@@ -802,6 +802,54 @@ def test_every_play_attempt_leaves_one_structured_line():
     assert chr(10) not in fail_lines[0], 'linia structurata s-a rupt in mai multe'
 
 
+def test_a_repeated_failure_still_answers_a_user_who_asked():
+    """Dedup-ul e pentru redarile AUTOMATE, nu pentru o comanda tastata de om.
+
+    Cand radio-ul arde o coada intreaga cu aceeasi cauza, un mesaj per piesa e spam.
+    Dar un al doilea `!play` cu acelasi eșec nu primea NIMIC — iar pe `/play` era mai
+    rau: interactiunea rămânea in "Gogu is thinking..." pentru totdeauna, fiindca
+    nimic nu mai trimitea un followup. S-a intamplat in producție.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        st = _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient())
+
+        for attempt in (1, 2):
+            ctx.sent.clear()
+            with _Harness(target, full_info={}):
+                asyncio.run(player.process_play(
+                    ctx, 'https://www.youtube.com/watch?v=nimic'))
+            assert ctx.sent, (
+                f'incercarea {attempt} cerută de utilizator nu a produs niciun '
+                f'raspuns: comanda pare ignorata, iar pe /play interactiunea '
+                f'rămâne blocata in "thinking"')
+
+
+def test_an_automatic_replay_of_the_same_failure_stays_quiet():
+    """Cealalta jumatate: radio-ul nu are voie sa spameze canalul."""
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient())
+
+        with _Harness(target, full_info={}):
+            asyncio.run(player.process_play(
+                ctx, 'https://www.youtube.com/watch?v=nimic', is_radio=True))
+        first = len(ctx.sent)
+        assert first >= 1, 'primul eșec automat nu a spus nimic'
+
+        with _Harness(target, full_info={}):
+            asyncio.run(player.process_play(
+                ctx, 'https://www.youtube.com/watch?v=nimic', is_radio=True))
+        assert len(ctx.sent) == first, (
+            f'radio-ul a repetat acelasi mesaj de eroare: {ctx.sent[first:]}')
+
+
 # --- promovarea copiei bune de cookies --------------------------------------
 # `cookies_valid` e pur STRUCTURALA: se uita doar la numele din jar. Putrezirea
 # tipica pastreaza numele si omoara valorile, deci un jar deja refuzat de YouTube

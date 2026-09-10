@@ -45,7 +45,7 @@ class _FakeVoiceClient:
 
 
 class _FakeCtx:
-    def __init__(self, vc, interaction=None):
+    def __init__(self, vc, interaction=None, timeline=None):
         self.guild = type('G', (), {'id': GUILD_ID})()
         self.voice_client = vc
         self.author = type('A', (), {'voice': type('V', (), {'channel': None})()})()
@@ -53,15 +53,21 @@ class _FakeCtx:
         self.bot = type('B', (), {'loop': None})()
         self.sent = []
         # None = a venit prin `!play`. Un obiect = prin `/play`, si atunci comanda
-        # trebuie sa cheme `defer()` in 3 secunde, altfel Discord o declara eșuata.
+        # trebuie sa raspunda in 3 secunde, altfel Discord o declara eșuata.
         self.interaction = interaction
         self.deferred = 0
+        # Jurnal ORDONAT, partajat cu _Wiring: doar el arata dacă raspunsul a plecat
+        # inainte de munca, nu doar dacă a plecat vreodata.
+        self.timeline = [] if timeline is None else timeline
 
     async def defer(self, *a, **k):
         self.deferred += 1
+        self.timeline.append(('defer', None))
 
     async def send(self, *a, **k):
-        self.sent.append(a[0] if a else k)
+        msg = a[0] if a else k
+        self.sent.append(msg)
+        self.timeline.append(('send', msg))
         return None
 
 
@@ -99,10 +105,12 @@ class _Wiring:
         self.starts = []
         self.cancels = []
         self.bot = _FakeBot()
+        self.timeline = []
 
     def __enter__(self):
         async def process_play(ctx, query, is_radio=False):
             self.plays.append(query)
+            self.timeline.append(('resolve', query))
 
         async def update_player_ui(ctx, send_new=False):
             self.ui_calls += 1
@@ -366,30 +374,44 @@ def test_play_is_registered_as_a_hybrid_command():
     assert 'search' in params, params
 
 
-def test_a_slash_invocation_defers_before_doing_any_work():
+def test_a_slash_invocation_is_answered_before_any_work():
     """Discord declara eșuata o comanda neconfirmata in 3 secunde.
 
-    Rezolvarea unei piese poate dura zeci de secunde (extractie + descarcare, cu
-    throttle intre ele), deci fara `defer` fiecare `/play` ar arata rupt chiar si
-    cand redarea porneste corect.
+    Un mesaj REAL, nu `defer()`: cu defer, interactiunea intra in "Gogu is
+    thinking..." si rămâne acolo pana la un followup — iar exista cai care nu
+    trimit niciun mesaj (o eroare deduplicata, o redare intrerupta), deci
+    "thinking" rămânea pe ecran pentru totdeauna. S-a intamplat in producție.
     """
     st = _fresh_state()
     st.queue = []
-    ctx = _FakeCtx(_FakeVoiceClient(playing=True), interaction=object())
     with _Wiring() as w:
-        asyncio.run(w.bot.registry['play'](ctx, search='ceva'))
-    assert ctx.deferred == 1, (
-        f'nu a confirmat interactiunea inainte de lucru: deferred={ctx.deferred}')
+        # Nu `playing=True`: pe calea aceea mesajul "am adaugat in coada" conține
+        # oricum titlul, deci un test care cere doar "s-a trimis ceva cu titlul"
+        # ar trece si cu confirmarea ștearsa. Calea libera merge direct la rezolvare,
+        # asa ca ORDINEA din jurnal e singura care demonstreaza raspunsul imediat.
+        ctx = _FakeCtx(_FakeVoiceClient(), interaction=object(),
+                       timeline=w.timeline)
+        asyncio.run(w.bot.registry['play'](ctx, search='titlul cerut'))
+    assert 'resolve' in [ev for ev, _ in w.timeline], (
+        f'testul nu mai atinge calea de rezolvare: {w.timeline}')
+    assert w.timeline[0][0] == 'send', (
+        f'interactiunea nu a fost inchisa inainte de munca: {w.timeline}')
+    assert 'titlul cerut' in str(w.timeline[0][1]), w.timeline[0][1]
+    assert ctx.deferred == 0, (
+        'a folosit defer(): interactiunea rămâne in "thinking" pana la un followup, '
+        'iar unele cai nu trimit niciunul')
 
 
-def test_a_prefix_invocation_does_not_try_to_defer():
-    """`!play` nu are nicio interactiune de confirmat."""
+def test_a_prefix_invocation_does_not_announce_itself():
+    """`!play` nu are nicio interactiune de inchis, deci nici mesaj de confirmare."""
     st = _fresh_state()
     st.queue = []
     ctx = _FakeCtx(_FakeVoiceClient(playing=True))
     with _Wiring() as w:
         asyncio.run(w.bot.registry['play'](ctx, search='ceva'))
     assert ctx.deferred == 0, 'a incercat sa confirme o interactiune inexistenta'
+    assert not any('Caut' in str(m) for m in ctx.sent), (
+        f'a adaugat un mesaj de confirmare inutil la !play: {ctx.sent}')
 
 
 def test_the_command_tree_is_no_longer_wiped_before_syncing():

@@ -12,7 +12,7 @@ import discord
 from music.config import (FFMPEG_OPTS, cookies_available, log,
                           make_search_opts)
 from music.state import get_state, guild_states, loading, set_autoplay
-from music.utils import (cleanup_file, format_time, item_title,
+from music.utils import (DISCORD_ERRORS, cleanup_file, format_time, item_title,
                          safe_delete, suggest_tracks)
 from music.autoplay import prefill_autoplay_queue
 from music import diag
@@ -160,13 +160,19 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
     @discord.app_commands.autocomplete(search=_suggest_played)
     async def play(ctx, *, search: str):
         # Un slash command trebuie confirmat in 3 secunde, altfel Discord il declara
-        # eșuat — iar rezolvarea unei piese poate dura zeci de secunde. `defer` ține
-        # interactiunea deschisa. `ctx.interaction` e None cand vine prin `!play`.
+        # eșuat — iar rezolvarea unei piese poate dura zeci de secunde.
+        #
+        # Un mesaj REAL, nu `defer()`: cu defer, interactiunea intra in "Gogu is
+        # thinking..." si rămâne acolo pana la un followup. Iar exista cai care nu
+        # trimit niciun mesaj (o eroare deduplicata, o redare intrerupta), deci
+        # "thinking" rămânea pe ecran pentru totdeauna. Un raspuns imediat inchide
+        # interactiunea o data pentru totdeauna, si de acolo incolo calea e identica
+        # cu cea de la `!play`. `ctx.interaction` e None cand vine prin prefix.
         if ctx.interaction is not None:
             try:
-                await ctx.defer()
-            except discord.HTTPException as e:
-                log.debug(f"Nu am putut amana raspunsul la /play: {e}")
+                await ctx.send(f"🔎 Caut: {item_title(search, 80)}", delete_after=15)
+            except DISCORD_ERRORS as e:
+                log.warning(f"Nu am putut confirma /play: {e}")
         await safe_delete(ctx.message)
         search, reason = sanitize_query(search)
         if reason:

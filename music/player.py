@@ -8,8 +8,9 @@ from music.config import (FFMPEG_OPTS, cookies_available, promote_cookies,
 from music.resolve import (cached_for, resolve_from_url, search_to_url,
                            video_id)
 from music.state import begin_loading, end_loading, get_state
-from music.utils import (cleanup_file, item_title, read_track_meta,
-                         trim_download_cache, write_track_meta)
+from music.utils import (DISCORD_ERRORS, cleanup_file, item_title,
+                         read_track_meta, trim_download_cache,
+                         write_track_meta)
 from music.autoplay import prefill_autoplay_queue
 from music.diag import scrub as _scrub
 from music.errors import diagnose_error
@@ -698,12 +699,17 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         return await process_play(ctx, query, is_radio=is_radio,
                                   after_rollback=True)
 
-    if state._last_notified_error != error_type:
+    # Dedup-ul e pentru redarile AUTOMATE: cand radio-ul arde o coada intreaga cu
+    # aceeasi cauza, un mesaj per piesa e spam. O piesa pe care a cerut-o un om
+    # primeste insa mereu un raspuns — altfel comanda lui pare pur si simplu
+    # ignorata. Pe `/play` era chiar mai rau: interactiunea rămânea in "Gogu is
+    # thinking..." pentru totdeauna, fiindca al doilea eșec identic nu trimitea nimic.
+    if state._last_notified_error != error_type or not is_radio:
         state._last_notified_error = error_type
         try:
             await ctx.send(user_msg, delete_after=60)
-        except discord.HTTPException:
-            pass
+        except DISCORD_ERRORS as e:
+            log.warning(f"Nu am putut raporta eroarea utilizatorului: {e}")
 
     await asyncio.sleep(min(2 * state._consecutive_errors, 15))
     if state.autoplay or state.queue:
