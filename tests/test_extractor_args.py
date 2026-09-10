@@ -15,7 +15,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import yt_dlp
 
-from music.config import YDL_OPTS_DOWNLOAD, YDL_OPTS_SEARCH, yt_client_args
+from music import resolve
+from music.config import (YDL_OPTS_DOWNLOAD, YDL_OPTS_SEARCH,
+                          yt_client_args)
 
 
 def _resolved_clients(extractor_args):
@@ -77,8 +79,8 @@ def test_every_client_can_get_a_po_token_from_bgutil():
     # schimbare in player trecea nedetectata — exact regresia pe care testul
     # trebuie sa o previna.
     from music import player
-    for name, chain in (('COOKIE_CHAIN', player.COOKIE_CHAIN),
-                        ('GUEST_CHAIN', player.GUEST_CHAIN)):
+    for name, chain in (('COOKIE_CHAIN', resolve.COOKIE_CHAIN),
+                        ('GUEST_CHAIN', resolve.GUEST_CHAIN)):
         assert chain, f'{name} e gol'
         for clients, _use_cookies in chain:
             check(name, list(clients))

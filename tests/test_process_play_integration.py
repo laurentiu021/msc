@@ -18,7 +18,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from music import player, state as state_mod
+from music import player, resolve, state as state_mod, ytdlp as ytdlp_mod
 from music.state import GuildState
 
 
@@ -78,8 +78,8 @@ class _Harness:
 
     def __enter__(self):
         self.saved = {a: getattr(player, a, None) for a in self.ATTRS}
-        self.saved_ytdlp = (player.ytdlp.extract,
-                            player.ytdlp.extract_and_prepare_filename)
+        self.saved_ytdlp = (ytdlp_mod.extract,
+                            ytdlp_mod.extract_and_prepare_filename)
         self.saved_ffmpeg = player.discord.FFmpegOpusAudio
 
         async def fake_extract(opts, query, download=False, loop=None, stage=''):
@@ -116,8 +116,8 @@ class _Harness:
         async def noop(*a, **k):
             return None
 
-        player.ytdlp.extract = fake_extract
-        player.ytdlp.extract_and_prepare_filename = fake_download
+        ytdlp_mod.extract = fake_extract
+        ytdlp_mod.extract_and_prepare_filename = fake_download
         player.discord.FFmpegOpusAudio = _FakeSource
         player.update_player_ui = noop
         player.start_timeout = lambda *a, **k: self.timeouts.append(a)
@@ -130,7 +130,7 @@ class _Harness:
     def __exit__(self, *exc):
         for a, v in self.saved.items():
             setattr(player, a, v)
-        player.ytdlp.extract, player.ytdlp.extract_and_prepare_filename = self.saved_ytdlp
+        ytdlp_mod.extract, ytdlp_mod.extract_and_prepare_filename = self.saved_ytdlp
         player.discord.FFmpegOpusAudio = self.saved_ffmpeg
         return False
 
@@ -470,11 +470,11 @@ def test_search_with_everything_filtered_says_so_plainly():
 
 
 def test_unplayable_reason_passes_normal_tracks():
-    assert player._unplayable_reason(
+    assert resolve.unplayable_reason(
         {'duration': 200, 'live_status': None}) is None
-    assert player._unplayable_reason({'duration': 200}) is None
+    assert resolve.unplayable_reason({'duration': 200}) is None
     # Fara durata (unele extractii nu o dau) nu inventam un refuz.
-    assert player._unplayable_reason({'title': 'x'}) is None
+    assert resolve.unplayable_reason({'title': 'x'}) is None
 
 
 def test_an_explicit_short_link_is_still_played():
@@ -483,11 +483,11 @@ def test_an_explicit_short_link_is_still_played():
     is_clean o aplica la cautare si autoplay ca sa nu culegem shorts si teasere.
     Pe un link explicit de 20 de secunde, singurul lucru corect e sa il redam.
     """
-    assert player._unplayable_reason({'duration': 20, 'live_status': None}) is None
+    assert resolve.unplayable_reason({'duration': 20, 'live_status': None}) is None
 
 
 def test_unplayable_reason_catches_upcoming_premieres():
-    assert player._unplayable_reason({'live_status': 'is_upcoming'})
+    assert resolve.unplayable_reason({'live_status': 'is_upcoming'})
 
 
 if __name__ == '__main__':

@@ -22,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from music import autoplay, config, player, ytdlp
+from music import autoplay, config, player, resolve, ytdlp
 from music.state import GuildState
 
 
@@ -74,7 +74,7 @@ def test_text_search_is_flat_then_one_full_extraction():
     extractii complete, adica ~20 de cereri catre YouTube pentru un !play, toate
     in acelasi slot de throttle si acelasi buget de 90s.
     """
-    src = inspect.getsource(player._resolve_query_to_url)
+    src = inspect.getsource(resolve.search_to_url)
     assert 'extract_flat=True' in src, 'cautarea de text nu mai e flat'
     # si nu mai luam orbeste primul rezultat cand niciunul nu trece filtrul
     assert 'is_clean' in src
@@ -89,7 +89,7 @@ def test_format_list_is_short_and_without_duplicates():
     ']' — deci in clipa in care lista a devenit una de tupluri, testul a
     continuat sa treaca masurand fragmente de text fara sens.
     """
-    attempts = player.DOWNLOAD_ATTEMPTS
+    attempts = resolve.DOWNLOAD_ATTEMPTS
     formats = [fmt for fmt, _ in attempts]
     assert 1 <= len(attempts) <= 3, f'prea multe incercari: {len(attempts)}'
     assert len(set(formats)) == len(formats), 'formate duplicate'
@@ -103,7 +103,7 @@ def test_the_hls_fallback_asks_for_audio_not_video():
     `-vn` arunca imaginea abia DUPA ce a ajuns pe disc, deci un bot audio
     descarca zeci de MB de video pe un IP care ne limiteaza deja.
     """
-    fallbacks = [(fmt, cap) for fmt, cap in player.DOWNLOAD_ATTEMPTS
+    fallbacks = [(fmt, cap) for fmt, cap in resolve.DOWNLOAD_ATTEMPTS
                  if 'm3u8' in fmt]
     assert fallbacks, 'nu mai exista nicio incercare HLS'
     for fmt, cap in fallbacks:
@@ -114,7 +114,6 @@ def test_the_hls_fallback_asks_for_audio_not_video():
 
 def test_a_rate_limit_does_not_trigger_a_second_format_attempt():
     """Acelasi 429 nu devine alt raspuns cu alt selector de format."""
-    st = GuildState()
     for message, expected in (
             ('HTTP Error 429: Too Many Requests', False),
             ("Sign in to confirm you're not a bot. Use --cookies", False),
@@ -122,13 +121,11 @@ def test_a_rate_limit_does_not_trigger_a_second_format_attempt():
             ('Requested format is not available', True),
             ('ceva ce nu am mai vazut', True),
     ):
-        st.last_raw_error = message
-        got = player._worth_another_format(st)
+        got = resolve.worth_another_format(message)
         assert got is expected, f'{message[:40]!r}: {got} != {expected}'
 
     # Fara nicio eroare raportata = respins de filtru, nu problema de format.
-    st.last_raw_error = None
-    assert player._worth_another_format(st) is False
+    assert resolve.worth_another_format(None) is False
 
 
 def test_ffmpeg_options_do_not_override_the_probed_bitrate():

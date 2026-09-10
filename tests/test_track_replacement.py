@@ -26,7 +26,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from music import player, state as state_mod
+from music import player, state as state_mod, ytdlp as ytdlp_mod
 from music.state import GuildState
 
 
@@ -92,8 +92,8 @@ class _Harness:
         self.saved = {a: getattr(player, a, None) for a in
                       ('update_player_ui', 'start_timeout', 'cancel_timeout',
                        'play_next', 'cleanup_file', '_loop')}
-        self.saved_ytdlp = (player.ytdlp.extract,
-                            player.ytdlp.extract_and_prepare_filename)
+        self.saved_ytdlp = (ytdlp_mod.extract,
+                            ytdlp_mod.extract_and_prepare_filename)
         self.saved_ffmpeg = player.discord.FFmpegOpusAudio
 
         async def fake_extract(opts, query, download=False, loop=None, stage=''):
@@ -117,8 +117,8 @@ class _Harness:
         async def noop(*a, **k):
             return None
 
-        player.ytdlp.extract = fake_extract
-        player.ytdlp.extract_and_prepare_filename = fake_download
+        ytdlp_mod.extract = fake_extract
+        ytdlp_mod.extract_and_prepare_filename = fake_download
         player.discord.FFmpegOpusAudio = _Src
         player.update_player_ui = noop
         player.start_timeout = lambda *a, **k: None
@@ -131,7 +131,7 @@ class _Harness:
     def __exit__(self, *e):
         for a, v in self.saved.items():
             setattr(player, a, v)
-        player.ytdlp.extract, player.ytdlp.extract_and_prepare_filename = self.saved_ytdlp
+        ytdlp_mod.extract, ytdlp_mod.extract_and_prepare_filename = self.saved_ytdlp
         player.discord.FFmpegOpusAudio = self.saved_ffmpeg
         return False
 

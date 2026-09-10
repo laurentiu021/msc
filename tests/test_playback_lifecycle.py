@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from music import player
+from music import player, ytdlp as ytdlp_mod
 from music.state import GuildState
 
 
@@ -53,14 +53,6 @@ class _FakeCtx:
 
     async def send(self, *a, **k):
         return None
-
-
-def _patch(monkey):
-    """Inlocuieste temporar atribute de modul; intoarce functia de restaurare."""
-    saved = {(m, n): getattr(m, n, None) for m, n in monkey}
-    for (m, n), v in monkey.items() if isinstance(monkey, dict) else []:
-        pass
-    return saved
 
 
 def test_stale_after_play_does_nothing():
@@ -127,7 +119,7 @@ def _run_process_play_raising(exc):
         return None
 
     orig = {
-        'extract': player._yt_extract_info,
+        'extract': ytdlp_mod.extract,
         'cleanup': player.cleanup_file,
         'next': player.play_next,
         'timeout': player.start_timeout,
@@ -135,7 +127,7 @@ def _run_process_play_raising(exc):
         'loop': player._loop,
         'sleep': asyncio.sleep,
     }
-    player._yt_extract_info = boom
+    ytdlp_mod.extract = boom
     player.cleanup_file = lambda *a, **k: None
     player.play_next = lambda *a, **k: None
     player.start_timeout = lambda *a, **k: None
@@ -156,7 +148,7 @@ def _run_process_play_raising(exc):
     try:
         return state, drive()
     finally:
-        player._yt_extract_info = orig['extract']
+        ytdlp_mod.extract = orig['extract']
         player.cleanup_file = orig['cleanup']
         player.play_next = orig['next']
         player.start_timeout = orig['timeout']
@@ -175,9 +167,9 @@ def test_is_loading_cleared_on_cancellation():
     async def noop(*a, **k):
         return None
 
-    saved = (player._yt_extract_info, player.cleanup_file, player.play_next,
+    saved = (ytdlp_mod.extract, player.cleanup_file, player.play_next,
              player.start_timeout, player.update_player_ui, player._loop)
-    player._yt_extract_info = boom
+    ytdlp_mod.extract = boom
     player.cleanup_file = lambda *a, **k: None
     player.play_next = lambda *a, **k: None
     player.start_timeout = lambda *a, **k: None
@@ -197,7 +189,7 @@ def test_is_loading_cleared_on_cancellation():
         assert state.is_loading is False, (
             'is_loading a rămas True dupa anulare: botul ar tacea la orice !play')
     finally:
-        (player._yt_extract_info, player.cleanup_file, player.play_next,
+        (ytdlp_mod.extract, player.cleanup_file, player.play_next,
          player.start_timeout, player.update_player_ui, player._loop) = saved
 
 
@@ -211,9 +203,9 @@ def test_is_loading_cleared_on_ordinary_error():
     async def noop(*a, **k):
         return None
 
-    saved = (player._yt_extract_info, player.cleanup_file, player.play_next,
+    saved = (ytdlp_mod.extract, player.cleanup_file, player.play_next,
              player.start_timeout, player.update_player_ui, player._loop)
-    player._yt_extract_info = boom
+    ytdlp_mod.extract = boom
     player.cleanup_file = lambda *a, **k: None
     player.play_next = lambda *a, **k: None
     player.start_timeout = lambda *a, **k: None
@@ -226,7 +218,7 @@ def test_is_loading_cleared_on_ordinary_error():
         assert state.is_loading is False, 'is_loading a rămas True dupa o eroare obisnuita'
         assert state._consecutive_errors == 1
     finally:
-        (player._yt_extract_info, player.cleanup_file, player.play_next,
+        (ytdlp_mod.extract, player.cleanup_file, player.play_next,
          player.start_timeout, player.update_player_ui, player._loop) = saved
 
 

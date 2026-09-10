@@ -1,0 +1,367 @@
+"""Negocierea cu yt-dlp: de la o interogare la un fisier pe disc.
+
+Erau 122 de linii in mijlocul lui `process_play`, care avea 300. Sunt exact
+partea care trebuie re-reglata la fiecare schimbare a YouTube-ului, si totodata
+cea mai greu de testat: ca sa verifici o singura afirmatie despre opts-urile de
+descarcare trebuia un client de voce fals, un ctx fals si un harness care
+inlocuia sase globale din player, doua functii din ytdlp si FFmpegOpusAudio.
+
+Aici nu exista `ctx`, nici `GuildState`, nici discord: intra o interogare, iese un
+`Resolved`. Asta scoate din cod si un defect prin construcție —
+`state.last_raw_error` era o cutie poștala intre piese, folosita ca sa treaca text
+peste o granita raise/except, niciodata golita la succes, si preferata excepției
+reale la raportare. Acum textul brut de la yt-dlp se intoarce ca valoare.
+
+Refuzurile (live, durata) NU se ridica: se intorc in `reject_reason`. Cine cheama
+decide daca asta e o eroare sau doar o piesa sarita.
+"""
+import asyncio
+import os
+from dataclasses import dataclass, field
+
+from music import ytdlp
+from music.config import (HLS_MAX_BYTES, MAX_DOWNLOAD_BYTES, MAX_TRACK_SECONDS,
+                          clear_ydl_reason, cookies_available,
+                          count_real_formats, has_real_formats,
+                          last_ydl_reason, log, make_download_opts,
+                          make_search_opts, yt_client_args, WEB_CLIENTS)
+from music.errors import diagnose_error
+from music.utils import cached_download, is_clean, item_title
+
+# Lanturile de clienti. Cerem ambii clienti in ACEEASI cerere: yt-dlp cumuleaza
+# formatele, deci pool-ul e mult mai mare pe acelasi numar de cereri. Masurat in
+# producție: mweb singur a dat 5 formate / 1 redabil, perechea a dat 40 / 13. Un
+# singur format redabil e o marja prea subtire pentru redare.
+COOKIE_CHAIN = [(WEB_CLIENTS, True)]
+GUEST_CHAIN = [(WEB_CLIENTS, False)]
+
+# (selector de format, plafon de octeti), in ordinea incercarilor.
+#
+# A doua incercare cere AUDIO din HLS, nu `best`. `best[protocol=m3u8*]` e o
+# redare muxata video+audio, iar `-vn` arunca imaginea abia DUPA ce a ajuns pe
+# disc: un bot audio descarca astfel zeci de MB de video pe un IP care ne
+# limiteaza. Plafonul ei e mai strans, fiindca HLS-ul e o plasa de siguranta, nu
+# calea normala.
+DOWNLOAD_ATTEMPTS = [
+    ('bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
+     MAX_DOWNLOAD_BYTES),
+    ('bestaudio[protocol^=m3u8]/bestaudio*[protocol^=m3u8]/best[protocol^=m3u8]',
+     HLS_MAX_BYTES),
+]
+
+# Extensiile pe care le poate scrie yt-dlp cand `prepare_filename` a ghicit alta.
+_AUDIO_EXTS = ('.opus', '.m4a', '.webm', '.mp3', '.ogg')
+
+
+@dataclass
+class Resolved:
+    """Rezultatul unei rezolvari. Fara efecte pe stare, doar date."""
+
+    url: str = ''
+    info: dict = field(default_factory=dict)
+    download_info: dict | None = None
+    filename: str | None = None
+    # Textul BRUT de la yt-dlp, pentru diagnoza. Se intoarce, nu se scrie in
+    # stare: asa nu poate fi raportat drept cauza pentru o piesa de mai tarziu.
+    raw_error: str | None = None
+    # Refuzat de reguli (live, durata, filtre) — nu o defectiune.
+    reject_reason: str | None = None
+    # Utilizatorul a oprit redarea intre etape; nici eroare, nici refuz.
+    interrupted: bool = False
+    # Clientul si modul de cookies care au produs formate redabile.
+    client: tuple | None = None
+    used_cookies: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.filename and os.path.exists(self.filename))
+
+
+def unplayable_reason(info) -> str | None:
+    """Motiv pentru care piesa nu are ce sa caute in redare, sau None.
+
+    Se aplica si pe URL-uri directe, nu doar pe rezultatele de cautare. Pana
+    acum un link de live sau de podcast de trei ore trecea intreaga extractie,
+    intra in bucla de descarcare, era respins tacut de match_filter, si
+    utilizatorul primea "Niciun format nu a reusit descarcarea" — un mesaj care
+    arata ca o defectiune, nu ca o regula.
+
+    Verifica DOAR ce e o limita operationala reala: un live nu se termina
+    niciodata, iar peste MAX_TRACK_SECONDS trecem bugetul de descarcare si limita
+    de fisier. Blocklist-ul, similaritatea si durata MINIMA din is_clean servesc
+    alegerea AUTOMATA (cautare, autoplay), unde scopul e sa nu culegem teasere si
+    shorts; cand cineva da explicit un link de 20 de secunde, singurul lucru
+    corect e sa il redam.
+    """
+    if info.get('is_live') or info.get('live_status') in ('is_live', 'is_upcoming'):
+        return "E un live, nu o piesa"
+    duration = info.get('duration')
+    if duration and duration > MAX_TRACK_SECONDS:
+        return (f"Piesa are {int(duration // 60)} minute, limita e "
+                f"{MAX_TRACK_SECONDS // 60}")
+    return None
+
+
+def worth_another_format(raw_error: str | None) -> bool:
+    """Merita a doua incercare cu alt selector de format?
+
+    Doar cand eșecul e chiar despre formate. Un 429, un cookie expirat sau un
+    video indisponibil dau acelasi raspuns oricat de diferit ai scrie selectorul,
+    deci o a doua rundă e doar o cerere in plus pe un IP deja limitat — si inca
+    una cu buget propriu de 240 de secunde.
+    """
+    if not raw_error:
+        # Nicio eroare raportata inseamna respins de filtru (durata, live), nu o
+        # problema de format.
+        return False
+    error_type, _ = diagnose_error(raw_error)
+    worth = error_type in ('format', 'unknown')
+    if not worth:
+        log.info(f"Nu mai incerc alt format: cauza e '{error_type}', "
+                 f"nu selectorul de format")
+    return worth
+
+
+def video_id(url: str) -> str | None:
+    """ID-ul de videoclip dintr-un URL de YouTube, sau None.
+
+    Cheia de cache: `outtmpl` e deja `%(id)s.%(ext)s`, deci numele fisierului de
+    pe disc ESTE ID-ul.
+    """
+    text = str(url or '')
+    if 'v=' in text:
+        return text.split('v=')[-1].split('&')[0] or None
+    if 'youtu.be/' in text:
+        return text.split('youtu.be/')[-1].split('?')[0] or None
+    return None
+
+
+async def search_to_url(query: str, *, avoid_title: str = '',
+                        loop=None) -> tuple[str | None, str | None]:
+    """(url, motiv_refuz). Un URL trece direct; un text devine o cautare FLAT.
+
+    Cautarea flat intoarce doar metadata de lista (id, titlu, durata,
+    live_status), fara sa atinga pagina si API-ul player pentru fiecare rezultat.
+    Cu `default_search='ytsearch5'` si fara extract_flat, yt-dlp extragea integral
+    toate cele cinci rezultate: aproximativ 20 de cereri pentru un singur !play,
+    toate in acelasi slot de throttle si acelasi buget de 90s.
+    """
+    if str(query).startswith(('http://', 'https://')):
+        return query, None
+
+    opts = make_search_opts(
+        with_cookies=cookies_available(),
+        extract_flat=True,
+        extractor_args=yt_client_args(*WEB_CLIENTS),
+    )
+    info = await ytdlp.extract(opts, query, loop=loop, stage='search_flat')
+    entries = [e for e in ((info or {}).get('entries') or []) if e]
+    if not entries:
+        return None, None            # nimic gasit: eroare, nu refuz
+
+    for entry in entries:
+        if is_clean(entry.get('title'), entry.get('duration'), avoid_title):
+            log.info(f"Ales din {len(entries)} rezultate: {item_title(entry, 60)}")
+            url = entry.get('url') or entry.get('id')
+            if url and not str(url).startswith('http'):
+                url = f"https://www.youtube.com/watch?v={url}"
+            return url, None
+        log.info(f"Sarit (filtru): {item_title(entry, 50)} "
+                 f"durata={entry.get('duration')} live={entry.get('live_status')}")
+
+    # Niciunul nu trece filtrul. Inainte se lua orbeste entries[0], deci filtrul
+    # nu putea respinge nimic si un live de 3 ore ajungea in redare.
+    return None, (f"toate cele {len(entries)} rezultate au fost filtrate "
+                  f"(live, prea scurte sau prea lungi)")
+
+
+async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple | None,
+                                                              bool, str | None]:
+    """Lantul de clienti: (candidat, client_reusit, cu_cookies, eroare_bruta).
+
+    Cookies primele: de pe IP-ul de datacenter al Railway calea de guest ajunge la
+    429 pe webpage -> lipsa Visitor Data -> niciun GVS PO Token -> zero formate
+    redabile. Guest rămâne in coada pentru cand IP-ul nu e limitat.
+    """
+    chains = COOKIE_CHAIN + GUEST_CHAIN if cookies_available() else GUEST_CHAIN
+    selected = None
+    raw_error = None
+    for clients, use_cookies in chains:
+        label = '+'.join(clients)
+        if use_cookies and not cookies_available():
+            continue
+        search_opts = make_search_opts(
+            with_cookies=use_cookies,
+            extractor_args=yt_client_args(*clients),
+            default_search=None,          # avem deja un URL
+        )
+        try:
+            info = await ytdlp.extract(search_opts, target_url, loop=loop,
+                                       stage=f"extract_{label}")
+            entries = (info or {}).get('entries') or [info]
+            candidate = entries[0] if entries else None
+            if not candidate:
+                continue
+            fmts = candidate.get('formats', [])
+            log.info(f"[{label}|cookies={use_cookies}] Video "
+                     f"{candidate.get('id','?')}: {len(fmts)} formats "
+                     f"({count_real_formats(fmts)} redabile)")
+            selected = candidate
+            if has_real_formats(fmts):
+                log.info(f"Formate redabile cu client={label}, cookies={use_cookies}")
+                return selected, clients, use_cookies, raw_error
+        except Exception as e:
+            raw_error = str(e)[:600]
+            log.warning(f"Extractia a eșuat cu client={label}: {e}")
+    return selected, None, False, raw_error
+
+
+async def _retry_for_formats(selected: dict, web_url: str,
+                             loop) -> tuple[dict | None, str | None]:
+    """O a doua extractie cand nu avem niciun format redabil.
+
+    Valoarea ei nu e ca "poate merge acum": e ca `ignore_no_formats_error=False`
+    scoate motivul REAL ("Sign in to confirm you're not a bot" era doar warning),
+    iar acela ajunge la diagnoza si la utilizator.
+    """
+    vid_id = selected.get('id', '?')
+    log.warning(f"0 formate redabile pentru {vid_id} — aștept 5s si reincerc")
+    await asyncio.sleep(5)
+    retry_url = web_url if web_url.startswith('http') else \
+        f"https://www.youtube.com/watch?v={vid_id}"
+    retry_opts = make_search_opts(
+        with_cookies=cookies_available(),
+        extractor_args=yt_client_args(*WEB_CLIENTS),
+        default_search=None,
+        ignore_no_formats_error=False,
+    )
+    try:
+        retry_info = await ytdlp.extract(retry_opts, retry_url, loop=loop,
+                                         stage="retry_mweb")
+        retry_fmts = (retry_info or {}).get('formats', [])
+        log.info(f"[retry] Video {vid_id}: {len(retry_fmts)} formate "
+                 f"({count_real_formats(retry_fmts)} redabile)")
+        if has_real_formats(retry_fmts):
+            log.info(f"Reincercarea a reusit pentru {vid_id}")
+            return retry_info, None
+        log.warning(f"Si reincercarea a dat 0 formate redabile pentru {vid_id}")
+        return None, None
+    except Exception as e:
+        log.warning(f"Reincercarea a eșuat pentru {vid_id}: {e}")
+        return None, str(e)[:600]
+
+
+async def _download(web_url: str, client: tuple | None, prefer_cookies: bool,
+                    loop, raw_error: str | None) -> tuple[dict | None, str | None, str | None]:
+    """(download_info, filename, eroare_bruta).
+
+    Format-ul in bucla EXTERIOARA, modul de cookies in cea interioara: un 429 sau
+    un cookie expirat nu devine alt raspuns daca intrebi cu alt sir de format,
+    deci varianta cu format-ul in interior putea plati patru extractii complete
+    plus patru transferuri partiale, fiecare cu buget propriu de 240s, pentru
+    aceeasi cauza.
+    """
+    clear_ydl_reason()
+    cookie_order = [True, False] if prefer_cookies else [False, True]
+    dl_info = None
+    filename = None
+    for fmt, size_cap in DOWNLOAD_ATTEMPTS:
+        if filename and os.path.exists(filename):
+            break
+        if fmt != DOWNLOAD_ATTEMPTS[0][0] and not worth_another_format(raw_error):
+            break
+        for use_cookies in cookie_order:
+            if use_cookies and not cookies_available():
+                continue
+            try:
+                overrides = {'format': fmt, 'max_filesize': size_cap}
+                if client:
+                    overrides['extractor_args'] = yt_client_args(*client)
+                dl_opts = make_download_opts(with_cookies=use_cookies, **overrides)
+                log.info(f"Download cookies={use_cookies}, "
+                         f"client={'+'.join(client) if client else 'default'}, "
+                         f"format={fmt}")
+                # O singura instanta YoutubeDL descarca SI construieste numele
+                # fisierului; inainte erau doua, iar cea externa exista doar
+                # pentru prepare_filename.
+                dl_info, filename = await ytdlp.extract_and_prepare_filename(
+                    dl_opts, web_url, loop=loop, stage=f"download_{fmt}")
+                if filename and not os.path.exists(filename):
+                    base = os.path.splitext(filename)[0]
+                    for ext in _AUDIO_EXTS:
+                        if os.path.exists(base + ext):
+                            filename = base + ext
+                            break
+                if filename and os.path.exists(filename):
+                    return dl_info, filename, raw_error
+            except Exception as e:
+                raw_error = str(e)[:600]
+                log.warning(f"Download esuat (cookies={use_cookies}, "
+                            f"fmt='{fmt}'): {e}")
+    return dl_info, filename, raw_error
+
+
+async def resolve_from_url(target_url: str, *, loop=None,
+                           should_continue=None) -> Resolved:
+    """De la un URL de videoclip la un fisier pe disc. Nu atinge nicio stare.
+
+    `should_continue` se consulta intre etape, ca redarea sa poata fi abandonata
+    cand utilizatorul a dat deja `!stop` — inainte se verifica doar la final, dupa
+    ce toate cererile fuseseră deja plătite.
+    """
+    def keep_going() -> bool:
+        return should_continue() if should_continue else True
+
+    resolved = Resolved(url=target_url)
+
+    selected, client, used_cookies, raw_error = await _pick_format_source(
+        target_url, loop)
+    resolved.raw_error = raw_error
+    if not selected:
+        return resolved
+
+    resolved.info = selected
+    resolved.client = client
+    resolved.used_cookies = used_cookies
+    resolved.url = selected.get('webpage_url') or         f"https://www.youtube.com/watch?v={selected.get('id', '')}"
+
+    if not has_real_formats(selected.get('formats', [])):
+        retry_info, retry_error = await _retry_for_formats(selected, resolved.url, loop)
+        if retry_error:
+            resolved.raw_error = retry_error
+        if retry_info:
+            resolved.info = selected = retry_info
+        else:
+            resolved.raw_error = (resolved.raw_error
+                                  or "YouTube a blocat acest video (0 formate reale)")
+            return resolved
+
+    # Regulile se aplica si pe URL-uri directe, nu doar pe cautare.
+    reason = unplayable_reason(selected)
+    if reason:
+        resolved.reject_reason = reason
+        return resolved
+
+    if not keep_going():
+        resolved.interrupted = True
+        return resolved
+
+    resolved.download_info, resolved.filename, resolved.raw_error = await _download(
+        resolved.url, client, used_cookies, loop, resolved.raw_error)
+
+    if not resolved.ok and not resolved.raw_error:
+        # Nicio excepție ridicata: yt-dlp raporteaza refuzul doar prin to_screen,
+        # care fara logger nu scrie nimic. Cu logger avem propozitia lui, care e
+        # mult mai buna decat o presupunere a noastra.
+        resolved.raw_error = last_ydl_reason() or (
+            "yt-dlp nu a scris fisierul si nu a raportat nicio eroare; "
+            f"probabil respins de filtru (live sau durata peste "
+            f"{MAX_TRACK_SECONDS}s)")
+        log.warning(f"Descarcare fara fisier: {resolved.raw_error}")
+    return resolved
+
+
+def cached_for(url: str) -> tuple[str | None, str | None]:
+    """(id, cale_in_cache) pentru un URL. Cale None cand nu avem fisierul."""
+    vid = video_id(url)
+    return vid, (cached_download(vid) if vid else None)

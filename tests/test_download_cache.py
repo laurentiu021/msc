@@ -24,7 +24,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from music import config, player
+from music import config, player, resolve
 from music.state import GuildState
 from music.utils import cached_download, sweep_partials, trim_download_cache
 
@@ -128,12 +128,12 @@ def test_partials_are_swept_at_boot():
 # --- integrare cu calea de redare ---------------------------------------------
 
 def test_the_video_id_is_the_cache_key():
-    assert player._video_id('https://www.youtube.com/watch?v=abc123') == 'abc123'
-    assert player._video_id('https://www.youtube.com/watch?v=abc123&list=RD') == 'abc123'
-    assert player._video_id('https://youtu.be/abc123?t=5') == 'abc123'
-    assert player._video_id('https://example.com/nimic') is None
-    assert player._video_id('') is None
-    assert player._video_id(None) is None
+    assert resolve.video_id('https://www.youtube.com/watch?v=abc123') == 'abc123'
+    assert resolve.video_id('https://www.youtube.com/watch?v=abc123&list=RD') == 'abc123'
+    assert resolve.video_id('https://youtu.be/abc123?t=5') == 'abc123'
+    assert resolve.video_id('https://example.com/nimic') is None
+    assert resolve.video_id('') is None
+    assert resolve.video_id(None) is None
     # Numele fisierului scris de yt-dlp e chiar ID-ul (outtmpl %(id)s.%(ext)s).
     assert '%(id)s' in config.YDL_OPTS_DOWNLOAD['outtmpl']
 
