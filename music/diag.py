@@ -138,8 +138,14 @@ def build(bot, guild_states, *, now=None, pot=None) -> dict:
             'units_spent': yt_api.units_spent(),
             'daily_cap': yt_api.DAILY_UNIT_CAP,
         },
+        # `is not None`, nu adevar: cu `if free_bytes`, un disc PLIN (0 octeti
+        # liberi) devenea acelasi None ca "disk_usage a aruncat OSError", iar
+        # `problems()` sare peste None — deci singura stare de disc care nu producea
+        # nicio linie de avertizare era chiar cea mai rea, si `!health` raspundea la
+        # "de ce nu cânta?" cu "Totul in regula".
         'disk': {'downloads': downloads,
-                 'free_mb': round(free_bytes / 1024 / 1024) if free_bytes else None},
+                 'free_mb': (round(free_bytes / 1024 / 1024)
+                             if free_bytes is not None else None)},
         'limits': {'max_track_sec': MAX_TRACK_SECONDS},
         'guilds_detail': guilds,
     }

@@ -238,6 +238,108 @@ def test_the_search_avoids_repeating_the_current_track():
 
 # --- granita: resolve nu are voie sa stie de stare ---------------------------
 
+# --- bucla de descarcare -----------------------------------------------------
+
+def test_a_download_timeout_stops_the_retries():
+    """Doi scriitori pe ACELASI fisier, si nu exista lock per id.
+
+    `outtmpl` e `%(id)s.%(ext)s`, deci calea de pe disc E cheia de cache. La
+    timeout cererea e abandonata dar thread-ul continua sa descarce, iar bucla
+    trecea imediat la urmatorul mod de cookies cu acelasi url, format si outtmpl.
+    In yt-dlp 2026.8.19 al doilea scriitor vede `.part`-ul, seteaza `resume_len` si
+    `open_mode='ab'` si adauga in fisierul in care primul inca scrie; poate chiar
+    decide ca e complet si sa redenumeasca un `.part` care inca creste peste numele
+    final din cache. Excluderea `.part` din `cached_download` nu apara de asta.
+    """
+    from music.errors import YtdlpTimeout
+
+    attempts = []
+
+    def timeout_download(stage, opts):
+        attempts.append(bool(opts.get('cookiefile')))
+        return YtdlpTimeout('download', 240)
+
+    saved = config._cookies_path
+    config._cookies_path = 'cookies-de-test.txt'
+    try:
+        with _Ytdlp(download=timeout_download) as yt:
+            result = _run(resolve.resolve_from_url(VIDEO))
+    finally:
+        config._cookies_path = saved
+
+    downloads = [s for s in yt.stages if s.startswith('download')]
+    assert len(downloads) == 1, (
+        f'a mai incercat dupa timeout, in acelasi fisier: {downloads}')
+    assert result.filename is None
+    assert result.raw_error and 'depasit' in result.raw_error, result.raw_error
+
+
+def test_the_download_error_is_not_the_extraction_error():
+    """Eroarea de la extractie era transmisa in bucla de descarcare ca valoare de
+    start, deci poarta HLS decidea pe baza unei erori de la o cerere complet
+    diferita, iar garda din apelant nu ajungea sa consulte `last_ydl_reason()`."""
+    def extract(stage, opts):
+        if stage == 'retry_mweb':
+            return {'id': 'vid123', 'title': 'T', 'duration': 200,
+                    'webpage_url': VIDEO, 'formats': PLAYABLE}
+        # Primul lant eșueaza cu o eroare de FORMAT...
+        return {'id': 'vid123', 'title': 'T', 'duration': 200,
+                'webpage_url': VIDEO, 'formats': PLAYABLE}
+
+    def download(stage, opts):
+        # ...iar descarcarea eșueaza cu altceva complet.
+        return RuntimeError('HTTP Error 429: Too Many Requests')
+
+    with _Ytdlp(extract=extract, download=download) as yt:
+        result = _run(resolve.resolve_from_url(VIDEO))
+
+    assert result.raw_error and '429' in result.raw_error, (
+        f'a raportat altceva decat eroarea descarcarii: {result.raw_error}')
+    downloads = [s for s in yt.stages if s.startswith('download')]
+    assert len(downloads) == 1, (
+        f'un 429 nu devine alt raspuns cu alt selector de format: {downloads}')
+
+
+def test_a_recovered_retry_hands_its_own_cookie_mode_to_the_download():
+    """Reincercarea foloseste WEB_CLIENTS si cookies_available(), dar apelantul
+    pastra `(None, False)` de la selectia care eșuase — deci descarcarea pornea cu
+    exact modul de cookies care abia dăduse 0 formate redabile."""
+    empty = {'id': 'vid123', 'title': 'T', 'duration': 200,
+             'webpage_url': VIDEO, 'formats': []}
+    recovered = {'id': 'vid123', 'title': 'T', 'duration': 200,
+                 'webpage_url': VIDEO, 'formats': PLAYABLE}
+
+    def extract(stage, opts):
+        return recovered if stage == 'retry_mweb' else empty
+
+    modes = []
+
+    def download(stage, opts):
+        modes.append(bool(opts.get('cookiefile')))
+        return {'id': 'vid123', 'ext': 'opus'}, __file__
+
+    saved = config._cookies_path
+    saved_sleep = resolve.asyncio.sleep
+    config._cookies_path = 'cookies-de-test.txt'
+
+    async def no_sleep(_seconds):
+        return None
+
+    resolve.asyncio.sleep = no_sleep
+    try:
+        with _Ytdlp(extract=extract, download=download):
+            result = _run(resolve.resolve_from_url(VIDEO))
+    finally:
+        config._cookies_path = saved
+        resolve.asyncio.sleep = saved_sleep
+
+    assert result.client == config.WEB_CLIENTS, result.client
+    assert result.used_cookies is True, (
+        'reincercarea a folosit jar-ul, dar rezultatul zice ca nu')
+    assert modes and modes[0] is True, (
+        f'descarcarea a pornit cu modul care dăduse 0 formate: {modes}')
+
+
 def test_resolve_knows_nothing_about_guild_state_or_discord():
     """Motivul intregii separari; un import ar aduce inapoi cuplajul.
 

@@ -18,7 +18,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from music import (config, player, resolve, state as state_mod,
+from music import (config, player, resolve, state as state_mod, utils,
                    ytdlp as ytdlp_mod)
 from music.state import GuildState
 
@@ -474,8 +474,38 @@ def test_unplayable_reason_passes_normal_tracks():
     assert resolve.unplayable_reason(
         {'duration': 200, 'live_status': None}) is None
     assert resolve.unplayable_reason({'duration': 200}) is None
-    # Fara durata (unele extractii nu o dau) nu inventam un refuz.
-    assert resolve.unplayable_reason({'title': 'x'}) is None
+
+
+def test_the_pre_check_agrees_exactly_with_the_download_filter():
+    """Doua propozitii despre acelasi lucru nu erau echivalente.
+
+    Verificarea zicea `duration > MAX` iar filtrul de la descarcare
+    `duration < MAX`, deci o piesa de EXACT MAX_TRACK_SECONDS — si orice piesa fara
+    durata raportata — trecea verificarea, plătea o extractie si o descarcare
+    completa, si era apoi refuzata tacut de yt-dlp: ajungea la utilizator ca
+    "niciun format nu a reusit descarcarea", adica o defectiune, nu o regula.
+
+    Verificat pe yt-dlp 2026.8.19: filtrul respinge 660, cheia lipsa si None.
+    """
+    import yt_dlp
+
+    from music.config import MATCH_FILTER_EXPR, MAX_TRACK_SECONDS
+
+    ytdlp_filter = yt_dlp.utils.match_filter_func(MATCH_FILTER_EXPR)
+    cases = [
+        {'id': 'a', 'title': 'T', 'duration': MAX_TRACK_SECONDS - 1},
+        {'id': 'b', 'title': 'T', 'duration': MAX_TRACK_SECONDS},
+        {'id': 'c', 'title': 'T', 'duration': MAX_TRACK_SECONDS + 1},
+        {'id': 'd', 'title': 'T'},                       # cheia lipseste
+        {'id': 'e', 'title': 'T', 'duration': None},
+        {'id': 'f', 'title': 'T', 'duration': 20},       # link scurt explicit
+    ]
+    for info in cases:
+        refused_by_ytdlp = ytdlp_filter(dict(info)) is not None
+        refused_by_us = resolve.unplayable_reason(dict(info)) is not None
+        assert refused_by_us == refused_by_ytdlp, (
+            f"durata={info.get('duration', 'LIPSA')}: verificarea zice "
+            f"{refused_by_us}, yt-dlp zice {refused_by_ytdlp}")
 
 
 def test_an_explicit_short_link_is_still_played():
@@ -489,6 +519,88 @@ def test_an_explicit_short_link_is_still_played():
 
 def test_unplayable_reason_catches_upcoming_premieres():
     assert resolve.unplayable_reason({'live_status': 'is_upcoming'})
+
+
+def test_a_cache_hit_keeps_the_duration_and_thumbnail():
+    """Un hit pornea cu durata 0 si fara thumbnail.
+
+    Panoul pierdea lungimea si tot rândul de timp rămas (ui.py conditioneaza tot
+    blocul pe `state.last_duration > 0`), `!seek` rămânea fara plafon (garda e
+    scrisa `if state.last_duration and ...`), iar fiindca lipseau si views/likes
+    fiecare hit cumpara o unitate de Data API plus un al doilea edit de panou.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        st = _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient())
+        saved_dir = utils.DOWNLOAD_DIR
+        utils.DOWNLOAD_DIR = tmp
+        try:
+            with _Harness(target) as h:
+                h.download_info = {'id': 'vid123', 'ext': 'opus', 'duration': 213,
+                                   'thumbnail': 'http://t/max.jpg',
+                                   'view_count': 4321, 'like_count': 99}
+                asyncio.run(player.process_play(ctx, 'ceva'))
+                assert st.last_duration == 213, st.last_duration
+
+                # A doua redare, prin cache: history se goleste ca la !stop, deci
+                # singura sursa rămâne insoțitorul de langa fisier.
+                st.history.clear()
+                st.last_url = None
+                st.current_file = None
+                st.last_duration = 0
+                st.last_thumbnail = None
+                st.last_views = 0
+                extracts = len(h.extract_calls)
+                downloads = len(h.download_calls)
+                asyncio.run(player.process_play(
+                    ctx, 'https://www.youtube.com/watch?v=vid123'))
+                assert len(h.download_calls) == downloads, 'a re-descarcat'
+                assert len(h.extract_calls) == extracts, 'a re-extras'
+        finally:
+            utils.DOWNLOAD_DIR = saved_dir
+
+        assert st.last_duration == 213, (
+            f'hit-ul de cache a pierdut durata: {st.last_duration}')
+        assert st.last_thumbnail == 'http://t/max.jpg', st.last_thumbnail
+        assert st.last_views == 4321, (
+            f'hit-ul a pierdut statisticile, deci cumpara o unitate de API: '
+            f'{st.last_views}')
+
+
+def test_a_failure_reports_its_own_reason_not_the_previous_track_s():
+    """Verdictul unei piese nu are voie sa supravietuiasca piesei.
+
+    "0 formate reale" trăia doar ca mesaj de excepție; de cand se scrie in stare,
+    urmatoarea piesa care eșua fara text brut propriu era diagnosticata cu textul
+    rămas — si pentru ca diagnoza cadea pe acelasi `error_type`, dedup-ul inghitea
+    si mesajul catre utilizator: al doilea eșec nu producea NIMIC pe Discord.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        stale = "Sign in to confirm you're not a bot. Use --cookies"
+        st = _fresh_state()
+        st.last_raw_error = stale
+        ctx = _FakeCtx(_FakeVoiceClient())
+        # Extractia nu intoarce niciun candidat si nu ridica nicio excepție: exact
+        # calea pe care `resolved.raw_error` rămâne None, deci `state.last_raw_error`
+        # nu e suprascris si textul vechi ajunge la diagnoza.
+        with _Harness(target, full_info={}):
+            asyncio.run(player.process_play(
+                ctx, 'https://www.youtube.com/watch?v=altceva'))
+
+        assert st.last_raw_error != stale, (
+            'verdictul piesei precedente a supravietuit si e raportat ca cauza')
+        text = ' | '.join(str(m) for m in ctx.sent)
+        assert text, 'al doilea eșec nu a produs nimic pe Discord'
+        assert 'Cookies YouTube expirate' not in text, (
+            f'a raportat cauza piesei precedente: {text[:200]}')
+        assert 'gasit nimic' in text or 'rezultat' in text.lower(), (
+            f'nu a raportat cauza REALA (nimic gasit): {text[:200]}')
 
 
 # --- promovarea copiei bune de cookies --------------------------------------

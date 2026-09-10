@@ -22,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from music import autoplay, config, player, resolve, ytdlp
+from music import autoplay, config, player, resolve, state as state_mod, ytdlp
 from music.state import GuildState
 
 
@@ -332,12 +332,82 @@ def test_no_ytdlp_call_uses_the_default_executor():
 
 
 def test_autoplay_seeds_from_the_current_track():
-    """state.history[0] e cea mai VECHE intrare, deci radio-ul rămânea pinuit."""
-    src = inspect.getsource(autoplay.prefill_autoplay_queue)
-    # doar codul, fara comentarii: comentariul explica de ce history[0] e greșit
-    code = '\n'.join(line.split('#')[0] for line in src.split('\n'))
-    assert 'state.last_url or' in code, code[:200]
-    assert 'state.history[0]' not in code, 'inca se seamana din cea mai veche intrare'
+    """state.history[0] e cea mai VECHE intrare, deci radio-ul rămânea pinuit.
+
+    Verificarea veche se uita la textul sursei (`'state.last_url or' in code`),
+    adica trecea si daca comportamentul era inversat. Asta conduce functia reala si
+    verifica ce ID primesc strategiile.
+    """
+    import asyncio
+
+    seen = []
+
+    async def record(state, bot_loop, origin_id, skip_ids, needed,
+                     artist_counts=None):
+        seen.append(origin_id)
+        return 0
+
+    st = GuildState()
+    st.history = [
+        {'url': 'https://www.youtube.com/watch?v=CEA_VECHE', 'title': 'A'},
+        {'url': 'https://www.youtube.com/watch?v=MIJLOC', 'title': 'B'},
+        {'url': 'https://www.youtube.com/watch?v=PENULTIMA', 'title': 'C'},
+    ]
+    st.last_url = 'https://www.youtube.com/watch?v=CURENTA'
+    st.last_title = 'Artist - Piesa'
+
+    saved = (autoplay._try_ytdlp_mix, autoplay._try_api_related,
+             autoplay._try_api_search, autoplay._try_ytdlp_search)
+    autoplay._try_ytdlp_mix = record
+    autoplay._try_api_related = record
+    autoplay._try_api_search = lambda *a, **k: _zero()
+    autoplay._try_ytdlp_search = lambda *a, **k: _zero()
+    try:
+        asyncio.run(autoplay.prefill_autoplay_queue(st, None, target=5))
+    finally:
+        (autoplay._try_ytdlp_mix, autoplay._try_api_related,
+         autoplay._try_api_search, autoplay._try_ytdlp_search) = saved
+
+    assert seen, 'nicio strategie nu a fost chemata'
+    assert set(seen) == {'CURENTA'}, (
+        f'radio-ul se seamana din alta piesa decat cea curenta: {seen}')
+
+
+async def _zero():
+    return 0
+
+
+def test_autoplay_falls_back_to_the_newest_history_entry():
+    """Fara `last_url` (dupa un restart de sesiune) seed-ul e ultima piesa, nu prima."""
+    import asyncio
+
+    seen = []
+
+    async def record(state, bot_loop, origin_id, skip_ids, needed,
+                     artist_counts=None):
+        seen.append(origin_id)
+        return 0
+
+    st = GuildState()
+    st.history = [
+        {'url': 'https://www.youtube.com/watch?v=CEA_VECHE', 'title': 'A'},
+        {'url': 'https://www.youtube.com/watch?v=CEA_NOUA', 'title': 'B'},
+    ]
+    st.last_url = None
+
+    saved = (autoplay._try_ytdlp_mix, autoplay._try_api_related,
+             autoplay._try_api_search, autoplay._try_ytdlp_search)
+    autoplay._try_ytdlp_mix = record
+    autoplay._try_api_related = record
+    autoplay._try_api_search = lambda *a, **k: _zero()
+    autoplay._try_ytdlp_search = lambda *a, **k: _zero()
+    try:
+        asyncio.run(autoplay.prefill_autoplay_queue(st, None, target=5))
+    finally:
+        (autoplay._try_ytdlp_mix, autoplay._try_api_related,
+         autoplay._try_api_search, autoplay._try_ytdlp_search) = saved
+
+    assert set(seen) == {'CEA_NOUA'}, seen
 
 
 def test_artist_key_is_the_same_for_counting_and_checking():
@@ -373,11 +443,59 @@ def test_add_to_queue_caps_the_same_artist():
 
 
 def test_refill_threshold_is_below_the_target():
-    """Prag egal cu target-ul insemna un refill la FIECARE piesa."""
-    src = inspect.getsource(player._play_next_async)
-    assert 'len(state.queue) < 3' in src, src[src.index('state.autoplay and'):][:80]
-    target = inspect.signature(autoplay.prefill_autoplay_queue).parameters['target'].default
-    assert target > 3, f'target={target} trebuie sa fie peste prag'
+    """Prag egal cu target-ul insemna un refill la FIECARE piesa.
+
+    Vechea verificare citea un sir din sursa si valoarea IMPLICITA a parametrului
+    `target` — niciuna nu spune ce se transmite la apel, nici daca refill-ul se
+    intampla. Asta conduce `_play_next_async` si reține argumentele reale.
+    """
+    import asyncio
+
+    calls = []
+
+    async def record_prefill(state, bot_loop, target=12):
+        calls.append((len(state.queue), target))
+
+    class _Ctx:
+        guild = type('G', (), {'id': 313})()
+        voice_client = type('V', (), {'is_connected': lambda self: True})()
+
+    st = GuildState()
+    st.autoplay = True
+    st.last_url = 'https://www.youtube.com/watch?v=x'
+    st.last_title = 'Artist - Piesa'
+    # Doua piese in coada: una se scoate ca sa fie redata, deci refill-ul vede una.
+    st.queue = [{'query': 'a', 'title': 'A'}, {'query': 'b', 'title': 'B'}]
+    state_mod.guild_states[313] = st
+
+    saved = (player.prefill_autoplay_queue, player.process_play,
+             player.cancel_timeout, player.start_timeout,
+             player.update_player_ui, player._loop)
+    player.prefill_autoplay_queue = record_prefill
+
+    async def noop_play(ctx, query, is_radio=False):
+        return None
+
+    async def noop_ui(ctx, send_new=False):
+        return None
+
+    player.process_play = noop_play
+    player.cancel_timeout = lambda *a, **k: None
+    player.start_timeout = lambda *a, **k: None
+    player.update_player_ui = noop_ui
+    player._loop = None
+    try:
+        asyncio.run(player._play_next_async(_Ctx()))
+    finally:
+        (player.prefill_autoplay_queue, player.process_play,
+         player.cancel_timeout, player.start_timeout,
+         player.update_player_ui, player._loop) = saved
+
+    assert calls, 'nu s-a facut niciun refill dupa ce coada a scazut sub prag'
+    queue_len, target = calls[0]
+    assert target > queue_len + 1, (
+        f'target={target} nu e peste pragul care l-a declanșat ({queue_len}): '
+        f'un refill la fiecare piesa')
 
 
 if __name__ == '__main__':

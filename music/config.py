@@ -194,12 +194,36 @@ MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 # transfer de video pe un bot audio.
 HLS_MAX_BYTES = 30 * 1024 * 1024
 
+# Regula de durata, o singura data. Filtrul de descarcare se CONSTRUIESTE din
+# expresia de mai jos, iar `duration_within_limits` raspunde la exact aceeasi
+# intrebare pentru verificarea de dinaintea descarcarii.
+#
+# Cand erau doua propozitii scrise separat (`duration > MAX` in resolve.py si
+# `duration < MAX` aici) nu erau echivalente: o piesa de EXACT MAX_TRACK_SECONDS,
+# si orice piesa fara durata raportata, treceau verificarea, plateau o extractie si
+# o descarcare completa, si erau apoi refuzate tacut de yt-dlp — deci ajungeau la
+# apelant ca defectiune tehnica ("niciun format nu a reusit"), nu ca refuz.
+# Verificat pe yt-dlp 2026.8.19: filtrul respinge 660, lipsa cheii si None.
+MATCH_FILTER_EXPR = (f'!is_live & !live_from_start & '
+                     f'duration < {MAX_TRACK_SECONDS}')
+
+
+def duration_within_limits(duration) -> bool:
+    """Trece piesa filtrul de durata de la descarcare?
+
+    Aceeasi semantica: durata trebuie sa existe, sa fie un numar, si sa fie
+    STRICT sub plafon. `bool` nu accepta True/False ca durata (isinstance(True,
+    int) e True in Python), de aceea verificarea exclude explicit bool.
+    """
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+        return False
+    return 0 < duration < MAX_TRACK_SECONDS
+
+
 YDL_OPTS_DOWNLOAD = {
     'format': 'bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
     # Refuza live-urile si piesele absurd de lungi INAINTE de descarcare.
-    'match_filter': yt_dlp.utils.match_filter_func(
-        f'!is_live & !live_from_start & duration < {MAX_TRACK_SECONDS}'
-    ),
+    'match_filter': yt_dlp.utils.match_filter_func(MATCH_FILTER_EXPR),
     'max_filesize': MAX_DOWNLOAD_BYTES,
     'outtmpl': f'{DOWNLOAD_DIR}/%(id)s.%(ext)s',
     'noplaylist': True,

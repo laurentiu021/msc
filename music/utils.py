@@ -1,5 +1,6 @@
 """Functii utilitare: cleanup, format, filtrare."""
 import asyncio
+import json
 import os
 import re
 import time
@@ -69,6 +70,60 @@ def item_title(item, limit: int | None = None) -> str:
     return text[:limit] if limit else text
 
 
+# Metadatele de langa fisierul audio. Existau doar in `state.history`, care are
+# 20 de intrari si e golit de `!stop`, de plecarea din voce si de butonul Inapoi —
+# iar intrarile lui nu purtau nici durata, nici thumbnail. Deci un hit de cache
+# pornea cu durata 0: panoul pierdea lungimea si tot rândul de timp rămas, `!seek`
+# rămânea fara plafon (garda e scrisa `if state.last_duration and ...`), si fiindca
+# lipseau si views/likes fiecare hit cumpara o unitate de Data API plus un al doilea
+# edit de panou — exact costul pe care cache-ul exista sa il elimine.
+#
+# Fisierul insoțitor face cache-ul sa se descrie singur: orice piesa de pe disc e
+# redabila cu metadate complete, indiferent cat de veche e, fara nicio cerere.
+_META_EXT = '.meta.json'
+_META_FIELDS = ('url', 'title', 'channel', 'duration', 'thumbnail', 'views',
+                'likes')
+
+
+def _meta_path(audio_path: str) -> str:
+    """Un singur loc unde se decide numele fisierului insoțitor."""
+    return os.path.splitext(audio_path)[0] + _META_EXT
+
+
+def write_track_meta(audio_path: str, meta: dict) -> bool:
+    """Reține metadatele piesei langa fisierul audio. True daca s-a scris."""
+    if not audio_path:
+        return False
+    payload = {k: meta.get(k) for k in _META_FIELDS}
+    try:
+        with open(_meta_path(audio_path), 'w', encoding='utf-8') as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+        return True
+    except OSError as e:
+        log.debug(f"Nu am putut scrie metadatele pentru {audio_path}: {e}")
+        return False
+
+
+def read_track_meta(audio_path: str) -> dict | None:
+    """Metadatele de langa un fisier din cache, sau None.
+
+    None inseamna "nu stim ce e fisierul asta", iar apelantul trebuie sa trateze
+    asta ca lipsa de cache: mai bine o descarcare in plus decat un panou care
+    minte despre ce cânta.
+    """
+    if not audio_path:
+        return None
+    try:
+        with open(_meta_path(audio_path), encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        log.debug(f"Fara metadate pentru {audio_path}: {e}")
+        return None
+    if not isinstance(data, dict) or not data.get('title'):
+        return None
+    return data
+
+
 def cached_download(video_id: str, directory: str | None = None) -> str | None:
     """Fisierul deja descarcat pentru acest ID, sau None.
 
@@ -89,6 +144,10 @@ def cached_download(video_id: str, directory: str | None = None) -> str | None:
     except OSError:
         return None
     for name in sorted(names):
+        # Insoțitorul de metadate nu poate fi confundat cu audio: extensia lui e
+        # dubla, deci `splitext('vid.meta.json')` da stem-ul 'vid.meta', care nu se
+        # potriveste niciodata cu un ID. De aceea nu are nevoie de o excludere
+        # proprie aici — dar `_META_EXT` trebuie sa rămână cu doua puncte.
         stem, ext = os.path.splitext(name)
         if stem != video_id or ext in ('.part', '.ytdl', ''):
             continue
@@ -141,11 +200,23 @@ def trim_download_cache(keep, max_bytes: int | None = None,
     for _, size, path in sorted(entries):          # cele mai vechi primele
         if total <= max_bytes:
             break
+        if path.endswith(_META_EXT):
+            # Insoțitorul pleaca odata cu audio-ul lui, nu singur: altfel ar
+            # rămâne un fisier audio pe disc pe care nimeni nu mai stie sa il
+            # descrie, adica un hit de cache cu panou gol.
+            continue
         try:
             os.remove(path)
         except OSError as e:
             log.debug(f"Nu am putut sterge {path}: {e}")
             continue
+        meta = _meta_path(path)
+        try:
+            if os.path.exists(meta):
+                total -= os.path.getsize(meta)
+                os.remove(meta)
+        except OSError:
+            pass
         total -= size
         removed += 1
     if removed:
@@ -166,16 +237,25 @@ def sweep_partials(directory: str | None = None) -> int:
         names = os.listdir(directory)
     except OSError:
         return 0
+    stems = {os.path.splitext(n)[0] for n in names
+             if not n.endswith(_META_EXT) and not n.endswith(('.part', '.ytdl'))}
     for name in names:
-        if not name.endswith(('.part', '.ytdl')):
+        path = os.path.join(directory, name)
+        if name.endswith(_META_EXT):
+            # Insoțitor fara audio: fisierul lui a fost evacuat de o versiune
+            # anterioara, sau descarcarea a fost intrerupta dupa ce metadatele
+            # ajunseseră pe disc. Fara curatare, ar rămâne pe volum pe veci.
+            if name[:-len(_META_EXT)] in stems:
+                continue
+        elif not name.endswith(('.part', '.ytdl')):
             continue
         try:
-            os.remove(os.path.join(directory, name))
+            os.remove(path)
             removed += 1
         except OSError:
             pass
     if removed:
-        log.info(f"Curatenie la pornire: {removed} descarcari intrerupte sterse")
+        log.info(f"Curatenie la pornire: {removed} fisiere orfane sterse")
     return removed
 
 

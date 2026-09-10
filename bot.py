@@ -145,6 +145,14 @@ bot = commands.Bot(
     # Fara asta '!PLAY' si '!Play' sunt respinse ca CommandNotFound, iar botul
     # pare mort fiindca nu intra in voice si nu raspunde nimic.
     case_insensitive=True,
+    # La granita de incredere, o singura data. Botul ecoueaza text scris de
+    # utilizatori: interogarea din confirmarea de coada, titlurile din `!remove` si
+    # `!move`, numele comenzii greșite din mesajele de eroare. `item_title` doar
+    # trunchiaza, nu escapeaza. Fara asta, `ConnectionState.allowed_mentions` e
+    # None, discord.py omite complet campul din payload, si Discord interpreteaza
+    # fiecare mention din text — deci `!play @everyone ceva` devine un ping real
+    # trimis de bot.
+    allowed_mentions=discord.AllowedMentions.none(),
 )
 
 _tree_synced = False

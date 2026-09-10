@@ -18,6 +18,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Importul lui bot.py loga o eroare de token altfel; nu se conecteaza nimic.
+os.environ.setdefault('DISCORD_TOKEN', 'test-token-nefolosit')
+
 from music.commands import ALLOWED_HOSTS, sanitize_query
 from music.utils import is_clean, item_title
 
@@ -108,6 +111,28 @@ def test_is_clean_still_filters_duration_and_blocklist():
     assert is_clean('melodie', 5, '') is False, 'prea scurt'
     assert is_clean('melodie', 4000, '') is False, 'prea lung'
     assert is_clean('lofi chill beats', 200, '') is False, 'blocklist'
+
+
+def test_the_bot_can_never_ping_anyone_with_echoed_text():
+    """Botul ecoueaza text scris de utilizatori: interogarea din confirmarea de
+    coada, titlurile din `!remove`/`!move`, numele comenzii din mesajele de eroare.
+    `item_title` doar trunchiaza, nu escapeaza.
+
+    Fara `allowed_mentions`, `ConnectionState.allowed_mentions` e None, discord.py
+    omite complet campul din payload, si Discord interpreteaza fiecare mention din
+    text — deci `!play @everyone ceva` devenea un ping real trimis de bot.
+    """
+    import discord
+
+    import bot as bot_mod
+
+    allowed = bot_mod.bot._connection.allowed_mentions
+    assert allowed is not None, (
+        'allowed_mentions nu e setat: Discord interpreteaza orice mention ecouat')
+    payload = allowed.to_dict()
+    assert payload.get('parse') == [], payload
+    assert not payload.get('users') and not payload.get('roles'), payload
+    assert payload == discord.AllowedMentions.none().to_dict(), payload
 
 
 if __name__ == '__main__':

@@ -160,6 +160,45 @@ def test_a_jar_without_session_cookies_is_flagged():
     assert 'SID' in issues, issues
 
 
+def test_a_completely_full_disk_is_reported():
+    """Singura stare de disc care nu producea nicio linie era cea mai rea.
+
+    `if free_bytes` colapsa "0 octeti liberi" in acelasi None ca "disk_usage a
+    aruncat OSError", iar `problems()` sare peste None — deci `!health` raspundea
+    la "de ce nu cânta?" cu "Totul in regula" pe un volum plin.
+    """
+    import shutil
+
+    saved = shutil.disk_usage
+
+    class _Usage:
+        total = 100
+        used = 100
+        free = 0
+
+    shutil.disk_usage = lambda path: _Usage()
+    try:
+        snap = _snapshot()
+    finally:
+        shutil.disk_usage = saved
+
+    assert snap['disk']['free_mb'] == 0, snap['disk']
+    issues = ' | '.join(diag.problems(snap))
+    assert 'disc' in issues, f'un volum plin nu apare in probleme: {issues}'
+
+
+def test_an_unreadable_disk_stays_distinct_from_a_full_one():
+    import shutil
+
+    saved = shutil.disk_usage
+    shutil.disk_usage = lambda path: (_ for _ in ()).throw(OSError('nope'))
+    try:
+        snap = _snapshot()
+    finally:
+        shutil.disk_usage = saved
+    assert snap['disk']['free_mb'] is None, snap['disk']
+
+
 def test_an_empty_snapshot_says_so_instead_of_crashing():
     assert diag.problems({}) == ['niciun instantaneu inca']
     assert diag.problems(None) == ['niciun instantaneu inca']

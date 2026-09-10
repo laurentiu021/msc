@@ -8,7 +8,8 @@ from music.config import (FFMPEG_OPTS, cookies_available, promote_cookies,
 from music.resolve import (cached_for, resolve_from_url, search_to_url,
                            video_id)
 from music.state import begin_loading, end_loading, get_state
-from music.utils import cleanup_file, item_title, trim_download_cache
+from music.utils import (cleanup_file, item_title, read_track_meta,
+                         trim_download_cache, write_track_meta)
 from music.autoplay import prefill_autoplay_queue
 from music.diag import scrub as _scrub
 from music.errors import diagnose_error
@@ -269,6 +270,17 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         return
 
     my_load_token = begin_loading(state)
+    # Cutia poștala de erori brute e a PIESEI ASTA, nu a procesului. Verdictul
+    # "0 formate reale" trăia inainte doar ca mesaj de excepție al piesei care il
+    # producea; acum se scrie in stare, deci supravietuia piesei. Urmatoarea piesa
+    # care eșua fara text brut propriu (o cautare fara rezultate, de exemplu) era
+    # diagnosticata cu textul rămas, iar pentru ca diagnoza cadea pe acelasi
+    # `error_type` dedup-ul de mai jos inghitea si mesajul catre utilizator: al
+    # doilea eșec nu producea NIMIC pe Discord.
+    #
+    # Golirea sta dupa `begin_loading`, nu mai sus: ramura de intrerupator citeste
+    # `state.last_raw_error` inainte, ca sa spuna de ce s-a inchis.
+    state.last_raw_error = None
     failure = None
     rejected = None
     filename = None
@@ -310,9 +322,21 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
             # 2. Cache pe disc. Verificarea vine DUPA rezolvarea la URL (un text
             #    de cautare nu are ID) si INAINTE de extractia completa, deci un
             #    hit costa zero cereri catre YouTube, zero octeti de media si
-            #    niciun slot de throttle. Metadata vine din history.
+            #    niciun slot de throttle.
+            #
+            #    Metadatele vin din fisierul insoțitor de langa audio, nu din
+            #    `state.history`: acela are 20 de intrari, e golit de `!stop`, de
+            #    plecarea din voce si de butonul Inapoi, iar intrarile lui nu
+            #    purtau nici durata, nici thumbnail. Un hit pornea deci cu durata
+            #    0 (panou fara lungime si fara timp rămas, `!seek` fara plafon) si
+            #    cumpara o unitate de Data API pentru statistici — exact costul pe
+            #    care cache-ul exista sa il elimine. History rămâne ca rezerva
+            #    pentru fisierele descarcate inainte de insoțitori.
             cached_id, cached_path = cached_for(target_url)
-            known = _history_entry(state, cached_id) if cached_path else None
+            known = None
+            if cached_path:
+                known = (read_track_meta(cached_path)
+                         or _history_entry(state, cached_id))
             if cached_path and known:
                 log.info(f"Cache audio: refolosesc {os.path.basename(cached_path)}")
                 filename = cached_path
@@ -323,6 +347,8 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
                     'duration': known.get('duration'),
                     'thumbnail': known.get('thumbnail'),
                     'channel': known.get('channel'),
+                    'view_count': known.get('views'),
+                    'like_count': known.get('likes'),
                     'webpage_url': web_url,
                 }
 
@@ -369,9 +395,22 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         # separator, dar intrarile de history nu il purtau, deci plafonul de
         # diversitate nu se aplica piesele cu titlu de un singur cuvant.
         state.history.append({'url': web_url, 'title': state.last_title,
-                              'channel': state.last_channel})
+                              'channel': state.last_channel,
+                              'duration': state.last_duration,
+                              'thumbnail': state.last_thumbnail})
         if len(state.history) > 20:
             state.history.pop(0)
+
+        # Insoțitorul de langa fisierul audio. Scris la fiecare redare reusita,
+        # inclusiv la un hit de cache: asa un fisier vechi capata metadate cand e
+        # ascultat din nou, iar cache-ul nu mai depinde de cele 20 de intrari de
+        # history — care oricum se golesc la `!stop` si la plecarea din voce.
+        if not write_track_meta(filename, {
+                'url': web_url, 'title': state.last_title,
+                'channel': state.last_channel, 'duration': state.last_duration,
+                'thumbnail': state.last_thumbnail, 'views': state.last_views,
+                'likes': state.last_likes}):
+            log.debug("Metadatele piesei nu au putut fi scrise langa fisier")
 
         if not vc.is_connected():
             raise PlaybackInterrupted("Voice deconectat in timpul descarcarii.")

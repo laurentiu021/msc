@@ -26,7 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from music import config, player, resolve
 from music.state import GuildState
-from music.utils import cached_download, sweep_partials, trim_download_cache
+from music.utils import (cached_download, read_track_meta, sweep_partials,
+                         trim_download_cache, write_track_meta)
 
 
 def _write(directory, name, size=1024, age_sec=0.0):
@@ -186,6 +187,93 @@ def test_the_cache_lives_on_the_volume_when_there_is_one():
             else:
                 os.environ['COOKIE_DIR'] = saved
             importlib.reload(config)
+
+
+# --- metadatele de langa fisierul audio -------------------------------------
+# Cache-ul trebuie sa se descrie singur. Metadatele existau doar in
+# `state.history`: 20 de intrari, golita de `!stop`, de plecarea din voce si de
+# butonul Inapoi, si fara durata sau thumbnail in intrari. Deci un hit pornea cu
+# durata 0 — panou fara lungime si fara timp rămas, `!seek` fara plafon (garda e
+# scrisa `if state.last_duration and ...`) — si cumpara o unitate de Data API
+# pentru statistici, exact costul pe care cache-ul exista sa il elimine.
+
+def test_a_cached_file_carries_its_own_metadata():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write(tmp, 'vid1.opus')
+        meta = {'url': 'https://www.youtube.com/watch?v=vid1',
+                'title': 'Artist - Piesa', 'channel': 'Canalul',
+                'duration': 213, 'thumbnail': 'http://t/max.jpg',
+                'views': 1234, 'likes': 56}
+        assert write_track_meta(path, meta) is True
+        got = read_track_meta(path)
+        assert got == meta, got
+
+
+def test_a_file_without_metadata_reads_as_unknown():
+    """None inseamna "nu stim ce e", si apelantul trateaza asta ca lipsa de cache:
+    mai bine o descarcare in plus decat un panou care minte despre ce cânta."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write(tmp, 'vid2.opus')
+        assert read_track_meta(path) is None
+        # Si un insoțitor corupt sau gol nu are voie sa crape nimic.
+        with open(os.path.splitext(path)[0] + '.meta.json', 'w',
+                  encoding='utf-8') as fh:
+            fh.write('{nu e json')
+        assert read_track_meta(path) is None
+        with open(os.path.splitext(path)[0] + '.meta.json', 'w',
+                  encoding='utf-8') as fh:
+            fh.write('{"title": null}')
+        assert read_track_meta(path) is None
+
+
+def test_the_metadata_file_is_never_served_as_audio():
+    """Depinde de faptul ca extensia insoțitorului e DUBLA.
+
+    `splitext('vid3.meta.json')` da stem-ul 'vid3.meta', care nu se potriveste
+    niciodata cu un ID. Daca `_META_EXT` ar deveni un singur sufix (`.json`),
+    cache-ul ar servi fisierul de metadate ca piesa.
+    """
+    from music.utils import _META_EXT
+
+    assert _META_EXT.count('.') >= 2, (
+        f'{_META_EXT!r}: cu un singur punct, insoțitorul devine un hit de cache')
+    with tempfile.TemporaryDirectory() as tmp:
+        write_track_meta(os.path.join(tmp, 'vid3.opus'), {'title': 'X'})
+        assert cached_download('vid3', tmp) is None, (
+            'insoțitorul a fost servit ca fisier audio')
+        audio = _write(tmp, 'vid3.opus')
+        assert cached_download('vid3', tmp) == audio
+
+
+def test_evicting_audio_takes_its_metadata_with_it():
+    """Altfel rămâne un insoțitor orfan pe volum, la fiecare evacuare."""
+    with tempfile.TemporaryDirectory() as tmp:
+        old = _write(tmp, 'vechi.opus', size=900, age_sec=100)
+        write_track_meta(old, {'title': 'Vechi', 'duration': 100})
+        new = _write(tmp, 'nou.opus', size=900, age_sec=1)
+        write_track_meta(new, {'title': 'Nou', 'duration': 100})
+
+        removed = trim_download_cache({new}, max_bytes=1200, directory=tmp)
+        assert removed == 1, removed
+        assert not os.path.exists(old), 'nu a evacuat fisierul vechi'
+        assert not os.path.exists(os.path.splitext(old)[0] + '.meta.json'), (
+            'insoțitorul a rămas orfan pe volum')
+        assert os.path.exists(new) and read_track_meta(new), (
+            'a atins fisierul protejat sau metadatele lui')
+
+
+def test_orphan_metadata_is_swept_at_boot():
+    """Un SIGKILL intre scrierea metadatelor si terminarea descarcarii, sau o
+    evacuare facuta de o versiune care nu stia de insoțitori."""
+    with tempfile.TemporaryDirectory() as tmp:
+        orphan = os.path.join(tmp, 'fantoma.opus')
+        write_track_meta(orphan, {'title': 'Fantoma'})
+        keeper = _write(tmp, 'real.opus')
+        write_track_meta(keeper, {'title': 'Real'})
+
+        assert sweep_partials(tmp) == 1
+        assert not os.path.exists(os.path.splitext(orphan)[0] + '.meta.json')
+        assert read_track_meta(keeper), 'a sters metadatele unui fisier existent'
 
 
 def test_playback_no_longer_deletes_what_it_just_played():

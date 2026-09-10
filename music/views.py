@@ -108,6 +108,14 @@ class MusicControlView(discord.ui.View):
     async def back_btn(self, interaction: discord.Interaction, button):
         state = get_state(self.ctx.guild.id)
         if len(state.history) >= 2:
+            # Ambele intrari se SCOT, si asta e deliberat: history e stiva pe care
+            # merge butonul, deci daca `prev` ar rămâne in ea a doua apasare s-ar
+            # intoarce la aceeasi piesa la infinit.
+            #
+            # Consecinta care era un defect — calea de cache nu mai gasea metadata
+            # piesei, fiindca o cauta in exact lista de aici — nu mai exista:
+            # metadatele stau acum in fisierul insoțitor de langa audio
+            # (utils.write_track_meta), deci un hit de cache nu depinde de history.
             state.history.pop()
             prev = state.history.pop()
             state.queue.insert(0, {'query': prev['url'], 'title': prev['title']})

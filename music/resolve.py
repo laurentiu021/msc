@@ -22,10 +22,11 @@ from dataclasses import dataclass, field
 from music import ytdlp
 from music.config import (HLS_MAX_BYTES, MAX_DOWNLOAD_BYTES, MAX_TRACK_SECONDS,
                           clear_ydl_reason, cookies_available,
-                          count_real_formats, has_real_formats,
-                          last_ydl_reason, log, make_download_opts,
-                          make_search_opts, yt_client_args, WEB_CLIENTS)
-from music.errors import diagnose_error
+                          count_real_formats, duration_within_limits,
+                          has_real_formats, last_ydl_reason, log,
+                          make_download_opts, make_search_opts,
+                          yt_client_args, WEB_CLIENTS)
+from music.errors import YtdlpTimeout, diagnose_error
 from music.utils import cached_download, is_clean, item_title
 
 # Lanturile de clienti. Cerem ambii clienti in ACEEASI cerere: yt-dlp cumuleaza
@@ -101,7 +102,14 @@ def unplayable_reason(info) -> str | None:
     if info.get('is_live') or info.get('live_status') in ('is_live', 'is_upcoming'):
         return "E un live, nu o piesa"
     duration = info.get('duration')
-    if duration and duration > MAX_TRACK_SECONDS:
+    # Exact regula pe care o aplica match_filter la descarcare, prin acelasi
+    # predicat — nu o a doua propozitie despre acelasi lucru. Vezi comentariul de
+    # la MATCH_FILTER_EXPR: cele doua formulari nu erau echivalente, deci o piesa
+    # de exact MAX_TRACK_SECONDS (sau fara durata raportata) trecea de aici, plătea
+    # o descarcare completa, si era refuzata tacut de yt-dlp.
+    if not duration_within_limits(duration):
+        if not duration:
+            return "YouTube nu spune cat dureaza, deci nu o pot descarca"
         return (f"Piesa are {int(duration // 60)} minute, limita e "
                 f"{MAX_TRACK_SECONDS // 60}")
     return None
@@ -221,21 +229,26 @@ async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple
     return selected, None, False, raw_error
 
 
-async def _retry_for_formats(selected: dict, web_url: str,
-                             loop) -> tuple[dict | None, str | None]:
+async def _retry_for_formats(selected: dict, web_url: str, loop):
     """O a doua extractie cand nu avem niciun format redabil.
 
     Valoarea ei nu e ca "poate merge acum": e ca `ignore_no_formats_error=False`
     scoate motivul REAL ("Sign in to confirm you're not a bot" era doar warning),
     iar acela ajunge la diagnoza si la utilizator.
+
+    Intoarce (info, eroare_bruta, client, cu_cookies): ULTIMELE doua conteaza, si
+    lipseau. Reincercarea foloseste WEB_CLIENTS si `cookies_available()`, dar
+    apelantul pastra `(None, False)` de la selectia care eșuase, deci descarcarea
+    pornea exact cu modul de cookies care abia dăduse 0 formate redabile.
     """
     vid_id = selected.get('id', '?')
     log.warning(f"0 formate redabile pentru {vid_id} — aștept 5s si reincerc")
     await asyncio.sleep(5)
     retry_url = web_url if web_url.startswith('http') else \
         f"https://www.youtube.com/watch?v={vid_id}"
+    with_cookies = cookies_available()
     retry_opts = make_search_opts(
-        with_cookies=cookies_available(),
+        with_cookies=with_cookies,
         extractor_args=yt_client_args(*WEB_CLIENTS),
         default_search=None,
         ignore_no_formats_error=False,
@@ -248,12 +261,12 @@ async def _retry_for_formats(selected: dict, web_url: str,
                  f"({count_real_formats(retry_fmts)} redabile)")
         if has_real_formats(retry_fmts):
             log.info(f"Reincercarea a reusit pentru {vid_id}")
-            return retry_info, None
+            return retry_info, None, WEB_CLIENTS, with_cookies
         log.warning(f"Si reincercarea a dat 0 formate redabile pentru {vid_id}")
-        return None, None
+        return None, None, None, False
     except Exception as e:
         log.warning(f"Reincercarea a eșuat pentru {vid_id}: {e}")
-        return None, str(e)[:600]
+        return None, str(e)[:600], None, False
 
 
 async def _download(web_url: str, client: tuple | None, prefer_cookies: bool,
@@ -277,10 +290,21 @@ async def _download(web_url: str, client: tuple | None, prefer_cookies: bool,
     cookie_order = [True, False] if prefer_cookies else [False, True]
     dl_info = None
     filename = None
+    # Eroarea de la EXTRACTIE nu se amesteca cu cele de la descarcare. Cand era
+    # transmisa incoace ca valoare de start, poarta HLS de mai jos decidea pe baza
+    # unei erori de la o cerere complet diferita, iar garda din apelant
+    # (`not resolved.raw_error`) nu ajungea niciodata sa consulte
+    # `last_ydl_reason()` — singurul canal prin care vine refuzul real al lui
+    # yt-dlp, care pe calea de match_filter nu ridica nicio excepție.
+    dl_error = None
+    # "Merita alt selector de format?" se decide pe ORICE incercare care a eșuat
+    # din motiv de format, nu doar pe ultima: un 'format' de la modul cu cookies
+    # era altfel aruncat cand modul guest cadea cu 429.
+    format_worthy = False
     for fmt, size_cap in DOWNLOAD_ATTEMPTS:
         if filename and os.path.exists(filename):
             break
-        if fmt != DOWNLOAD_ATTEMPTS[0][0] and not worth_another_format(raw_error):
+        if fmt != DOWNLOAD_ATTEMPTS[0][0] and not format_worthy:
             break
         for use_cookies in cookie_order:
             if use_cookies and not cookies_available():
@@ -305,12 +329,32 @@ async def _download(web_url: str, client: tuple | None, prefer_cookies: bool,
                             filename = base + ext
                             break
                 if filename and os.path.exists(filename):
-                    return dl_info, filename, raw_error, use_cookies
+                    # Succes: nu raportam nicio eroare, nici a extractiei, nici a
+                    # incercarilor anterioare. Un text brut lasat aici ar fi ajuns
+                    # in `state.last_raw_error` pe calea reusita si ar fi devenit
+                    # diagnoza pentru urmatorul eșec.
+                    return dl_info, filename, None, use_cookies
+            except YtdlpTimeout as e:
+                # OPRIRE, nu urmatoarea incercare. `outtmpl` e `%(id)s.%(ext)s`,
+                # deci calea de pe disc E cheia de cache si nu exista lock per id:
+                # thread-ul abandonat continua sa scrie in ACELASI fisier. Al
+                # doilea scriitor vede `.part`-ul existent, seteaza `resume_len` si
+                # `open_mode='ab'` (yt-dlp downloader/http.py) si adauga in fisierul
+                # in care primul inca scrie; mai rau, poate decide ca fisierul e
+                # complet si sa redenumeasca un `.part` care inca creste peste
+                # numele final din cache. Excluderea `.part` din cached_download nu
+                # apara de asta, iar rezultatul stricat s-ar pastra apoi la infinit.
+                dl_error = str(e)[:600]
+                log.warning(f"Renunt la reincercari: thread-ul abandonat inca "
+                            f"scrie in acelasi fisier ({e})")
+                return dl_info, None, dl_error, False
             except Exception as e:
-                raw_error = str(e)[:600]
+                dl_error = str(e)[:600]
+                if worth_another_format(dl_error):
+                    format_worthy = True
                 log.warning(f"Download esuat (cookies={use_cookies}, "
                             f"fmt='{fmt}'): {e}")
-    return dl_info, filename, raw_error, False
+    return dl_info, filename, dl_error or raw_error, False
 
 
 async def resolve_from_url(target_url: str, *, loop=None,
@@ -339,11 +383,16 @@ async def resolve_from_url(target_url: str, *, loop=None,
                     or f"https://www.youtube.com/watch?v={selected.get('id', '')}")
 
     if not has_real_formats(selected.get('formats', [])):
-        retry_info, retry_error = await _retry_for_formats(selected, resolved.url, loop)
+        (retry_info, retry_error, retry_client,
+         retry_cookies) = await _retry_for_formats(selected, resolved.url, loop)
         if retry_error:
             resolved.raw_error = retry_error
         if retry_info:
             resolved.info = selected = retry_info
+            # Descarcarea porneste cu combinatia care A FUNCTIONAT, nu cu cea care
+            # abia dăduse 0 formate redabile.
+            resolved.client = client = retry_client
+            resolved.used_cookies = used_cookies = retry_cookies
         else:
             resolved.raw_error = (resolved.raw_error
                                   or "YouTube a blocat acest video (0 formate reale)")
