@@ -110,7 +110,7 @@ async def update_player_ui(ctx, send_new=False):
     footer = []
     if state.queue:
         footer.append(f"♫ {len(state.queue)} in coada")
-    footer.append("!mhelp")
+    footer.append("!help")
     embed.set_footer(text=" · ".join(footer))
 
     # Queue field

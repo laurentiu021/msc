@@ -349,26 +349,56 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             await update_player_ui(ctx)
             if ctx.voice_client and not ctx.voice_client.is_playing(): start_timeout(ctx)
 
-    @bot.command(name='mhelp')
+    # Numele si descrierea fiecarei comenzi, o singura data. Ajutorul se
+    # construieste din tabelul asta, iar un test verifica mecanic ca fiecare
+    # comanda inregistrata pe bot apare aici — altfel o comanda noua ar exista
+    # fara ca nimeni sa afle de ea.
+    HELP_SECTIONS = [
+        ("🎵 Muzică", [
+            ('play', '<piesa sau link>', 'Reda acum, sau adauga in coada'),
+            ('nplay', '<piesa sau link>', 'Reda imediat, peste piesa curenta'),
+            ('skip', '', 'Trece la piesa urmatoare'),
+            ('stop', '', 'Opreste tot si iese din canal'),
+            ('np', '', 'Ce se reda acum (panoul cu butoane)'),
+            ('seek', '<1:30>', 'Salt la un moment din piesa'),
+        ]),
+        ("📋 Coada", [
+            ('shuffle', '', 'Amesteca coada'),
+            ('clear', '', 'Goleste coada'),
+            ('remove', '<nr>', 'Scoate piesa cu numarul dat'),
+            ('move', '<de la> <la>', 'Mută o piesa in alta poziție'),
+            ('247', '', 'Rămâne in canal non-stop, cu autoplay'),
+        ]),
+        ("🔧 Diagnostic", [
+            ('health', '', 'De ce nu merge: cookies, PO Token, cota, erori'),
+            ('debug', '', 'Latenta, CPU, RAM, coada'),
+            ('help', '', 'Lista asta'),
+        ]),
+    ]
+
+    def _help_embed():
+        embed = discord.Embed(
+            title="Comenzi Gogu",
+            description="Prefix `!` (si `!PLAY` merge la fel de bine).",
+            color=0x2b2d31)
+        for section, rows in HELP_SECTIONS:
+            embed.add_field(
+                name=section,
+                value="\n".join(
+                    f"`!{name}{' ' + args if args else ''}` — {desc}"
+                    for name, args, desc in rows),
+                inline=False)
+        embed.set_footer(text="Butoanele de sub piesa fac acelasi lucru fara "
+                              "sa scrii · YouTube, Spotify si Deezer")
+        return embed
+
+    # `!help` e numele principal. discord.py primeste help_command=None (ajutorul
+    # lui implicit nu stie de comenzile noastre), deci fara inregistrarea asta
+    # `!help` nu facea absolut nimic si nimeni nu putea afla ce comenzi exista.
+    @bot.command(name='help', aliases=['mhelp', 'comenzi', 'h'])
     async def help_cmd(ctx):
         await safe_delete(ctx.message)
-        embed = discord.Embed(title="Comenzi Gogu", color=0x2b2d31)
-        embed.description = (
-            "**🎵 Muzică**\n"
-            "`!play <piesa/url>` - Reda sau adauga in coada\n"
-            "`!nplay <piesa/url>` - Inlocuieste piesa curenta\n"
-            "`!stop` - Opreste si deconecteaza\n"
-            "`!skip` - Piesa urmatoare\n"
-            "`!seek <1:30>` - Salt la timestamp\n"
-            "`!np` - Piesa curenta\n"
-            "`!shuffle` / `!clear` / `!remove` / `!move`\n"
-            "`!247` - 24/7 mode + autoplay\n"
-            "\n**🔧 Diagnostic**\n"
-            "`!health` - De ce nu merge (cookies, PO Token, cota, erori)\n"
-            "`!debug` - Latenta, CPU, RAM"
-        )
-        embed.set_footer(text="YouTube · Spotify* · Deezer*")
-        await ctx.send(embed=embed, delete_after=30)
+        await ctx.send(embed=_help_embed(), delete_after=60)
 
     @bot.command()
     async def debug(ctx):

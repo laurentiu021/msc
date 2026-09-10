@@ -336,7 +336,7 @@ async def on_ready():
             log.warning(f"Sync arbore comenzi esuat: {e}")
     await bot.change_presence(
         activity=discord.Activity(
-            type=discord.ActivityType.listening, name="!mhelp"
+            type=discord.ActivityType.listening, name="!help"
         )
     )
     global _heartbeat_task
@@ -354,9 +354,9 @@ async def on_command_error(ctx, error):
         return
     if isinstance(error, commands.MissingRequiredArgument):
         return await _reply(ctx, f"Lipseste un argument: `{error.param.name}`. "
-                                 f"Vezi `!mhelp`.")
+                                 f"Vezi `!help`.")
     if isinstance(error, commands.BadArgument):
-        return await _reply(ctx, "Argument invalid. Vezi `!mhelp`.")
+        return await _reply(ctx, "Argument invalid. Vezi `!help`.")
     if isinstance(error, commands.NoPrivateMessage):
         return await _reply(ctx, "Comenzile merg doar pe server, nu in DM.")
     if isinstance(error, commands.CommandInvokeError):
