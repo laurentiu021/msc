@@ -95,7 +95,7 @@ class MusicControlView(discord.ui.View):
                 vc.stop()
             await self._safe_defer(interaction)
         except Exception as e:
-            log.warning(f"Jump select error: {e}")
+            log.warning(f"Jump select error: {e}", exc_info=True)
             await self._safe_defer(interaction)
 
     async def _safe_defer(self, interaction: discord.Interaction):
@@ -196,7 +196,7 @@ class MusicControlView(discord.ui.View):
                     with loading(state):
                         await prefill_autoplay_queue(state, self.ctx.bot.loop)
                 except Exception as e:
-                    log.warning(f"Prefill esuat: {e}")
+                    log.warning(f"Prefill esuat: {e}", exc_info=True)
                 # Prefill-ul a tinut `is_loading`, dar nu porneste nicio redare.
                 # Un `!play` intrat in fereastra aceea a fost pus in coada crezand
                 # ca incarcarea in curs o va scurge — deci trebuie sa o scurgem noi.

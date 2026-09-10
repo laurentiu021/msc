@@ -331,8 +331,10 @@ def cleanup_file(filename, loop=None):
         try:
             asyncio.run_coroutine_threadsafe(_delayed_delete(), loop)
             return
-        except Exception:
-            pass
+        except RuntimeError as e:
+            # Bucla inchisa. Nu inghitim in tacere: cadem pe stergerea sincrona
+            # de mai jos, dar motivul trebuie sa se vada in loguri.
+            log.debug(f"Stergerea amanata nu a putut fi programata: {e}")
     # Fara loop, varianta veche ieșea fara sa stearga nimic si fisierul rămânea
     # pe disc definitiv. Stergem sincron, e o singura operatie de filesystem.
     try:

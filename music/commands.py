@@ -101,7 +101,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                  'socket_timeout': 15},
                 query, loop=bot.loop, stage='platform_resolve')
         except Exception as e:
-            log.warning(f"Nu am putut citi linkul de platforma: {e}")
+            log.warning(f"Nu am putut citi linkul de platforma: {e}", exc_info=True)
             return None
         title = (info or {}).get('title') or ''
         artist = (info or {}).get('artist') or (info or {}).get('uploader') or ''
@@ -172,7 +172,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                 else:
                     await process_play(ctx, first_url)
             except Exception as e:
-                log.error(f"Eroare playlist: {e}")
+                log.error(f"Eroare playlist: {e}", exc_info=True)
                 state.last_raw_error = str(e)[:600]
                 await ctx.send("Nu am putut citi playlist-ul.", delete_after=15)
                 if not (vc.is_playing() or vc.is_paused()):
@@ -331,6 +331,9 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             source = await discord.FFmpegOpusAudio.from_probe(filename, **seek_opts)
             vc.play(source, after=after_play)
         except Exception:
+            # Acelasi fallback ca in player.py, dar acolo se si LOGHEAZA. Aici
+            # nu se scria nimic, deci un ffprobe lipsa era invizibil.
+            log.warning("Seek: OpusAudio esuat, fallback PCM", exc_info=True)
             vc.play(discord.FFmpegPCMAudio(filename, **seek_opts), after=after_play)
         await ctx.send(f"Seek la `{format_time(seconds)}`", delete_after=5)
         await update_player_ui(ctx)
@@ -353,7 +356,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                 try:
                     await prefill_autoplay_queue(state, bot.loop)
                 except Exception as e:
-                    log.warning(f"Prefill 24/7 esuat: {e}")
+                    log.warning(f"Prefill 24/7 esuat: {e}", exc_info=True)
             await ctx.send("24/7 ON - autoplay activat.", delete_after=5)
             await update_player_ui(ctx)
             # Ramura asta anula timer-ul si nu pornea NIMIC in loc: 24/7 rămânea

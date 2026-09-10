@@ -113,6 +113,40 @@ def test_is_clean_still_filters_duration_and_blocklist():
     assert is_clean('lofi chill beats', 200, '') is False, 'blocklist'
 
 
+def test_no_generic_except_swallows_in_silence():
+    """`except Exception: pass` face un defect al nostru sa arate ca o pana YouTube.
+
+    Erau sase asemenea locuri: `view.stop()`, `vc.disconnect()`, `source.cleanup()`,
+    programarea stergerii amanate, si fallback-ul PCM din `!seek` — care nu scria
+    absolut nimic, deci un ffprobe lipsa era complet invizibil.
+
+    Unde suprafata de eșec e enumerabila am enumerat-o (urllib+json in
+    `_api_get`, ImportError la versiunea de discord, RuntimeError la bucla
+    inchisa). Unde nu e — yt-dlp ridica zeci de tipuri, iar granitele de task nu
+    au voie sa omoare sesiunea — `Exception` rămâne, dar trebuie sa LASE URMA.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    files = [root / 'bot.py'] + sorted((root / 'music').glob('*.py'))
+    silent = []
+    for path in files:
+        tree = ast.parse(path.read_text(encoding='utf-8'))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ExceptHandler):
+                continue
+            caught = node.type
+            if not (isinstance(caught, ast.Name) and caught.id == 'Exception'):
+                continue
+            body = ast.unparse(node)
+            # Ori spune ceva in loguri, ori repropaga. Altfel e o inghitire muta.
+            if 'log.' not in body and 'raise' not in body:
+                silent.append(f'{path.name}:{node.lineno}')
+    assert not silent, (
+        'except Exception care nu logheaza si nu repropaga: ' + ', '.join(silent))
+
+
 def test_the_bot_can_never_ping_anyone_with_echoed_text():
     """Botul ecoueaza text scris de utilizatori: interogarea din confirmarea de
     coada, titlurile din `!remove`/`!move`, numele comenzii din mesajele de eroare.

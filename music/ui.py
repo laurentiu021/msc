@@ -27,7 +27,7 @@ def _stop_view(state):
     if state.current_view is not None:
         try:
             state.current_view.stop()
-        except Exception:
+        except (AttributeError, RuntimeError):
             log.debug("View-ul vechi nu a putut fi oprit", exc_info=True)
         state.current_view = None
 

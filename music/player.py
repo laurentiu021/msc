@@ -185,7 +185,7 @@ async def trigger_radio(ctx, token: int | None = None):
         else:
             raise ValueError("Nu s-au gasit piese pentru autoplay.")
     except Exception as e:
-        log.warning(f"Autoplay error (guild {ctx.guild.id}): {e}")
+        log.warning(f"Autoplay error (guild {ctx.guild.id}): {e}", exc_info=True)
         _release_loading(state, token)
         state.autoplay = False
         try:
@@ -236,7 +236,7 @@ async def _play_next_async(ctx, token: int | None = None):
                     log.info(f"Refill dupa skip: coada={len(state.queue)}")
                     await update_player_ui(ctx)
                 except Exception as e:
-                    log.warning(f"Prefill dupa skip esuat: {e}")
+                    log.warning(f"Prefill dupa skip esuat: {e}", exc_info=True)
         elif state.autoplay and state.last_url:
             cancel_timeout(ctx)
             await trigger_radio(ctx, token)
@@ -515,8 +515,8 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
             if source is not None:
                 try:
                     source.cleanup()
-                except Exception:
-                    pass
+                except (OSError, AttributeError, ValueError) as e:
+                    log.debug(f"Curatarea sursei audio a eșuat: {e}")
             vc.play(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTS), after=after_play)
 
         # A ieșit audio din proces. Momentul asta e singurul raspuns la "mai

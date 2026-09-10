@@ -232,7 +232,7 @@ async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple
                 return selected, clients, use_cookies, raw_error
         except Exception as e:
             raw_error = str(e)[:600]
-            log.warning(f"Extractia a eșuat cu client={label}: {e}")
+            log.warning(f"Extractia a eșuat cu client={label}: {e}", exc_info=True)
     return selected, None, False, raw_error
 
 
@@ -272,7 +272,7 @@ async def _retry_for_formats(selected: dict, web_url: str, loop):
         log.warning(f"Si reincercarea a dat 0 formate redabile pentru {vid_id}")
         return None, None, None, False
     except Exception as e:
-        log.warning(f"Reincercarea a eșuat pentru {vid_id}: {e}")
+        log.warning(f"Reincercarea a eșuat pentru {vid_id}: {e}", exc_info=True)
         return None, str(e)[:600], None, False
 
 

@@ -39,7 +39,7 @@ from music.config import DOWNLOAD_DIR, env_num, log as music_log
 from music.state import (get_state, guild_states, mark_paused, mark_resumed,
                          set_autoplay)
 from music.idle import DISCONNECT, RADIO, decide_idle_action
-from music.utils import safe_delete
+from music.utils import DISCORD_ERRORS, safe_delete
 from music.autoplay import prefill_autoplay_queue
 from music import diag
 from music import ytdlp as ytdlp_mod
@@ -233,7 +233,7 @@ async def idle_timer(ctx):
                 try:
                     await prefill_autoplay_queue(state, bot.loop)
                 except Exception as e:
-                    music_log.warning(f"Prefill 24/7 esuat: {e}")
+                    music_log.warning(f"Prefill 24/7 esuat: {e}", exc_info=True)
             if state.queue:
                 player.play_next(ctx)
             else:
@@ -679,8 +679,8 @@ async def _shutdown():
         if state.current_view is not None:
             try:
                 state.current_view.stop()
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError) as e:
+                log.debug(f"View-ul nu a putut fi oprit la inchidere: {e}")
         await safe_delete(state.current_msg)
         state.current_msg = None
         state.current_view = None
@@ -690,8 +690,8 @@ async def _shutdown():
     for vc in list(bot.voice_clients):
         try:
             await vc.disconnect(force=True)
-        except Exception:
-            pass
+        except DISCORD_ERRORS as e:
+            log.warning(f"Deconectarea de la voce a eșuat la inchidere: {e}")
     await bot.close()
 
 

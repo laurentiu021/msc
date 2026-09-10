@@ -58,7 +58,7 @@ def pot_ping(timeout: float = 2.0) -> tuple[bool, str]:
             return True, resp.read(120).decode('utf-8', 'replace')
     except urllib.error.HTTPError as e:
         return False, f'HTTP {e.code}'
-    except Exception as e:
+    except (OSError, ValueError) as e:
         return False, str(e)[:80]
 
 
@@ -161,7 +161,7 @@ def _discord_version() -> str:
     try:
         import discord
         return discord.__version__
-    except Exception:
+    except (ImportError, AttributeError):
         return 'necunoscut'
 
 

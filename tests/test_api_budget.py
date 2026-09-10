@@ -336,6 +336,55 @@ class _FakeHTTP:
         return False
 
 
+def test_a_bug_of_ours_inside_api_get_is_not_reported_as_an_api_outage():
+    """`except Exception` acolo facea un defect al nostru indistinguibil de o pana.
+
+    urllib ridica URLError/HTTPError (ambele OSError) si json.loads ValueError —
+    astea sunt eșecuri reale, se logheaza si se intoarce None ca sa incerce alta
+    strategie. Un TypeError din construirea cererii e insa un bug, si trebuie sa
+    urce, nu sa fie raportat drept "YouTube API error".
+    """
+    import urllib.request
+
+    saved_urlopen = urllib.request.urlopen
+    saved_key = api.API_KEY
+    api.API_KEY = 'k'
+    api._units_spent = 0
+    api._quota_day = api._utc_day()
+
+    def our_bug(req, timeout=None):
+        raise TypeError("a bug of ours, not a network failure")
+
+    urllib.request.urlopen = our_bug
+    try:
+        raised = None
+        try:
+            api._api_get('videos', {'id': 'x'})
+        except TypeError as e:
+            raised = e
+        assert raised is not None, (
+            'un TypeError de-al nostru a fost inghitit si raportat ca eroare de API')
+    finally:
+        urllib.request.urlopen = saved_urlopen
+        api.API_KEY = saved_key
+        api._units_spent = 0
+        api._quota_day = None
+
+
+def test_a_real_network_failure_is_still_handled():
+    """Cealalta jumatate: restrangerea nu are voie sa rupa recuperarea normala."""
+    with _FakeHTTP(error=OSError('connection reset')):
+        assert api._api_get('videos', {'id': 'x'}) is None
+    import json as _json
+    saved_loads = _json.loads
+    with _FakeHTTP():
+        _json.loads = lambda *a, **k: (_ for _ in ()).throw(ValueError('nu e json'))
+        try:
+            assert api._api_get('videos', {'id': 'x'}) is None
+        finally:
+            _json.loads = saved_loads
+
+
 def test_a_real_search_charges_the_real_counter():
     """101 = 100 pentru search.list + 1 pentru batch-ul videos.list."""
     with _FakeHTTP() as http:

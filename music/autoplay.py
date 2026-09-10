@@ -181,7 +181,7 @@ async def _try_api_related(state, bot_loop, origin_id, skip_ids, needed, artist_
             log.info(f"Autoplay API related: +{added}")
         return added
     except Exception as e:
-        log.warning(f"Autoplay API related failed: {e}")
+        log.warning(f"Autoplay API related failed: {e}", exc_info=True)
         return 0
 
 
@@ -211,7 +211,7 @@ async def _try_ytdlp_mix(state, bot_loop, origin_id, skip_ids, needed, artist_co
             log.info(f"Autoplay Mix: +{added}")
         return added
     except Exception as e:
-        log.warning(f"Autoplay Mix failed: {e}")
+        log.warning(f"Autoplay Mix failed: {e}", exc_info=True)
         return 0
 
 
@@ -238,7 +238,7 @@ async def _try_api_search(state, bot_loop, title, skip_ids, needed, artist_count
             log.info(f"Autoplay API search: +{added}")
         return added
     except Exception as e:
-        log.warning(f"Autoplay API search failed: {e}")
+        log.warning(f"Autoplay API search failed: {e}", exc_info=True)
         return 0
 
 
@@ -267,5 +267,5 @@ async def _try_ytdlp_search(state, bot_loop, title, skip_ids, needed, artist_cou
             log.info(f"Autoplay yt-dlp search: +{added}")
         return added
     except Exception as e:
-        log.warning(f"Autoplay yt-dlp search failed: {e}")
+        log.warning(f"Autoplay yt-dlp search failed: {e}", exc_info=True)
         return 0

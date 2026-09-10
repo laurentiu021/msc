@@ -82,7 +82,11 @@ def _api_get(endpoint: str, params: dict) -> dict | None:
         req = urllib.request.Request(url, headers={'Accept': 'application/json'})
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode())
-    except Exception as e:
+    # Enumerate, nu `Exception`: urllib ridica URLError/HTTPError (ambele OSError)
+    # si json.loads ridica ValueError. Un TypeError din construirea parametrilor de
+    # mai sus e un defect AL NOSTRU si trebuie sa se vada, nu sa arate ca o pana
+    # de rețea care se rezolva singura.
+    except (OSError, ValueError) as e:
         log.warning(f"YouTube API error ({endpoint}, {cost}u): {e}")
         return None
 
