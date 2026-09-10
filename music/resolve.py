@@ -71,6 +71,11 @@ class Resolved:
     # Clientul si modul de cookies care au produs formate redabile.
     client: tuple | None = None
     used_cookies: bool = False
+    # Modul de cookies al cererii care a scris CHIAR fisierul. Separat de
+    # `used_cookies` fiindca bucla de descarcare are propriul fallback la guest:
+    # extractia poate reusi cu jar-ul si descarcarea fara el. Doar asta dovedeste
+    # ca jar-ul a autentificat ceva, deci doar asta poate promova o copie buna.
+    download_used_cookies: bool = False
 
     @property
     def ok(self) -> bool:
@@ -252,8 +257,15 @@ async def _retry_for_formats(selected: dict, web_url: str,
 
 
 async def _download(web_url: str, client: tuple | None, prefer_cookies: bool,
-                    loop, raw_error: str | None) -> tuple[dict | None, str | None, str | None]:
-    """(download_info, filename, eroare_bruta).
+                    loop, raw_error: str | None
+                    ) -> tuple[dict | None, str | None, str | None, bool]:
+    """(download_info, filename, eroare_bruta, cu_cookies).
+
+    Ultimul element spune daca fisierul a fost scris de o cerere care DUCEA
+    jar-ul. Se intoarce pentru ca apelantul promoveaza copia "ultima buna" de
+    cookies pe baza lui: fara el, o descarcare reusita ca guest era luata drept
+    dovada ca jar-ul mai autentifica si stampila peste singura copie care chiar
+    functionase.
 
     Format-ul in bucla EXTERIOARA, modul de cookies in cea interioara: un 429 sau
     un cookie expirat nu devine alt raspuns daca intrebi cu alt sir de format,
@@ -293,12 +305,12 @@ async def _download(web_url: str, client: tuple | None, prefer_cookies: bool,
                             filename = base + ext
                             break
                 if filename and os.path.exists(filename):
-                    return dl_info, filename, raw_error
+                    return dl_info, filename, raw_error, use_cookies
             except Exception as e:
                 raw_error = str(e)[:600]
                 log.warning(f"Download esuat (cookies={use_cookies}, "
                             f"fmt='{fmt}'): {e}")
-    return dl_info, filename, raw_error
+    return dl_info, filename, raw_error, False
 
 
 async def resolve_from_url(target_url: str, *, loop=None,
@@ -323,7 +335,8 @@ async def resolve_from_url(target_url: str, *, loop=None,
     resolved.info = selected
     resolved.client = client
     resolved.used_cookies = used_cookies
-    resolved.url = selected.get('webpage_url') or         f"https://www.youtube.com/watch?v={selected.get('id', '')}"
+    resolved.url = (selected.get('webpage_url')
+                    or f"https://www.youtube.com/watch?v={selected.get('id', '')}")
 
     if not has_real_formats(selected.get('formats', [])):
         retry_info, retry_error = await _retry_for_formats(selected, resolved.url, loop)
@@ -346,7 +359,8 @@ async def resolve_from_url(target_url: str, *, loop=None,
         resolved.interrupted = True
         return resolved
 
-    resolved.download_info, resolved.filename, resolved.raw_error = await _download(
+    (resolved.download_info, resolved.filename, resolved.raw_error,
+     resolved.download_used_cookies) = await _download(
         resolved.url, client, used_cookies, loop, resolved.raw_error)
 
     if not resolved.ok and not resolved.raw_error:

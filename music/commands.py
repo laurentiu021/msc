@@ -1,5 +1,6 @@
 """Toate comenzile muzicale."""
 import asyncio
+import contextlib
 import os
 import random
 import re
@@ -142,7 +143,15 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                 # Marcam ocupat INAINTE de extractie. Fara asta, un !play dat in
                 # timpul citirii unui playlist de 30 de intrari nu vedea nimic
                 # ocupat si pornea propria rezolvare in paralel.
-                with loading(state):
+                #
+                # Dar NUMAI daca steagul e liber: `begin_loading` incrementeaza
+                # token-ul, deci `loading()` peste o incarcare existenta ii fura
+                # proprietatea, iar la ieșirea din bloc stingea un steag care nu
+                # era al nostru. Cel de mai jos vedea atunci "liber" si pornea un
+                # al doilea `process_play` in paralel cu primul.
+                guard = (contextlib.nullcontext() if state.is_loading
+                         else loading(state))
+                with guard:
                     info = await ytdlp.extract(ydl_opts_pl, search,
                                                loop=bot.loop, stage='playlist')
                 entries = info.get('entries', [])
@@ -337,11 +346,22 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             state.show_queue = True
             state.breaker_until = 0.0
             state.idle_quiet_until = 0.0
-            if not state.queue and state.last_url:
-                try: await prefill_autoplay_queue(state, bot.loop)
-                except Exception: pass
+            # `not state.is_loading` e aceeasi conditie ca la butonul Autoplay:
+            # prefill-ul trage un Mix de pana la 50 de intrari, iar peste o
+            # incarcare in curs ar dubla cererile pe un IP care deja ne limiteaza.
+            if not state.queue and state.last_url and not state.is_loading:
+                try:
+                    await prefill_autoplay_queue(state, bot.loop)
+                except Exception as e:
+                    log.warning(f"Prefill 24/7 esuat: {e}")
             await ctx.send("24/7 ON - autoplay activat.", delete_after=5)
             await update_player_ui(ctx)
+            # Ramura asta anula timer-ul si nu pornea NIMIC in loc: 24/7 rămânea
+            # ON, cu coada plina si fara niciun timer, deci nimic din proces nu mai
+            # putea porni radioul — botul tacea pentru totdeauna. `finally`-ul
+            # tick-ului e singurul care re-armeaza, si el ruleaza doar dintr-un
+            # tick care exista deja.
+            log.info(f"247 ON: {player_mod.resume_if_idle(ctx)}")
         else:
             set_autoplay(state, False, by_user=True)
             state.show_queue = False

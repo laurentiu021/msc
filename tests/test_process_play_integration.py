@@ -18,7 +18,8 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from music import player, resolve, state as state_mod, ytdlp as ytdlp_mod
+from music import (config, player, resolve, state as state_mod,
+                   ytdlp as ytdlp_mod)
 from music.state import GuildState
 
 
@@ -488,6 +489,131 @@ def test_an_explicit_short_link_is_still_played():
 
 def test_unplayable_reason_catches_upcoming_premieres():
     assert resolve.unplayable_reason({'live_status': 'is_upcoming'})
+
+
+# --- promovarea copiei bune de cookies --------------------------------------
+# `cookies_valid` e pur STRUCTURALA: se uita doar la numele din jar. Putrezirea
+# tipica pastreaza numele si omoara valorile, deci un jar deja refuzat de YouTube
+# trece verificarea. Singura aparare rămâne MOMENTUL promovarii: doar o cerere
+# care a dus jar-ul si a reusit dovedeste ceva despre el.
+
+_LIVE_JAR = ('# Netscape HTTP Cookie File\n'
+             '.youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-1PSID\tVALORI-VII\n')
+_DEAD_JAR = ('# Netscape HTTP Cookie File\n'
+             '.youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-1PSID\tvalori-moarte\n')
+
+
+class _Jar:
+    """Un jar mort pe disc si o copie buna alaturi, exact ca in producție."""
+
+    def __init__(self, tmp, current=_DEAD_JAR, good=_LIVE_JAR):
+        self.path = os.path.join(tmp, 'cookies.txt')
+        self.good_path = self.path + '.good'
+        with open(self.path, 'w', encoding='utf-8') as fh:
+            fh.write(current)
+        with open(self.good_path, 'w', encoding='utf-8') as fh:
+            fh.write(good)
+
+    def __enter__(self):
+        self._saved = config._cookies_path
+        config._cookies_path = self.path
+        return self
+
+    def __exit__(self, *exc):
+        config._cookies_path = self._saved
+        return False
+
+    def good(self) -> str:
+        with open(self.good_path, encoding='utf-8') as fh:
+            return fh.read()
+
+
+def test_a_reused_file_never_stamps_the_cookie_jar_as_good():
+    """O redare cu ZERO cereri catre YouTube nu dovedeste nimic despre jar.
+
+    Reprodus inainte de fix: loop pe acelasi URL (0 extractii, 0 descarcari)
+    copia jar-ul mort peste singura copie care autentificase vreodata. Apoi prima
+    piesa noua eșua, revenirea restaura jar-ul mort, `_rolled_back` era consumat,
+    si ultimele credentiale bune nu mai existau nicaieri pe disc.
+    """
+    with tempfile.TemporaryDirectory() as tmp, _Jar(tmp) as jar:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        st = _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient())
+        with _Harness(target) as h:
+            asyncio.run(player.process_play(ctx, 'ceva'))
+            # Prima redare a folosit jar-ul, deci promovarea ei e legitima; o
+            # anulam ca sa masuram exact ce face A DOUA.
+            with open(jar.good_path, 'w', encoding='utf-8') as fh:
+                fh.write(_LIVE_JAR)
+            extracts, downloads = len(h.extract_calls), len(h.download_calls)
+            asyncio.run(player.process_play(ctx, st.last_url))
+            assert len(h.extract_calls) == extracts, 'redarea refolosita a extras'
+            assert len(h.download_calls) == downloads, 'redarea refolosita a descarcat'
+
+        assert jar.good() == _LIVE_JAR, (
+            'o redare fara nicio cerere a stampilat jar-ul curent drept "bun": '
+            'copia buna a fost distrusa de o redare care nu a autentificat nimic')
+
+
+def test_a_guest_download_never_stamps_the_cookie_jar_as_good():
+    """Bucla de descarcare are propriul fallback la guest.
+
+    Cand fisierul e produs de o cerere FARA jar, succesul nu spune nimic despre
+    jar — dar vechea poarta (`if cookies_available()`) il promova oricum.
+    """
+    with tempfile.TemporaryDirectory() as tmp, _Jar(tmp) as jar:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient())
+        modes = []
+        with _Harness(target) as h:
+            saved = ytdlp_mod.extract_and_prepare_filename
+
+            async def only_guest_works(opts, query, loop=None, stage=''):
+                # Inregistram AICI, nu din download_calls: incercarea cu jar-ul
+                # nu ajunge niciodata la harness, fiindca o refuzam inainte.
+                modes.append(bool(opts.get('cookiefile')))
+                if opts.get('cookiefile'):
+                    raise RuntimeError('HTTP Error 403: Forbidden')
+                return await saved(opts, query, loop=loop, stage=stage)
+
+            ytdlp_mod.extract_and_prepare_filename = only_guest_works
+            asyncio.run(player.process_play(ctx, 'ceva'))
+        assert h.download_calls, 'nu s-a descarcat nimic'
+
+        assert modes and modes[0] is True, (
+            f'descarcarea nu a incercat deloc cu jar-ul: {modes}')
+        assert False in modes, f'nu s-a ajuns la varianta de guest: {modes}'
+        assert jar.good() == _LIVE_JAR, (
+            'o descarcare reusita ca GUEST a fost luata drept dovada ca jar-ul '
+            'mai autentifica')
+
+
+def test_a_download_that_used_the_jar_does_stamp_it_as_good():
+    """Cealalta jumatate: fara ea, "nu promova" ar fi un fix care rupe revenirea.
+
+    Daca nimic nu mai promoveaza, copia buna nu se reinnoieste niciodata si
+    rotatia scrisa de yt-dlp (`__Secure-1PSIDTS` se schimba des) nu ajunge in ea.
+    """
+    with tempfile.TemporaryDirectory() as tmp, _Jar(tmp) as jar:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient())
+        with _Harness(target) as h:
+            asyncio.run(player.process_play(ctx, 'ceva'))
+            modes = [bool(opts.get('cookiefile')) for _, opts in h.download_calls]
+
+        assert modes and modes[0] is True, f'nu s-a descarcat cu jar-ul: {modes}'
+        assert jar.good() == _DEAD_JAR, (
+            'descarcarea a folosit jar-ul si a reusit, dar copia buna nu s-a '
+            'reinnoit: rotatia scrisa de yt-dlp nu ajunge niciodata in ea')
 
 
 if __name__ == '__main__':

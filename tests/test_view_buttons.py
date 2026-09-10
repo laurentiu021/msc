@@ -27,6 +27,9 @@ class _FakeVoiceClient:
     def __init__(self):
         self.disconnected = False
 
+    def is_connected(self):
+        return not self.disconnected
+
     def is_playing(self):
         return False
 
@@ -122,6 +125,51 @@ def test_stop_button_without_a_file_does_not_raise():
     st.current_file = None
     _press('stop_btn', st)
     assert st.current_file is None
+
+
+def test_the_autoplay_button_starts_playing_after_its_prefill():
+    """Prefill-ul ia `is_loading` fara sa porneasca nicio redare.
+
+    `is_loading` inseamna pentru toti ceilalti "o incarcare e in curs si va
+    scurge coada", deci un `!play` intrat in fereastra de prefill era pus in coada
+    si nimic nu il mai scotea: `!play` anulase si timer-ul, iar `after_play` are
+    nevoie de o piesa care chiar cânta. Botul rămânea in canal, tacut, cu panoul
+    aratand "N in coada".
+    """
+    st = _fresh_state()
+    st.last_url = 'https://www.youtube.com/watch?v=x'
+    started = []
+
+    async def fake_prefill(state, loop=None):
+        # Exact interleaving-ul din raport: un !play aterizeaza in fereastra si
+        # se pune in coada crezand ca incarcarea in curs il va porni.
+        state.queue.append({'query': 'piesa cerută', 'title': 'X'})
+
+    saved_prefill = views.prefill_autoplay_queue
+    saved_next = player.play_next
+    views.prefill_autoplay_queue = fake_prefill
+    player.play_next = lambda ctx: started.append(True)
+    try:
+        import music.ui as ui_mod
+        saved_ui = ui_mod.update_player_ui
+
+        async def no_ui(ctx, send_new=False):
+            return None
+
+        ui_mod.update_player_ui = no_ui
+        try:
+            _press('autoplay_btn', st)
+        finally:
+            ui_mod.update_player_ui = saved_ui
+    finally:
+        views.prefill_autoplay_queue = saved_prefill
+        player.play_next = saved_next
+
+    assert st.autoplay is True, 'butonul nu a pornit autoplay'
+    assert st.is_loading is False, 'steagul a rămas aprins dupa prefill'
+    assert started, (
+        'prefill-ul a umplut coada si a eliberat steagul fara sa porneasca '
+        'nimic: piesa rămâne in coada pentru totdeauna')
 
 
 if __name__ == '__main__':

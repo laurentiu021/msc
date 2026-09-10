@@ -79,6 +79,9 @@ class _Wiring:
     def __init__(self):
         self.plays = []
         self.ui_calls = 0
+        self.next_calls = []
+        self.starts = []
+        self.cancels = []
         self.bot = _FakeBot()
 
     def __enter__(self):
@@ -95,12 +98,25 @@ class _Wiring:
 
         commands_mod.safe_delete = no_delete
         commands_mod.setup_music_commands(
-            self.bot, process_play, lambda *a, **k: None, update_player_ui,
-            lambda *a, **k: None, lambda *a, **k: None)
+            self.bot, process_play,
+            lambda *a, **k: self.next_calls.append(a), update_player_ui,
+            lambda *a, **k: self.starts.append(a),
+            lambda *a, **k: self.cancels.append(a))
+        # `resume_if_idle` trece prin globalele modulului player, nu prin
+        # dependentele injectate in comenzi, deci le inlocuim si pe ele.
+        from music import player
+        self._saved_player = (player.play_next, player.start_timeout,
+                              player.cancel_timeout)
+        player.play_next = lambda ctx: self.next_calls.append(('play_next',))
+        player.start_timeout = lambda ctx: self.starts.append(('start',))
+        player.cancel_timeout = lambda ctx: self.cancels.append(('cancel',))
         return self
 
     def __exit__(self, *exc):
         commands_mod.safe_delete = self.saved_delete
+        from music import player
+        (player.play_next, player.start_timeout,
+         player.cancel_timeout) = self._saved_player
         return False
 
 
@@ -220,6 +236,117 @@ def test_the_autoplay_button_does_not_prefill_while_loading():
 
     assert prefills == [], 'a cerut un Mix de 50 de intrari in timpul unei incarcari'
     assert st.autoplay is True, 'butonul trebuie totusi sa comute steagul'
+
+
+def test_247_on_actually_starts_playing():
+    """Ramura ON anula timer-ul si nu pornea nimic in loc.
+
+    Rezultatul: always_on=True, autoplay=True, coada plina, niciun timer — si
+    nimic in tot procesul care sa mai poata porni radioul. `finally`-ul tick-ului
+    e singurul care re-armeaza, si el are nevoie de un tick care exista deja.
+    """
+    st = _fresh_state()
+    st.last_url = 'https://www.youtube.com/watch?v=x'
+    st.queue = [{'query': 'a', 'title': 'A'}]
+    ctx = _FakeCtx(_FakeVoiceClient(playing=False))
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['247'](ctx))
+
+    assert st.always_on is True, 'nu a pornit 24/7'
+    assert w.next_calls or w.starts, (
+        '24/7 ON a lasat botul fara redare si fara timer: nimic nu mai poate '
+        'porni radioul')
+
+
+def test_247_on_does_not_prefill_over_a_load_in_flight():
+    """Aceeasi regula ca la butonul Autoplay: instanta era reparata, clasa nu."""
+    st = _fresh_state()
+    st.last_url = 'https://www.youtube.com/watch?v=x'
+    begin_loading(st)
+    prefills = []
+
+    async def fake_prefill(state, loop=None):
+        prefills.append(True)
+
+    saved = commands_mod.prefill_autoplay_queue
+    commands_mod.prefill_autoplay_queue = fake_prefill
+    try:
+        ctx = _FakeCtx(_FakeVoiceClient(playing=False))
+        with _Wiring() as w:
+            asyncio.run(w.bot.registry['247'](ctx))
+    finally:
+        commands_mod.prefill_autoplay_queue = saved
+
+    assert prefills == [], (
+        'a cerut un Mix de pana la 50 de intrari peste o incarcare in curs')
+
+
+def test_247_on_while_something_plays_does_not_restart_playback():
+    """Poarta nu are voie sa taie piesa curenta."""
+    st = _fresh_state()
+    st.queue = [{'query': 'a', 'title': 'A'}]
+    ctx = _FakeCtx(_FakeVoiceClient(playing=True))
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['247'](ctx))
+
+    assert w.next_calls == [], 'a pornit o redare peste piesa care cânta'
+    assert w.plays == [], w.plays
+
+
+def test_the_playlist_branch_does_not_steal_a_loading_flag_it_did_not_set():
+    """`begin_loading` incrementeaza token-ul, deci `loading()` fura proprietatea.
+
+    Cu un `!play` deja in curs, blocul `with loading(state)` din ramura de
+    playlist devenea proprietarul steagul, iar la ieșire il STINGEA — desi prima
+    incarcare rula inca. Verificarea de mai jos vedea atunci "liber" si pornea un
+    al doilea `process_play` in paralel.
+    """
+    st = _fresh_state()
+    begin_loading(st)                       # un !play e deja in curs
+
+    async def fake_extract(opts, query, download=False, loop=None, stage=''):
+        return {'entries': [
+            {'id': 'a', 'title': 'A', 'url': 'https://www.youtube.com/watch?v=a'},
+            {'id': 'b', 'title': 'B', 'url': 'https://www.youtube.com/watch?v=b'},
+        ]}
+
+    saved = commands_mod.ytdlp.extract
+    commands_mod.ytdlp.extract = fake_extract
+    try:
+        ctx = _FakeCtx(_FakeVoiceClient(playing=False))
+        with _Wiring() as w:
+            asyncio.run(w.bot.registry['play'](
+                ctx, search='https://www.youtube.com/watch?v=a&list=PL123'))
+    finally:
+        commands_mod.ytdlp.extract = saved
+
+    assert st.is_loading is True, (
+        'ramura de playlist a stins steagul incarcarii care rula deja')
+    assert w.plays == [], (
+        f'a pornit un al doilea process_play peste unul in curs: {w.plays}')
+    assert len(st.queue) == 2, f'playlist-ul nu a intrat intreg in coada: {st.queue}'
+
+
+def test_resume_if_idle_never_doubles_a_load_in_flight():
+    from music import player
+
+    st = _fresh_state()
+    st.queue = [{'query': 'a', 'title': 'A'}]
+    begin_loading(st)
+    ctx = _FakeCtx(_FakeVoiceClient(playing=False))
+    with _Wiring():
+        assert player.resume_if_idle(ctx) == 'se incarca altceva'
+
+
+def test_resume_if_idle_arms_the_timer_when_there_is_nothing_to_play():
+    """Altfel botul rămâne conectat, tacut si fara nicio cale de a decide ceva."""
+    from music import player
+
+    _fresh_state()
+    ctx = _FakeCtx(_FakeVoiceClient(playing=False))
+    with _Wiring() as w:
+        assert player.resume_if_idle(ctx) == 'timer armat'
+    assert w.starts, 'nu a armat niciun timer'
 
 
 if __name__ == '__main__':

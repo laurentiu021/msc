@@ -10,7 +10,7 @@ import re
 import urllib.parse
 import urllib.request
 
-from music.config import log, BLACKLIST
+from music.config import log, env_num, BLACKLIST
 from music.utils import clean_search_title
 
 API_KEY = os.getenv('YOUTUBE_API_KEY')
@@ -24,7 +24,7 @@ UNIT_COST = {'search': 100, 'videos': 1}
 # doar o strategie de rezerva (Mix-ul yt-dlp e primul si e gratis), deci nu are
 # ce sa consume toata ziua. Fara plafon, `_api_get` primea 403 dupa epuizare, il
 # loga ca warning si autoplay se oprea in tacere.
-DAILY_UNIT_CAP = int(os.getenv('YOUTUBE_API_DAILY_UNITS', '4000'))
+DAILY_UNIT_CAP = env_num('YOUTUBE_API_DAILY_UNITS', 4000, low=0, high=10_000)
 
 _units_spent = 0
 _quota_day = None

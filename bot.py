@@ -35,7 +35,7 @@ else:
 import discord
 from discord.ext import commands
 
-from music.config import DOWNLOAD_DIR, log as music_log
+from music.config import DOWNLOAD_DIR, env_num, log as music_log
 from music.state import (get_state, guild_states, mark_paused, mark_resumed,
                          set_autoplay)
 from music.idle import DISCONNECT, RADIO, decide_idle_action
@@ -243,6 +243,12 @@ setup_music_commands(
 )
 
 # --- Events ---
+# Rabdarea inainte de a pleca dintr-un canal ramas gol. Constanta, nu literal in
+# cod, ca sa poata fi scurtata din teste: altfel verificarea comportamentului ar
+# cere 20 de secunde de aȘteptare reala.
+EMPTY_CHANNEL_GRACE_SEC = 20
+
+
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member == bot.user and before.channel and after.channel:
@@ -263,9 +269,20 @@ async def on_voice_state_update(member, before, after):
     if member == bot.user and before.channel and not after.channel:
         state = get_state(member.guild.id)
         state.queue.clear()
-        # Cineva a scos botul din canal: e o oprire deliberata, deci timer-ul de
-        # 24/7 nu are ce reporni.
-        set_autoplay(state, False, by_user=True)
+        # by_user=False, deliberat: handler-ul asta NU poate sti cine a provocat
+        # deconectarea. Se declanșeaza si cand discord.py rupe singur conexiunea
+        # ("We were externally disconnected from voice", close 4014/4022/4021),
+        # cand canalul de voce e sters, sau pe calea automata de canal gol. Cu
+        # by_user=True, fiecare astfel de eveniment scria autoplay_user_off=True
+        # — singurul scriitor al steagului — si de atunci decide_idle_action
+        # raspundea "radio oprit de utilizator" pe viata procesului, deci 24/7 nu
+        # mai repornea niciodata radioul, invinuind un utilizator care nu facuse
+        # nimic. Cine chiar opreste deliberat (!stop, butonul Stop, !247 off) pune
+        # deja steagul cu by_user=True inainte de deconectare.
+        set_autoplay(state, False, by_user=False)
+        # Sesiunea s-a incheiat, deci nici "stai conectat" nu mai are obiect: fara
+        # asta rămânea always_on=True pe o stare deconectata.
+        state.always_on = False
         state.loop_mode = 0
         state.is_loading = False
         if state.current_file:
@@ -285,11 +302,15 @@ async def on_voice_state_update(member, before, after):
         # in canal mai statea un al doilea bot, si Gogu cânta la pereti.
         humans_left = [m for m in before.channel.members if not m.bot]
         if bot_in_channel and not humans_left:
-            await asyncio.sleep(20)
+            await asyncio.sleep(EMPTY_CHANNEL_GRACE_SEC)
             vc = member.guild.voice_client
             if vc and vc.channel == before.channel:
                 real = [m for m in before.channel.members if not m.bot]
-                if not real:
+                # `always_on` se re-verifica DUPA pauza, nu doar inainte: 20 de
+                # secunde sunt exact cat ii trebuie cuiva sa dea `!247` vazand ca
+                # se goleste canalul, iar varianta care verifica doar la intrare
+                # deconecta apoi sesiunea 24/7 pe care el tocmai o pornise.
+                if not real and not state.always_on:
                     await vc.disconnect()
 
 
@@ -320,7 +341,43 @@ async def _log_command_invoke(ctx):
 
 
 @bot.event
+async def setup_hook():
+    """Bataia porneste AICI, nu in on_ready.
+
+    setup_hook e aȘteptat din `login()`, inainte de `connect()`, deci inainte de
+    orice READY. Cand pornea la finalul lui on_ready, doua situatii normale
+    lasau procesul fara nicio bataie, iar watchdog-ul il omorea sanatos:
+
+    1. Orice excepție mai sus in on_ready. `bot.tree.sync()` prinde doar
+       discord.HTTPException, iar o cadere de DNS/TCP da ClientConnectorError
+       (un OSError). discord.py inghite excepțiile din handlere de eveniment si
+       nu redifuzeaza NICIODATA on_ready la reconectare (parse_resumed trimite
+       doar on_resumed), deci bataia nu mai porneste pe viata sesiunii.
+    2. O pana la Discord: `connect()` reincearca la infinit, READY nu ajunge
+       niciodata, on_ready nu ruleaza. Vechea varianta ieșea cu os._exit(1) la
+       fiecare ~5 minute, ardea cele 10 reporniri permise si lasa serviciul jos
+       — pentru o pana care nu era a noastra si pe care o repornire nu o repara.
+
+    `_LAST_BEAT` e semanat la import cu momentul pornirii, deci nu exista o
+    stare "n-a batut niciodata" confundabila cu "bucla e blocata".
+    """
+    _start_heartbeat()
+
+
+def _start_heartbeat():
+    """Porneste bataia daca nu bate deja. Idempotenta: se cheama de doua ori."""
+    global _heartbeat_task
+    if _heartbeat_task is None or _heartbeat_task.done():
+        _heartbeat_task = asyncio.get_running_loop().create_task(_heartbeat())
+        log.info("Heartbeat pornit")
+
+
+@bot.event
 async def on_ready():
+    # Inainte de orice await: chiar daca setup_hook a rulat deja, o bataie oprita
+    # (task anulat, excepție scapata) trebuie sa se poata reporni, iar asta nu are
+    # voie sa depinda de reusita a nimic de mai jos.
+    _start_heartbeat()
     player._loop = asyncio.get_event_loop()
     log.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     log.info(f"Connected to {len(bot.guilds)} guild(s)")
@@ -334,16 +391,20 @@ async def on_ready():
             bot.tree.clear_commands(guild=None)
             await bot.tree.sync()
             _tree_synced = True
-        except discord.HTTPException as e:
+        # OSError e in lista fiindca o cadere de DNS/TCP da ClientConnectorError,
+        # care e un OSError, nu un discord.HTTPException — si scapa ca excepție
+        # din handler, adica sare peste tot ce urmeaza aici.
+        except (discord.HTTPException, OSError, asyncio.TimeoutError) as e:
             log.warning(f"Sync arbore comenzi esuat: {e}")
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.listening, name="!help"
+    try:
+        await bot.change_presence(
+            activity=discord.Activity(
+                type=discord.ActivityType.listening, name="!help"
+            )
         )
-    )
-    global _heartbeat_task
-    if _heartbeat_task is None or _heartbeat_task.done():
-        _heartbeat_task = bot.loop.create_task(_heartbeat())
+    except (discord.HTTPException, OSError, asyncio.TimeoutError) as e:
+        # Statusul afisat e cosmetic; nu are voie sa rupa restul lui on_ready.
+        log.warning(f"Nu am putut seta statusul: {e}")
 
 
 @bot.event
@@ -384,13 +445,15 @@ async def _reply(ctx, text):
 # corpul sa ruleze, iar botul raspunde la orice !play cu mesajul de timeout, pe
 # viata containerului.
 HEARTBEAT_SEC = 15
-WATCHDOG_STALL_SEC = int(os.getenv('WATCHDOG_STALL_SEC', '300'))
+# Minim 60s: sub o bataie si ceva, watchdog-ul ar raporta ca blocata o bucla
+# perfect sanatoasa si ar reporni procesul la fiecare tick.
+WATCHDOG_STALL_SEC = env_num('WATCHDOG_STALL_SEC', 300, low=60)
 # Cat timp trebuie sa fie TOATE thread-urile de yt-dlp ocupate de cereri
 # abandonate ca sa acceptam ca executorul nu se mai elibereaza. O citire de o
 # clipa nu e o defectiune: doua descarcari lente pot depasi bugetul de 240s si
 # totusi sa se termine singure la 250s. Peste plafonul de aici nu se mai termina
 # niciodata, iar procesul e viu si inutil.
-WATCHDOG_SATURATED_SEC = int(os.getenv('WATCHDOG_SATURATED_SEC', '300'))
+WATCHDOG_SATURATED_SEC = env_num('WATCHDOG_SATURATED_SEC', 300, low=60)
 SNAPSHOT_EVERY_SEC = 60
 SWEEP_EVERY_SEC = 600
 _LAST_BEAT = time.monotonic()
@@ -605,7 +668,7 @@ async def _runner():
 
 
 def main():
-    port = int(os.getenv("PORT", "8080"))
+    port = env_num('PORT', 8080, low=1, high=65535)
     threading.Thread(
         target=lambda: HTTPServer(("0.0.0.0", port), _Health).serve_forever(),
         daemon=True,

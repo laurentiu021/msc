@@ -9,6 +9,38 @@ import yt_dlp
 
 log = logging.getLogger('gogu.music')
 
+
+def env_num(name: str, default, *, low=None, high=None, cast=int):
+    """Un numar dintr-un env var, cu limite. Singura cale de citire numerica.
+
+    Toate valorile astea se scriu de mana in interfata Railway, unde nu exista
+    nicio validare si nici un mesaj de eroare. Cu `int(os.getenv(...))` gol, o
+    scapare de tastatura ("30O", un spatiu, o virgula in loc de punct) devenea un
+    ValueError la IMPORT, adica un container care nu porneste deloc si un bot
+    disparut fara nicio linie de log care sa spuna de ce.
+
+    `low` conteaza la fel de mult ca formatul: un 0 acceptat in WATCHDOG_STALL_SEC
+    facea din watchdog o bucla de repornire instantanee, iar un 0 in
+    DOWNLOAD_CACHE_MB stergea fiecare piesa imediat dupa descarcare.
+    """
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        value = default
+    else:
+        try:
+            value = cast(str(raw).strip())
+        except (TypeError, ValueError):
+            log.warning(f"{name}={raw!r} nu e un numar; folosesc {default}")
+            value = default
+    if low is not None and value < low:
+        log.warning(f"{name}={value} sub minimul {low}; folosesc {low}")
+        value = low
+    if high is not None and value > high:
+        log.warning(f"{name}={value} peste maximul {high}; folosesc {high}")
+        value = high
+    return value
+
+
 # Volumul persistent, daca exista. Definit inainte de DOWNLOAD_DIR pentru ca si
 # audio-ul si cache-ul yt-dlp trebuie sa ajunga pe el.
 COOKIE_DIR = os.getenv('COOKIE_DIR', '/data')
@@ -27,7 +59,9 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 YTDLP_CACHE_DIR = os.path.join(COOKIE_DIR, 'ytdlp-cache') if _ON_VOLUME else None
 
 # Cat audio pastram inainte sa stergem cele mai vechi fisiere.
-DOWNLOAD_CACHE_BYTES = int(os.getenv('DOWNLOAD_CACHE_MB', '300')) * 1024 * 1024
+# Minim 50MB: sub atat evacuarea ar sterge piesa curenta imediat dupa ce a
+# fost descarcata, deci fiecare redare ar plati din nou transferul.
+DOWNLOAD_CACHE_BYTES = env_num('DOWNLOAD_CACHE_MB', 300, low=50) * 1024 * 1024
 
 BLACKLIST = [
     "jazz", "piano", "relaxing", "chill", "lofi", "ambient",
@@ -130,8 +164,10 @@ _YT_EXTRACTOR_ARGS = yt_client_args(*WEB_CLIENTS)
 _proxy = os.getenv('YT_PROXY')
 
 # Traffic shaping — delay minim intre cereri YouTube consecutive
-YT_REQUEST_MIN_INTERVAL_SEC = float(os.getenv('YT_REQUEST_MIN_INTERVAL_SEC', '1.2'))
-YT_REQUEST_MAX_INTERVAL_SEC = float(os.getenv('YT_REQUEST_MAX_INTERVAL_SEC', '3.2'))
+YT_REQUEST_MIN_INTERVAL_SEC = env_num('YT_REQUEST_MIN_INTERVAL_SEC', 1.2,
+                                      low=0.0, cast=float)
+YT_REQUEST_MAX_INTERVAL_SEC = env_num('YT_REQUEST_MAX_INTERVAL_SEC', 3.2,
+                                      low=0.0, cast=float)
 
 # Guest mode + PO Token (fara cookies — mai rapid si mai stabil)
 YDL_OPTS_SEARCH = {

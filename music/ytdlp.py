@@ -34,7 +34,7 @@ import time
 import yt_dlp
 
 from music.config import (YT_REQUEST_MAX_INTERVAL_SEC,
-                          YT_REQUEST_MIN_INTERVAL_SEC, log)
+                          YT_REQUEST_MIN_INTERVAL_SEC, env_num, log)
 from music.errors import YtdlpTimeout
 
 _NEXT_ALLOWED_AT = 0.0
@@ -43,16 +43,7 @@ _LOCK = None
 _GATE = None
 
 
-def _workers() -> int:
-    """Cate thread-uri de yt-dlp, dintr-un env var care poate fi scris greșit."""
-    try:
-        return max(1, min(8, int(os.getenv('YTDLP_WORKERS', '2'))))
-    except ValueError:
-        log.warning("YTDLP_WORKERS nu e un numar; folosesc 2")
-        return 2
-
-
-MAX_WORKERS = _workers()
+MAX_WORKERS = env_num('YTDLP_WORKERS', 2, low=1, high=8)
 _EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=MAX_WORKERS, thread_name_prefix='ytdlp')
 

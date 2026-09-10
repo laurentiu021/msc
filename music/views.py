@@ -189,6 +189,11 @@ class MusicControlView(discord.ui.View):
                         await prefill_autoplay_queue(state, self.ctx.bot.loop)
                 except Exception as e:
                     log.warning(f"Prefill esuat: {e}")
+                # Prefill-ul a tinut `is_loading`, dar nu porneste nicio redare.
+                # Un `!play` intrat in fereastra aceea a fost pus in coada crezand
+                # ca incarcarea in curs o va scurge — deci trebuie sa o scurgem noi.
+                import music.player as _p
+                log.info(f"Autoplay dupa prefill: {_p.resume_if_idle(self.ctx)}")
         else:
             state.show_queue = False
         from music.ui import update_player_ui

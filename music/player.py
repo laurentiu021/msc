@@ -187,6 +187,43 @@ async def _play_next_async(ctx):
         start_timeout(ctx)
 
 
+def resume_if_idle(ctx) -> str:
+    """Repune redarea in mișcare dupa o operatie care nu a pornit nimic.
+
+    `is_loading` e o PROMISIUNE: fiecare consumator il citeste ca "o incarcare e
+    in curs si va scurge coada cand se termina" — de aceea `!play` raspunde "in
+    coada" in loc sa redea. Orice operatie care ia steagul, sau doar anuleaza
+    timer-ul, fara sa porneasca redare — prefill-ul butonului Autoplay, `!247` ON,
+    citirea unui playlist — trebuie sa treaca pe aici la final.
+
+    Fara asta, o piesa cerută in exact acea fereastra rămânea in coada si NIMIC nu
+    o mai scotea: `after_play` are nevoie de o piesa care chiar cânta, iar
+    `idle_timer` fusese anulat de comanda si se re-armeaza doar in 24/7. Botul
+    rămânea in canal, tacut, cu panoul aratand "13 in coada".
+
+    Intoarce ce a facut, ca sa poata fi verificat de teste si citit in loguri.
+    """
+    vc = getattr(ctx, 'voice_client', None)
+    if not vc or not vc.is_connected():
+        return 'deconectat'
+    if vc.is_playing() or vc.is_paused():
+        return 'canta deja'
+    state = get_state(ctx.guild.id)
+    if state.is_loading:
+        # Chiar exista o incarcare in curs: ea va scurge coada, deci a porni si
+        # noi una ar insemna doua rezolvari in paralel pe acelasi guild.
+        return 'se incarca altceva'
+    if state.queue:
+        play_next(ctx)
+        return 'pornit'
+    if start_timeout:
+        # Nimic de redat acum. Timer-ul e singurul lucru care mai poate decide
+        # ceva (radio in 24/7, deconectare altfel), deci nu il lasam nearmat.
+        start_timeout(ctx)
+        return 'timer armat'
+    return 'nimic'
+
+
 def play_next(ctx):
     global _loop
     state = get_state(ctx.guild.id)
@@ -239,6 +276,9 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
     reused = False
     web_url = None
     selected = None
+    # A autentificat jar-ul de cookies CEVA in redarea asta? Numai atunci are
+    # sens sa il stampilam drept "ultimul bun cunoscut" (vezi mai jos).
+    jar_authenticated = False
 
     try:
         # Repetare (loop pe piesa) sau re-adaugarea aceluiasi URL: fisierul e
@@ -311,6 +351,7 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
             dl_info = resolved.download_info
             selected = resolved.info
             web_url = resolved.url
+            jar_authenticated = resolved.download_used_cookies
 
         if not filename or not os.path.exists(filename):
             raise FileNotFoundError("Niciun format nu a reusit descarcarea")
@@ -381,9 +422,16 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         state._consecutive_errors = 0
         state._consecutive_rejects = 0
         state.breaker_until = 0.0
-        # Jar-ul care a produs audio functional devine ultima copie buna. Fara
-        # asta, o revenire n-are unde sa se intoarca.
-        if cookies_available():
+        # Jar-ul care A AUTENTIFICAT devine ultima copie buna — nu orice redare
+        # reusita. Distinctia e critica: cookies_valid() e pur STRUCTURALA (are
+        # jar-ul un nume din COOKIE_CRITICAL?), iar putrezirea tipica pastreaza
+        # numele si omoara valorile. Deci un `promote` la fiecare succes stampila
+        # un jar deja refuzat de YouTube peste singura copie care functionase, in
+        # exact cazurile care nu vorbesc deloc cu YouTube: cache hit pe disc,
+        # loop pe acelasi URL, sau o descarcare care a căzut inapoi pe guest.
+        # Dupa aceea prima piesa nouă eșua, revenirea restaura jar-ul mort, si
+        # ultimele credentiale bune nu mai existau nicaieri.
+        if jar_authenticated and cookies_available():
             promote_cookies()
         # Altfel eroarea unei piese de acum o ora era raportata ca motiv pentru
         # urmatoarea care eșua fara sa spuna nimic.
