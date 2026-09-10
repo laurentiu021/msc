@@ -29,6 +29,11 @@ class _FakeVoiceClient:
         self.playing = False
         self.played = []
         self.after = None
+        # Un VoiceClient real are mereu `channel`, iar bitrate-ul lui decide cat
+        # codeaza FFmpeg. Fara el aici, `vc.channel` arunca AttributeError la
+        # EVALUAREA argumentelor — inainte de apel, deci inaintea oricarui fals —
+        # si redarea cadea pe FFmpeg-ul real din fallback-ul PCM.
+        self.channel = type('Ch', (), {'bitrate': 64000, 'id': 5})()
 
     def is_connected(self):
         return True
@@ -62,8 +67,14 @@ class _FakeCtx:
 class _Harness:
     """Inlocuieste seams-urile externe ale player-ului si le pune la loc."""
 
+    # `make_opus_source` intra in lista: e singurul lucru din calea de redare care
+    # ar porni un proces real. Patch-ul de dinainte punea un fals peste
+    # `player.discord.FFmpegOpusAudio`, adica peste ATRIBUTUL MODULULUI discord —
+    # global pentru tot procesul, deci si pentru `music.utils`. Suita trecea doar
+    # pe o mașina cu ffmpeg instalat; pe CI, fallback-ul PCM chema FFmpeg-ul real
+    # si noua teste picau cu "ffmpeg was not found".
     ATTRS = ('update_player_ui', 'start_timeout', 'cancel_timeout', 'play_next',
-             'cleanup_file', '_loop')
+             'cleanup_file', '_loop', 'make_opus_source')
 
     def __init__(self, download_target, full_info=None, flat_entries=None):
         self.download_target = download_target
@@ -77,12 +88,13 @@ class _Harness:
         # Ce intoarce descarcarea ca metadata. Testele de reutilizare a
         # metadatelor il inlocuiesc, ca sa verifice ce ajunge in stare.
         self.download_info = {'id': 'vid123', 'ext': 'opus'}
+        # Fisierul si canalul cu care s-a construit sursa audio.
+        self.sources = []
 
     def __enter__(self):
         self.saved = {a: getattr(player, a, None) for a in self.ATTRS}
         self.saved_ytdlp = (ytdlp_mod.extract,
                             ytdlp_mod.extract_and_prepare_filename)
-        self.saved_ffmpeg = player.discord.FFmpegOpusAudio
 
         async def fake_extract(opts, query, download=False, loop=None, stage=''):
             self.extract_calls.append((stage, dict(opts)))
@@ -111,16 +123,18 @@ class _Harness:
             return dict(self.download_info), self.download_target
 
         class _FakeSource:
-            @classmethod
-            async def from_probe(cls, filename, **kwargs):
-                return cls()
+            pass
+
+        async def fake_source(filename, channel, **kwargs):
+            self.sources.append((filename, channel, kwargs))
+            return _FakeSource()
 
         async def noop(*a, **k):
             return None
 
         ytdlp_mod.extract = fake_extract
         ytdlp_mod.extract_and_prepare_filename = fake_download
-        player.discord.FFmpegOpusAudio = _FakeSource
+        player.make_opus_source = fake_source
         player.update_player_ui = noop
         player.start_timeout = lambda *a, **k: self.timeouts.append(a)
         player.cancel_timeout = lambda *a, **k: None
@@ -133,7 +147,6 @@ class _Harness:
         for a, v in self.saved.items():
             setattr(player, a, v)
         ytdlp_mod.extract, ytdlp_mod.extract_and_prepare_filename = self.saved_ytdlp
-        player.discord.FFmpegOpusAudio = self.saved_ffmpeg
         return False
 
 
@@ -161,6 +174,30 @@ def test_a_track_plays_end_to_end():
         assert st._consecutive_errors == 0
         assert st.history and st.history[-1]['title'] == 'Artistul - Piesa'
         assert h.download_calls, 'nu s-a descarcat nimic'
+
+
+def test_the_audio_source_is_built_for_the_channel_being_played_to():
+    """Bitrate-ul de codare vine din canal, deci canalul trebuie sa AJUNGA acolo.
+
+    Cand nu ajungea, `vc.channel` arunca AttributeError chiar la evaluarea
+    argumentelor — inaintea oricarui fals — si redarea cadea pe fallback-ul PCM,
+    adica pe FFmpeg real, cu bitrate-ul implicit al lui discord.py.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        open(target, 'wb').write(b'audio')
+        _fresh_state()
+        vc = _FakeVoiceClient()
+        ctx = _FakeCtx(vc)
+        with _Harness(target) as h:
+            asyncio.run(player.process_play(ctx, 'artistul piesa'))
+
+        assert len(h.sources) == 1, f'sursa audio nu s-a construit o data: {h.sources}'
+        filename, channel, opts = h.sources[0]
+        assert filename == target, filename
+        assert channel is vc.channel, (
+            'sursa audio nu a primit canalul de voce: bitrate-ul ar fi ghicit')
+        assert opts.get('options') == '-vn', opts
 
 
 def test_download_opts_carry_the_client_that_worked_at_search():

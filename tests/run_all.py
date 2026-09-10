@@ -9,6 +9,7 @@ separate inseamna si ca un test care blocheaza definitiv nu ascunde restul.
 """
 import glob
 import os
+import shutil
 import subprocess
 import sys
 
@@ -21,6 +22,33 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 TIMEOUT_SEC = 300
 
+# Binarele externe pe care niciun test nu are voie sa le foloseasca. Testele
+# trebuie sa fie ermetice: fara retea, fara Discord, si fara procese de media.
+FORBIDDEN_BINARIES = ('ffmpeg', 'ffprobe')
+
+
+def hermetic_env() -> dict:
+    """Env-ul copilului, cu FFmpeg scos din PATH.
+
+    Nu e paranoia, e o divergenta care a costat un CI roșu: un test de redare
+    inlocuia sursa audio prin `player.discord.FFmpegOpusAudio`, adica un atribut
+    al modulului discord, dar fallback-ul ajungea totusi la FFmpeg-ul real. Pe
+    mașina de dezvoltare FFmpeg exista, deci suita trecea; pe runner-ul de CI nu
+    exista, si noua teste picau cu "ffmpeg was not found". Un test care depinde de
+    un binar din PATH nu spune nimic despre cod.
+    """
+    env = dict(os.environ)
+    hidden = set()
+    for binary in FORBIDDEN_BINARIES:
+        found = shutil.which(binary, path=env.get('PATH', ''))
+        while found:
+            hidden.add(os.path.dirname(os.path.abspath(found)))
+            env['PATH'] = os.pathsep.join(
+                p for p in env.get('PATH', '').split(os.pathsep)
+                if p and os.path.abspath(p) not in hidden)
+            found = shutil.which(binary, path=env['PATH'])
+    return env
+
 
 def main() -> int:
     files = sorted(glob.glob(os.path.join(HERE, 'test_*.py')))
@@ -30,6 +58,7 @@ def main() -> int:
 
     total_pass = total_fail = 0
     broken = []
+    env = hermetic_env()
     for path in files:
         name = os.path.basename(path)
         try:
@@ -43,7 +72,7 @@ def main() -> int:
                 # intamplat: sursa spunea `restore_good_jar()`, iar bytecode-ul
                 # incarcat chema `rollback_cookies()`.
                 [sys.executable, '-B', path], cwd=ROOT, timeout=TIMEOUT_SEC,
-                capture_output=True,
+                capture_output=True, env=env,
                 # UTF-8 explicit, nu codecul local: altfel diacriticele din
                 # mesajul de eșec ajung mojibake exact in linia pe care o citim.
                 text=True, encoding='utf-8', errors='replace')

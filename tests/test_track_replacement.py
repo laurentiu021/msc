@@ -43,6 +43,11 @@ class _VoiceClient:
         self.paused = False
         self.orphaned = []
         self.calls = []
+        # Un VoiceClient real are mereu `channel`, iar bitrate-ul lui decide cat
+        # codeaza FFmpeg. Fara el, `vc.channel` arunca AttributeError la EVALUAREA
+        # argumentelor — inainte de apel, deci inaintea oricarui fals — si redarea
+        # cadea pe FFmpeg-ul real din fallback-ul PCM.
+        self.channel = type('Ch', (), {'bitrate': 64000, 'id': 5})()
 
     def is_connected(self):
         return True
@@ -89,12 +94,16 @@ class _Harness:
         self.cleaned = []
 
     def __enter__(self):
+        # `make_opus_source` e singurul lucru de aici care ar porni un proces real.
+        # Se inlocuiește pe modulul player, NU pe `player.discord.FFmpegOpusAudio`:
+        # acela e atributul modulului discord, adica global pentru tot procesul —
+        # iar fallback-ul PCM ajungea oricum la FFmpeg-ul real, deci suita trecea
+        # doar pe o mașina cu ffmpeg instalat.
         self.saved = {a: getattr(player, a, None) for a in
                       ('update_player_ui', 'start_timeout', 'cancel_timeout',
-                       'play_next', 'cleanup_file', '_loop')}
+                       'play_next', 'cleanup_file', '_loop', 'make_opus_source')}
         self.saved_ytdlp = (ytdlp_mod.extract,
                             ytdlp_mod.extract_and_prepare_filename)
-        self.saved_ffmpeg = player.discord.FFmpegOpusAudio
 
         async def fake_extract(opts, query, download=False, loop=None, stage=''):
             if stage == 'search_flat':
@@ -110,16 +119,17 @@ class _Harness:
             return {'id': 'vid999'}, self.target
 
         class _Src:
-            @classmethod
-            async def from_probe(cls, filename, **kw):
-                return cls()
+            pass
+
+        async def fake_source(filename, channel, **kw):
+            return _Src()
 
         async def noop(*a, **k):
             return None
 
         ytdlp_mod.extract = fake_extract
         ytdlp_mod.extract_and_prepare_filename = fake_download
-        player.discord.FFmpegOpusAudio = _Src
+        player.make_opus_source = fake_source
         player.update_player_ui = noop
         player.start_timeout = lambda *a, **k: None
         player.cancel_timeout = lambda *a, **k: None
@@ -132,7 +142,6 @@ class _Harness:
         for a, v in self.saved.items():
             setattr(player, a, v)
         ytdlp_mod.extract, ytdlp_mod.extract_and_prepare_filename = self.saved_ytdlp
-        player.discord.FFmpegOpusAudio = self.saved_ffmpeg
         return False
 
 
