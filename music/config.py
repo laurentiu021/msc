@@ -203,13 +203,134 @@ def _cookie_file_paths():
     return os.path.join(base, 'cookies.txt'), os.path.join(base, '.cookies_seed')
 
 
+def _cookie_lines(source: str, *, is_text: bool = False) -> list[str]:
+    """Liniile utile din jar — un singur parser, folosit de tot ce il citeste."""
+    if is_text:
+        text = source or ''
+    else:
+        try:
+            with open(source, encoding='utf-8', errors='replace') as fh:
+                text = fh.read()
+        except OSError:
+            return []
+    return [l for l in text.strip().splitlines()
+            if l.strip() and not l.startswith('#')]
+
+
 def _count_cookie_entries(path: str) -> int:
+    return len(_cookie_lines(path))
+
+
+# Cookie-urile fara care o sesiune Google nu mai autentifica nimic. Daca lipsesc
+# toate, fisierul nu e "cookies rotite", e un fisier rupt.
+COOKIE_CRITICAL = ('__Secure-1PSID', '__Secure-3PSID', 'SAPISID', 'SID')
+
+_GOOD_SUFFIX = '.good'
+_rolled_back = False
+
+
+def cookie_health(path: str) -> dict:
+    """{entries, present, missing, earliest_expiry} pentru un fisier Netscape.
+
+    Exista pentru ca ramura care pastreaza fisierul de pe disc il pastra ORICUM:
+    un jar trunchiat la 3 linii era raportat vesel drept "3 intrari, rotite de
+    yt-dlp" si pastrat pentru totdeauna, iar singura reparatie era un om care
+    edita YT_COOKIES_CONTENT pe Railway.
+    """
+    names = set()
+    expiries = []
+    lines = _cookie_lines(path)
+    for line in lines:
+        parts = line.split('\t')
+        if len(parts) < 7:
+            continue
+        names.add(parts[5])
+        try:
+            expiry = int(parts[4])
+        except ValueError:
+            continue
+        if expiry > 0:
+            expiries.append(expiry)
+    return {
+        'entries': len(lines),
+        'present': sorted(n for n in names if n in COOKIE_CRITICAL),
+        'missing': sorted(set(COOKIE_CRITICAL) - names),
+        'earliest_expiry': min(expiries) if expiries else None,
+    }
+
+
+def cookies_valid(path: str) -> bool:
+    """Mai poate autentifica? Cel putin un cookie critic de sesiune."""
+    if not os.path.exists(path):
+        return False
+    health = cookie_health(path)
+    return bool(health['entries'] and health['present'])
+
+
+def _write_private(path: str, text: str) -> None:
+    """Scrie atomic si cu drepturi 0600.
+
+    Temp + os.replace: scrierea directa are o fereastra in care fisierul e
+    trunchiat, iar un redeploy exact in acel moment lasa un jar scurt pe volum.
+    0600 pentru ca o sesiune Google activa nu are ce cauta lizibila de altcineva.
+    """
+    tmp = f'{path}.tmp'
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as fh:
+            fh.write(text if text.endswith('\n') else text + '\n')
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def promote_cookies() -> bool:
+    """Marcheaza jar-ul curent drept ultimul bun cunoscut. True daca s-a copiat."""
+    path = _cookies_path or _cookie_file_paths()[0]
+    if not cookies_valid(path):
+        return False
     try:
         with open(path, encoding='utf-8', errors='replace') as fh:
-            return len([l for l in fh.read().strip().splitlines()
-                        if l.strip() and not l.startswith('#')])
-    except OSError:
-        return 0
+            text = fh.read()
+        _write_private(path + _GOOD_SUFFIX, text)
+        return True
+    except OSError as e:
+        log.debug(f"Nu am putut promova cookie-urile: {e}")
+        return False
+
+
+def rollback_cookies() -> bool:
+    """Revine la ultimul jar bun. Cel mult o data pe proces.
+
+    Rotatia scrisa de yt-dlp e de obicei buna, dar cand YouTube invalideaza
+    sesiunea scrie peste fisier valori care nu mai autentifica. Fara revenire,
+    singura reparatie era un om care lipea cookie-uri noi pe Railway.
+    """
+    global _rolled_back
+    if _rolled_back:
+        return False
+    path = _cookies_path or _cookie_file_paths()[0]
+    good = path + _GOOD_SUFFIX
+    if not cookies_valid(good):
+        return False
+    try:
+        with open(good, encoding='utf-8', errors='replace') as fh:
+            text = fh.read()
+        _write_private(path, text)
+    except OSError as e:
+        log.warning(f"Revenirea la cookie-urile bune a eșuat: {e}")
+        return False
+    _rolled_back = True
+    log.warning(f"Cookies revenite la ultima versiune buna ({good})")
+    return True
 
 
 def seed_cookies_from_env(raw: str) -> tuple[str | None, int]:
@@ -233,22 +354,33 @@ def seed_cookies_from_env(raw: str) -> tuple[str | None, int]:
         except OSError:
             previous = None
 
-    entries = len([l for l in raw.strip().splitlines()
-                   if l.strip() and not l.startswith('#')])
+    entries = len(_cookie_lines(raw, is_text=True))
 
     if previous == fingerprint and os.path.exists(path):
-        rotated = _count_cookie_entries(path)
-        log.info(f"Cookies pastrate din {path} ({rotated} intrari, rotite de yt-dlp); "
-                 f"env neschimbat")
-        return path, rotated
+        # Verificarea de validitate vine INAINTE de a pastra fisierul. Ramura
+        # asta il pastra necondiționat, deci un jar trunchiat (de o scriere
+        # intrerupta, sau de vechea trunchiere la timeout) supravietuia pentru
+        # totdeauna, raportat drept "rotite de yt-dlp".
+        if cookies_valid(path):
+            health = cookie_health(path)
+            log.info(f"Cookies pastrate din {path} ({health['entries']} intrari, "
+                     f"critice: {', '.join(health['present'])}); env neschimbat")
+            return path, health['entries']
+        if rollback_cookies() and cookies_valid(path):
+            rotated = _count_cookie_entries(path)
+            log.warning(f"Jar-ul de pe disc era rupt; am revenit la copia buna "
+                        f"({rotated} intrari)")
+            return path, rotated
+        log.warning(f"Jar-ul din {path} nu mai are cookie-uri de sesiune "
+                    f"(lipsesc: {', '.join(cookie_health(path)['missing'])}); "
+                    f"rescriu din env")
 
     try:
-        with open(path, 'w', encoding='utf-8', newline='\n') as fh:
-            fh.write(raw if raw.endswith('\n') else raw + '\n')
-        # O sesiune Google activa nu are ce cauta lizibila pentru altcineva.
-        os.chmod(path, 0o600)
-        with open(seed_path, 'w', encoding='utf-8') as fh:
-            fh.write(fingerprint)
+        _write_private(path, raw)
+        _write_private(seed_path, fingerprint)
+        # Prima copie buna: fara ea, o revenire nu are unde sa se intoarca.
+        if cookies_valid(path):
+            promote_cookies()
     except OSError as e:
         log.error(f"Nu pot scrie cookies in {path}: {e}")
         # Daca pe volum exista deja cookie-uri, le pastram. Varianta care
@@ -278,11 +410,18 @@ def cookie_status() -> dict:
         age = max(0.0, time.time() - os.path.getmtime(path))
     except OSError:
         age = None
+    health = cookie_health(path)
     return {
         'path': path,
         'exists': True,
-        'entries': _count_cookie_entries(path),
+        'entries': health['entries'],
         'age_sec': round(age) if age is not None else None,
+        # Numarul de intrari nu spune daca jar-ul mai autentifica: un fisier cu
+        # 20 de linii si zero cookie-uri de sesiune e la fel de inutil ca unul gol.
+        'session_cookies': health['present'],
+        'missing_critical': health['missing'],
+        'valid': bool(health['entries'] and health['present']),
+        'has_good_copy': os.path.exists(path + _GOOD_SUFFIX),
     }
 
 

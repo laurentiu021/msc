@@ -122,6 +122,21 @@ def test_problems_names_each_real_fault():
         assert expected in issues, f'{expected!r} lipseste din: {issues}'
 
 
+def test_a_jar_without_session_cookies_is_flagged():
+    """Numarul de intrari nu spune daca jar-ul mai autentifica.
+
+    Un fisier cu 20 de linii si zero cookie-uri de sesiune e la fel de inutil ca
+    unul gol, dar raportul vechi il arata identic cu unul sanatos.
+    """
+    snap = _snapshot()
+    snap['cookies'] = {'exists': True, 'entries': 20, 'age_sec': 60,
+                       'valid': False, 'missing_critical': ['SID', 'SAPISID'],
+                       'session_cookies': []}
+    issues = ' | '.join(diag.problems(snap))
+    assert 'sesiune valida' in issues, issues
+    assert 'SID' in issues, issues
+
+
 def test_an_empty_snapshot_says_so_instead_of_crashing():
     assert diag.problems({}) == ['niciun instantaneu inca']
     assert diag.problems(None) == ['niciun instantaneu inca']

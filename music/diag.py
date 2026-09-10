@@ -180,6 +180,9 @@ def problems(snapshot: dict) -> list[str]:
     cookies = snapshot['cookies']
     if not cookies['exists'] or not cookies['entries']:
         out.append('fara cookies: YouTube va cere verificare de bot')
+    elif not cookies.get('valid', True):
+        out.append(f"cookies fara sesiune valida (lipsesc: "
+                   f"{', '.join(cookies.get('missing_critical') or [])})")
     elif cookies['age_sec'] and cookies['age_sec'] > 7 * 24 * 3600:
         out.append(f"cookies nerotite de {cookies['age_sec'] // 86400} zile")
     ytdlp_info = snapshot['ytdlp']

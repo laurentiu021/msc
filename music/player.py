@@ -6,6 +6,7 @@ import time
 from music.config import (FFMPEG_OPTS, MAX_DOWNLOAD_BYTES,
                           MAX_TRACK_SECONDS, log)
 from music.config import (HLS_MAX_BYTES, clear_ydl_reason, cookies_available,
+                          promote_cookies, rollback_cookies,
                           count_real_formats, has_real_formats,
                           last_ydl_reason, make_download_opts,
                           make_search_opts, yt_client_args, WEB_CLIENTS)
@@ -337,7 +338,7 @@ def play_next(ctx):
     asyncio.run_coroutine_threadsafe(_play_next_async(ctx), _loop)
 
 
-async def process_play(ctx, query, is_radio=False):
+async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
     state = get_state(ctx.guild.id)
     vc = ctx.voice_client
     if not vc or not vc.is_connected():
@@ -646,6 +647,10 @@ async def process_play(ctx, query, is_radio=False):
         state._consecutive_errors = 0
         state._consecutive_rejects = 0
         state.breaker_until = 0.0
+        # Jar-ul care a produs audio functional devine ultima copie buna. Fara
+        # asta, o revenire n-are unde sa se intoarca.
+        if cookies_available():
+            promote_cookies()
         # Altfel eroarea unei piese de acum o ora era raportata ca motiv pentru
         # urmatoarea care eșua fara sa spuna nimic.
         state.last_raw_error = None
@@ -747,6 +752,17 @@ async def process_play(ctx, query, is_radio=False):
     # altfel toate erorile ieseau "Eroare necunoscuta" si sfatul despre
     # reinnoirea cookie-urilor nu putea fi afisat niciodata.
     error_type, user_msg = diagnose_error(_scrub(state.last_raw_error or failure))
+
+    # Cookie-urile sunt singura cale reala de pe un IP de datacenter, iar cand
+    # YouTube invalideaza sesiunea yt-dlp scrie peste fisier valori care nu mai
+    # autentifica. Daca avem o copie buna, o punem la loc si reincercam o singura
+    # data, in loc sa cerem omului sa lipeasca cookie-uri noi.
+    if error_type == 'cookies' and not after_rollback and rollback_cookies():
+        log.warning("Reincerc piesa cu jar-ul de cookies restaurat")
+        state._consecutive_errors = max(0, state._consecutive_errors - 1)
+        return await process_play(ctx, query, is_radio=is_radio,
+                                  after_rollback=True)
+
     if state._last_notified_error != error_type:
         state._last_notified_error = error_type
         try:
