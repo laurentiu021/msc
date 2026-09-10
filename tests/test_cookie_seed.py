@@ -20,6 +20,11 @@ NETSCAPE = ('# Netscape HTTP Cookie File\n'
 ROTATED = ('# Netscape HTTP Cookie File\n'
            '.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSID\tvaloare-rotita\n'
            '.youtube.com\tTRUE\t/\tTRUE\t1790000000\t__Secure-1PSIDTS\tnou\n')
+# Structural valid (numele critice sunt acolo), dar valorile sunt cele pe care
+# YouTube le-a refuzat deja. Exact forma de putrezire pe care `cookies_valid` NU o
+# poate detecta: verifica doar numele.
+DEAD_ROTATION = ('# Netscape HTTP Cookie File\n'
+                 '.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSID\tvaloare-moarta\n')
 
 
 def _in_temp_dir(fn):
@@ -210,6 +215,131 @@ def test_the_jar_is_written_atomically_and_privately():
         assert not os.path.exists(path + '.tmp'), 'a rămas un fisier temporar'
         if os.name != 'nt':      # drepturile POSIX nu exista pe Windows
             assert oct(os.stat(path).st_mode)[-3:] == '600'
+    _in_temp_dir(check)
+
+
+# --- fisierul de cookies nu mai e partajat cu yt-dlp ------------------------
+
+def test_a_request_works_on_its_own_copy_of_the_jar():
+    """`YoutubeDL.close()` cheama `save_cookies()`, care e necondiționat.
+
+    Adica RESCRIE fisierul din jar-ul lui din memorie, fara sa se uite ce s-a
+    schimbat pe disc intre timp — verificat in yt-dlp 2026.8.19:
+    `if self.params.get('cookiefile') is not None: self.cookiejar.save()`.
+    """
+    def check(d):
+        shared = os.path.join(d, 'cookies.txt')
+        with open(shared, 'w', encoding='utf-8') as fh:
+            fh.write(NETSCAPE)
+        temp = config.borrow_cookies(shared)
+        assert temp and temp != shared, temp
+        assert 'valoare-din-env' in open(temp, encoding='utf-8').read()
+        config.discard_cookies(temp)
+        assert not os.path.exists(temp), 'copia nu a fost aruncata'
+    _in_temp_dir(check)
+
+
+def test_an_abandoned_thread_cannot_undo_a_rollback():
+    """Defectul, capat la capat, cu instanta REALA de yt-dlp.
+
+    Cronologie reprodusa inainte de fix: o descarcare depaseste bugetul de 240s cu
+    cookies, thread-ul continua cu jar-ul MORT in memorie; piesa urmatoare eșua,
+    `rollback_cookies()` restaura copia buna si consuma singura lovitura pe
+    proces; thread-ul abandonat se inchidea si rescria jar-ul MORT peste ea. De
+    atunci fiecare cerere folosea cookie-uri moarte, iar revenirea intorcea False.
+    """
+    import yt_dlp
+
+    def check(d):
+        shared = os.path.join(d, 'cookies.txt')
+        with open(shared, 'w', encoding='utf-8') as fh:
+            fh.write(DEAD_ROTATION)
+
+        # Cererea porneste si isi ia copia — exact ce face acum ytdlp.extract.
+        private = config.borrow_cookies(shared)
+        ydl = yt_dlp.YoutubeDL({'cookiefile': private, 'quiet': True})
+        _ = ydl.cookiejar                     # incarca valorile MOARTE
+
+        # Intre timp, revenirea restaureaza jar-ul bun in fisierul COMUN.
+        with open(shared, 'w', encoding='utf-8') as fh:
+            fh.write(NETSCAPE)
+
+        # Thread-ul abandonat se inchide in cele din urma.
+        ydl.close()
+
+        body = open(shared, encoding='utf-8').read()
+        assert 'valoare-din-env' in body, (
+            'un thread abandonat a rescris jar-ul comun si a anulat revenirea')
+        assert 'valoare-moarta' not in body, body
+        # Copia lui exista inca si conține ce a scris el; se arunca, nu se adopta.
+        config.discard_cookies(private)
+    _in_temp_dir(check)
+
+
+def test_only_a_successful_request_hands_its_rotation_to_the_shared_jar():
+    def check(d):
+        shared = os.path.join(d, 'cookies.txt')
+        with open(shared, 'w', encoding='utf-8') as fh:
+            fh.write(NETSCAPE)
+        private = config.borrow_cookies(shared)
+        with open(private, 'w', encoding='utf-8') as fh:
+            fh.write(ROTATED)
+        assert config.adopt_cookies(private, shared) is True
+        assert 'valoare-rotita' in open(shared, encoding='utf-8').read(), (
+            'rotatia scrisa de yt-dlp nu ajunge pe volum')
+        config.discard_cookies(private)
+    _in_temp_dir(check)
+
+
+def test_a_copy_without_session_cookies_is_never_adopted():
+    """Cand YouTube invalideaza sesiunea, scrie peste jar valori care nu mai
+    autentifica; adoptarea lor orbeste ar face exact ce facea partajarea."""
+    def check(d):
+        shared = os.path.join(d, 'cookies.txt')
+        with open(shared, 'w', encoding='utf-8') as fh:
+            fh.write(NETSCAPE)
+        private = config.borrow_cookies(shared)
+        with open(private, 'w', encoding='utf-8') as fh:
+            fh.write(NO_SESSION)
+        assert config.adopt_cookies(private, shared) is False
+        assert 'valoare-din-env' in open(shared, encoding='utf-8').read()
+        config.discard_cookies(private)
+    _in_temp_dir(check)
+
+
+def test_copies_left_by_a_killed_process_are_swept_at_boot():
+    """os._exit din watchdog nu ruleaza niciun finally: copia rămâne pe volum,
+    si fiecare conține o sesiune Google."""
+    def check(d):
+        shared = os.path.join(d, 'cookies.txt')
+        with open(shared, 'w', encoding='utf-8') as fh:
+            fh.write(NETSCAPE)
+        orphans = [config.borrow_cookies(shared) for _ in range(3)]
+        assert all(orphans), orphans
+        assert config.sweep_borrowed_cookies(d) == 3
+        assert all(not os.path.exists(p) for p in orphans)
+        assert os.path.exists(shared), 'curatarea a sters jar-ul real'
+        assert config.sweep_borrowed_cookies(d) == 0, 'a doua trecere a sters ceva'
+    _in_temp_dir(check)
+
+
+def test_a_successful_promotion_re_arms_the_rollback():
+    """Steagul opreste o BUCLA de reveniri, nu a doua salvare din viata procesului.
+
+    Promovarea se cheama doar dupa o descarcare care a folosit cookie-urile, deci
+    e dovada ca episodul precedent s-a inchis. Fara re-armare, o singura zi cu
+    doua invalidari de sesiune lasa botul fara nicio plasa la a doua.
+    """
+    def check(d):
+        path, _ = config.seed_cookies_from_env(NETSCAPE)
+        config.apply_cookies(path)
+        config._rolled_back = False
+        config.promote_cookies()
+        assert config.rollback_cookies() is True
+        assert config.rollback_cookies() is False, 'a revenit doua ori la rand'
+        assert config.promote_cookies() is True
+        assert config.rollback_cookies() is True, (
+            'o promovare reusita nu re-armeaza revenirea')
     _in_temp_dir(check)
 
 

@@ -54,6 +54,10 @@ if not TOKEN:
 # audio e chiar cache-ul care face a doua redare gratuita.
 from music.utils import sweep_partials, trim_download_cache
 sweep_partials()
+# Copiile de jar rămase de la un proces omorat: fiecare conține o sesiune
+# Google, deci nu au ce sa zaca pe volum.
+from music.config import sweep_borrowed_cookies
+sweep_borrowed_cookies()
 trim_download_cache(set())
 
 # Write YouTube cookies if provided via env var

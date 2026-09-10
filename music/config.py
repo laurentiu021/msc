@@ -3,6 +3,7 @@ import copy
 import hashlib
 import logging
 import os
+import tempfile
 import time
 
 import yt_dlp
@@ -328,8 +329,118 @@ def _write_private(path: str, text: str) -> None:
         pass
 
 
+# Prefixul copiilor de o singura cerere. O singura definitie: si crearea si
+# curatarea de la pornire trebuie sa vorbeasca despre aceleasi fisiere.
+_BORROWED_PREFIX = 'cookies-'
+
+
+def borrow_cookies(shared: str) -> str | None:
+    """O COPIE privata a jar-ului, pentru o singura cerere. None daca nu se poate.
+
+    Exista pentru ca fisierul de cookies era partajat cu yt-dlp, iar
+    `YoutubeDL.close()` cheama `save_cookies()`, care e necondiționat:
+    `if self.params.get('cookiefile') is not None: self.cookiejar.save()`
+    (verificat in 2026.8.19). Adica RESCRIE fisierul din jar-ul lui din memorie,
+    fara sa se uite daca s-a schimbat ceva intre timp.
+
+    Thread-urile abandonate dupa timeout sunt exact scriitorii pe care poarta de
+    cereri NU ii serializeaza: ele ruleaza in afara ei si se inchid minute mai
+    tarziu. Reprodus: un thread care incarcase jar-ul MORT a rescris peste jar-ul
+    BUN restaurat intre timp de `rollback_cookies()` — iar revenirea e o singura
+    lovitura pe proces, deci deja consumata. De atunci fiecare cerere folosea
+    cookie-uri moarte pana la repornirea containerului.
+
+    Cu o copie per cerere, un thread abandonat nu mai poate decide, minute mai
+    tarziu, ce conține jar-ul comun: scrie doar in copia lui, care se arunca.
+    """
+    try:
+        with open(shared, encoding='utf-8', errors='replace') as fh:
+            text = fh.read()
+    except OSError as e:
+        log.debug(f"Nu am putut citi jar-ul {shared}: {e}")
+        return None
+    fd, temp = tempfile.mkstemp(prefix=_BORROWED_PREFIX, suffix='.txt',
+                                dir=os.path.dirname(shared) or '.')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as fh:
+            fh.write(text if text.endswith('\n') else text + '\n')
+        os.chmod(temp, 0o600)
+    except OSError as e:
+        log.debug(f"Nu am putut scrie copia de cookies: {e}")
+        discard_cookies(temp)
+        return None
+    return temp
+
+
+def adopt_cookies(temp: str, shared: str) -> bool:
+    """Muta rotatia din copia unei cereri REUSITE in jar-ul comun.
+
+    Se cheama doar la succes, si doar din cererea care a reusit — asa rotatia
+    scrisa de yt-dlp (`__Secure-1PSIDTS` si `SIDCC` se schimba des) ajunge pe
+    volum, dar ordinea scrierilor rămâne a noastra, nu a unui thread uitat.
+
+    Verificarea de validitate nu e opționala: cand YouTube invalideaza sesiunea,
+    scrie peste jar valori care nu mai autentifica, iar adoptarea lor orbeste ar
+    face exact ce facea partajarea fisierului.
+    """
+    if not temp or not os.path.exists(temp):
+        return False
+    if not cookies_valid(temp):
+        log.warning("Copia de cookies a cererii nu mai are cookie-uri de "
+                    "sesiune; nu o adopt")
+        return False
+    try:
+        with open(temp, encoding='utf-8', errors='replace') as fh:
+            text = fh.read()
+        with open(shared, encoding='utf-8', errors='replace') as fh:
+            current = fh.read()
+        if text != current:
+            _write_private(shared, text)
+        return True
+    except OSError as e:
+        log.debug(f"Nu am putut adopta copia de cookies: {e}")
+        return False
+
+
+def discard_cookies(temp: str | None) -> None:
+    """Arunca copia unei cereri. Sigura de chemat de doua ori."""
+    if not temp:
+        return
+    try:
+        os.unlink(temp)
+    except OSError:
+        pass
+
+
+def sweep_borrowed_cookies(directory: str | None = None) -> int:
+    """Sterge copiile de jar rămase de la un proces omorat. De rulat la pornire.
+
+    Un SIGKILL (sau os._exit din watchdog) intre `borrow_cookies` si `finally`
+    lasa o copie pe volum. Fara curatare s-ar aduna la fiecare repornire, si
+    fiecare ar conține o sesiune Google — exact ce nu vrem sa zaca pe disc.
+    """
+    directory = directory or (COOKIE_DIR if os.path.isdir(COOKIE_DIR) else '.')
+    removed = 0
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.startswith(_BORROWED_PREFIX) or not name.endswith('.txt'):
+            continue
+        try:
+            os.remove(os.path.join(directory, name))
+            removed += 1
+        except OSError:
+            pass
+    if removed:
+        log.info(f"Am sters {removed} copii de cookies rămase de la o repornire")
+    return removed
+
+
 def promote_cookies() -> bool:
     """Marcheaza jar-ul curent drept ultimul bun cunoscut. True daca s-a copiat."""
+    global _rolled_back
     path = _cookies_path or _cookie_file_paths()[0]
     if not cookies_valid(path):
         return False
@@ -337,10 +448,16 @@ def promote_cookies() -> bool:
         with open(path, encoding='utf-8', errors='replace') as fh:
             text = fh.read()
         _write_private(path + _GOOD_SUFFIX, text)
-        return True
     except OSError as e:
         log.debug(f"Nu am putut promova cookie-urile: {e}")
         return False
+    # Revenirea redevine disponibila. Steagul exista ca sa nu intram intr-o bucla
+    # de reveniri in cadrul aceluiasi episod de eșec, nu ca sa interzicem pe viata
+    # procesului o a doua salvare: aici avem dovada ca jar-ul curent a autentificat
+    # (promovarea se cheama doar dupa o descarcare care a folosit cookie-urile),
+    # deci episodul precedent e inchis.
+    _rolled_back = False
+    return True
 
 
 def rollback_cookies() -> bool:

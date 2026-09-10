@@ -34,7 +34,8 @@ import time
 import yt_dlp
 
 from music.config import (YT_REQUEST_MAX_INTERVAL_SEC,
-                          YT_REQUEST_MIN_INTERVAL_SEC, env_num, log)
+                          YT_REQUEST_MIN_INTERVAL_SEC, adopt_cookies,
+                          borrow_cookies, discard_cookies, env_num, log)
 from music.errors import YtdlpTimeout
 
 _NEXT_ALLOWED_AT = 0.0
@@ -157,6 +158,17 @@ async def extract(opts: dict, query: str, *, download: bool = False,
     loop = loop or asyncio.get_running_loop()
     budget = DOWNLOAD_TIMEOUT_SEC if download else EXTRACT_TIMEOUT_SEC
 
+    # Cererea lucreaza pe COPIA ei a jar-ului, niciodata pe fisierul comun.
+    # `YoutubeDL.close()` cheama `save_cookies()`, care rescrie necondiționat
+    # fisierul din jar-ul lui din memorie — iar un thread abandonat dupa timeout
+    # se inchide minute mai tarziu, in afara portii de cereri. Reprodus: un astfel
+    # de thread a rescris jar-ul MORT peste cel BUN restaurat intre timp de
+    # rollback_cookies(), a carui singura lovitura era deja consumata.
+    shared = opts.get('cookiefile')
+    private = borrow_cookies(shared) if shared else None
+    if private:
+        opts = {**opts, 'cookiefile': private}
+
     def _run():
         # Construim SI inchidem aici, in thread-ul executorului. Daca inchiderea
         # ar avea loc pe bucla de evenimente in timp ce thread-ul lucreaza, ar
@@ -168,27 +180,45 @@ async def extract(opts: dict, query: str, *, download: bool = False,
         finally:
             ydl.close()
 
-    async with _slot():
-        # Trimitem DIRECT in executor ca sa pastram concurrent.futures.Future:
-        # la timeout, `wait_for` anuleaza doar invelisul asyncio, iar callback-ul
-        # lui s-ar declanșa imediat. Future-ul executorului se incheie abia cand
-        # thread-ul chiar termina — singurul moment in care slotul e liber cu
-        # adevarat, si deci singurul din care se poate scadea contorul.
-        work = _EXECUTOR.submit(_run)
-        try:
-            info, filename = await asyncio.wait_for(
-                asyncio.wrap_future(work, loop=loop), timeout=budget)
-        except asyncio.TimeoutError as e:
-            live, total = _mark_leaked()
-            work.add_done_callback(_release_leaked)
-            log.warning(
-                f"yt-dlp a depasit {budget}s la {stage or 'cerere'}; thread-ul "
-                f"continua in fundal (abandonate acum: {live}/{MAX_WORKERS}, "
-                f"total de la pornire: {total})")
-            raise YtdlpTimeout(stage, budget) from e
+    adopted = False
+    try:
+        async with _slot():
+            # Trimitem DIRECT in executor ca sa pastram concurrent.futures.Future:
+            # la timeout, `wait_for` anuleaza doar invelisul asyncio, iar
+            # callback-ul lui s-ar declanșa imediat. Future-ul executorului se
+            # incheie abia cand thread-ul chiar termina — singurul moment in care
+            # slotul e liber cu adevarat, si deci singurul din care se poate
+            # scadea contorul.
+            work = _EXECUTOR.submit(_run)
+            try:
+                info, filename = await asyncio.wait_for(
+                    asyncio.wrap_future(work, loop=loop), timeout=budget)
+            except asyncio.TimeoutError as e:
+                live, total = _mark_leaked()
+                # Thread-ul abandonat scrie in copia LUI si o va mai scrie la
+                # inchidere, deci copia se sterge abia cand chiar s-a terminat.
+                work.add_done_callback(_release_leaked)
+                if private:
+                    work.add_done_callback(
+                        lambda _f, path=private: discard_cookies(path))
+                    private = None
+                log.warning(
+                    f"yt-dlp a depasit {budget}s la {stage or 'cerere'}; thread-ul "
+                    f"continua in fundal (abandonate acum: {live}/{MAX_WORKERS}, "
+                    f"total de la pornire: {total})")
+                raise YtdlpTimeout(stage, budget) from e
+        # Doar la succes: rotatia scrisa de yt-dlp (`__Secure-1PSIDTS`, `SIDCC`)
+        # merge in jar-ul comun. La eșec, copia poate conține exact valorile pe
+        # care YouTube le-a invalidat, deci se arunca.
+        if private and shared:
+            adopted = adopt_cookies(private, shared)
+    finally:
+        if private:
+            discard_cookies(private)
 
     if stage:
-        log.debug(f"yt-dlp stage terminat: {stage}")
+        log.debug(f"yt-dlp stage terminat: {stage}"
+                  + ('' if not shared else f" (cookies adoptate: {adopted})"))
     return (info, filename) if want_filename else info
 
 

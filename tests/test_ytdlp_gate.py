@@ -30,15 +30,22 @@ from music import ytdlp
 class _FakeYtDlpModule:
     """Ține locul modulului yt_dlp, cu semantica lui de close()."""
 
+    ROTATION = ('# rotit de yt-dlp\n'
+                '.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSID\tvaloare-noua\n')
+
     def __init__(self, body_sec, cookiefile=None, on_event=None):
         self.body_sec = body_sec
         self.cookiefile = cookiefile
         self.on_event = on_event or (lambda *a: None)
+        # Calea pe care yt-dlp a PRIMIT-O de fapt. Cu izolarea de jar, nu are voie
+        # sa fie niciodata fisierul comun.
+        self.seen_cookiefiles = []
         outer = self
 
         class YoutubeDL:
             def __init__(self, opts):
                 self.opts = opts
+                outer.seen_cookiefiles.append(opts.get('cookiefile'))
                 outer.on_event('init', threading.current_thread().name)
 
             def extract_info(self, query, download=False):
@@ -58,9 +65,11 @@ class _FakeYtDlpModule:
                 # supravietuiesc valorile rotite); catastrofala e doar cand se
                 # intampla pe alt thread decat cel care lucreaza.
                 outer.on_event('close', threading.current_thread().name)
-                if outer.cookiefile:
-                    with open(outer.cookiefile, 'w', encoding='utf-8') as fh:
-                        fh.write('# rotit de yt-dlp\nvaloare-noua\n')
+                # Scrie in fisierul din OPTS-urile lui, ca yt-dlp adevarat.
+                target = self.opts.get('cookiefile') or outer.cookiefile
+                if target:
+                    with open(target, 'w', encoding='utf-8') as fh:
+                        fh.write(outer.ROTATION)
 
         self.YoutubeDL = YoutubeDL
 
@@ -171,6 +180,111 @@ def test_timeout_leaves_the_cookie_file_untouched():
         assert closes, 'thread-ul nu a mai inchis niciodata instanta'
         assert all('ytdlp' in name for name in closes), \
             f'close() a rulat in afara executorului: {closes}'
+
+
+def test_a_request_never_hands_yt_dlp_the_shared_jar():
+    """Izolarea trebuie sa fie in POARTA, nu in buna-voința apelantilor.
+
+    `YoutubeDL.close()` cheama `save_cookies()`, care rescrie necondiționat
+    fisierul din jar-ul lui din memorie. Cat timp acel fisier e cel comun, orice
+    thread — inclusiv unul abandonat, care se inchide minute mai tarziu, in afara
+    portii — poate decide ce conține jar-ul de pe volum.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        shared = os.path.join(tmp, 'cookies.txt')
+        original = ('# Netscape HTTP Cookie File\n'
+                    '.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSID\tvaloare-veche\n')
+        with open(shared, 'w', encoding='utf-8') as fh:
+            fh.write(original)
+
+        fake = _FakeYtDlpModule(0.01)
+        saved = _install(fake)
+        _reset_gate()
+        try:
+            asyncio.run(ytdlp.extract({'cookiefile': shared}, 'q'))
+        finally:
+            ytdlp.yt_dlp = saved
+            _reset_gate()
+
+        assert fake.seen_cookiefiles, 'nu s-a construit nicio instanta'
+        assert all(p and p != shared for p in fake.seen_cookiefiles), (
+            f'yt-dlp a primit chiar fisierul comun: {fake.seen_cookiefiles}')
+        # Copia nu are voie sa rămână in urma: fiecare conține o sesiune Google.
+        leftovers = [n for n in os.listdir(tmp) if n.startswith('cookies-')]
+        assert leftovers == [], f'copii nesterse: {leftovers}'
+
+
+def test_a_successful_request_moves_its_rotation_into_the_shared_jar():
+    """Izolarea nu are voie sa piarda rotatia.
+
+    YouTube schimba `__Secure-1PSIDTS` si `SIDCC` des, iar valorile noi vin exact
+    prin scrierea lui yt-dlp. Daca ele rămân in copia aruncata, sesiunea de pe
+    volum imbatraneste pana e refuzata — adica exact problema pe care persistenta
+    pe volum exista sa o rezolve.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        shared = os.path.join(tmp, 'cookies.txt')
+        with open(shared, 'w', encoding='utf-8') as fh:
+            fh.write('# Netscape HTTP Cookie File\n'
+                     '.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSID\tveche\n')
+
+        fake = _FakeYtDlpModule(0.01)
+        saved = _install(fake)
+        _reset_gate()
+        try:
+            asyncio.run(ytdlp.extract({'cookiefile': shared}, 'q'))
+        finally:
+            ytdlp.yt_dlp = saved
+            _reset_gate()
+
+        body = open(shared, encoding='utf-8').read()
+        assert 'valoare-noua' in body, (
+            'rotatia scrisa de yt-dlp nu a ajuns in jar-ul de pe volum')
+
+
+def test_a_timeout_leaves_the_shared_jar_alone_even_after_the_thread_writes():
+    """Cronologia completa a defectului, prin poarta reala.
+
+    Thread-ul abandonat se inchide DUPA ce timeout-ul a fost raportat si dupa ce o
+    revenire a putut rescrie jar-ul comun. Inainte, scrierea lui de la close()
+    ateriza in fisierul comun si anula revenirea — a carei singura lovitura pe
+    proces era deja consumata.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        shared = os.path.join(tmp, 'cookies.txt')
+        restored = ('# Netscape HTTP Cookie File\n'
+                    '.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSID\tRESTAURAT\n')
+        with open(shared, 'w', encoding='utf-8') as fh:
+            fh.write('# Netscape HTTP Cookie File\n'
+                     '.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSID\tmoarta\n')
+
+        fake = _FakeYtDlpModule(0.6)
+        saved = _install(fake)
+        saved_budget = ytdlp.EXTRACT_TIMEOUT_SEC
+        ytdlp.EXTRACT_TIMEOUT_SEC = 0.1
+        _reset_gate()
+        try:
+            async def main():
+                try:
+                    await ytdlp.extract({'cookiefile': shared}, 'q')
+                except TimeoutError:
+                    # Aici intervine revenirea, cat timp thread-ul lucreaza inca.
+                    with open(shared, 'w', encoding='utf-8') as fh:
+                        fh.write(restored)
+                    return True
+                raise AssertionError('nu a expirat bugetul')
+
+            assert asyncio.run(main()) is True
+        finally:
+            ytdlp.EXTRACT_TIMEOUT_SEC = saved_budget
+            time.sleep(0.9)          # lasa thread-ul abandonat sa se inchida
+            ytdlp.yt_dlp = saved
+            _reset_gate()
+
+        assert open(shared, encoding='utf-8').read() == restored, (
+            'thread-ul abandonat a rescris jar-ul comun si a anulat revenirea')
+        leftovers = [n for n in os.listdir(tmp) if n.startswith('cookies-')]
+        assert leftovers == [], f'copia thread-ului abandonat a rămas: {leftovers}'
 
 
 def test_close_runs_in_the_worker_thread_not_the_loop():
