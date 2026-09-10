@@ -327,6 +327,81 @@ def test_the_playlist_branch_does_not_steal_a_loading_flag_it_did_not_set():
     assert len(st.queue) == 2, f'playlist-ul nu a intrat intreg in coada: {st.queue}'
 
 
+def test_play_next_owns_the_loading_flag_it_sets():
+    """`state.is_loading = True` direct ocolea `begin_loading`.
+
+    Fara incrementarea token-ului, un `process_play` care se termina imediat dupa
+    isi chema `end_loading` cu token-ul lui — care inca se potrivea — si stingea
+    steagul pus de `play_next`. Comanda urmatoare vedea "liber" si pornea o a doua
+    rezolvare in paralel. Aceeasi clasa cu bug-ul din ramura de playlist.
+    """
+    from music import player
+    from music.state import end_loading
+
+    st = _fresh_state()
+    vechi = begin_loading(st)              # o incarcare mai veche ține steagul
+    ctx = _FakeCtx(_FakeVoiceClient(playing=False))
+
+    saved = player._loop
+    scheduled = []
+    player._loop = type('L', (), {})()     # nu None, ca sa nu caute o bucla
+    saved_sched = player.asyncio.run_coroutine_threadsafe
+    player.asyncio.run_coroutine_threadsafe = (
+        lambda coro, loop: scheduled.append(coro) or coro.close())
+    try:
+        player.play_next(ctx)
+        assert st.is_loading is True, 'nu a marcat ocupat'
+        # Incarcarea VECHE se termina si isi elibereaza token-ul.
+        end_loading(st, vechi)
+        assert st.is_loading is True, (
+            'un end_loading vechi a stins steagul pus de play_next: comanda '
+            'urmatoare va porni o a doua rezolvare in paralel')
+    finally:
+        player.asyncio.run_coroutine_threadsafe = saved_sched
+        player._loop = saved
+    assert scheduled, 'nu a programat nimic'
+
+
+def test_play_next_never_leaves_the_flag_on_without_scheduling():
+    """Ramura fara bucla ieșea prin `return` cu steagul APRINS si nimic programat.
+
+    Din acel moment fiecare `!play` raspundea "in coada" pentru o incarcare care nu
+    exista, si nimic nu mai scurgea coada — sesiune blocata pana la restart.
+    """
+    from music import player
+
+    for defect in ('fara bucla', 'bucla inchisa'):
+        st = _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient(playing=False))
+        saved_loop = player._loop
+        saved_get = player.asyncio.get_event_loop
+        saved_sched = player.asyncio.run_coroutine_threadsafe
+        try:
+            if defect == 'fara bucla':
+                player._loop = None
+
+                def boom():
+                    raise RuntimeError('there is no current event loop')
+
+                player.asyncio.get_event_loop = boom
+            else:
+                player._loop = type('L', (), {})()
+
+                def boom_sched(coro, loop):
+                    coro.close()
+                    raise RuntimeError('Event loop is closed')
+
+                player.asyncio.run_coroutine_threadsafe = boom_sched
+            player.play_next(ctx)
+        finally:
+            player._loop = saved_loop
+            player.asyncio.get_event_loop = saved_get
+            player.asyncio.run_coroutine_threadsafe = saved_sched
+
+        assert st.is_loading is False, (
+            f'{defect}: steagul a rămas aprins fara nicio incarcare in curs')
+
+
 def test_resume_if_idle_never_doubles_a_load_in_flight():
     from music import player
 

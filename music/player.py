@@ -75,6 +75,32 @@ def _history_entry(state, vid: str) -> dict | None:
     return None
 
 
+def _log_play_result(outcome: str, started_at: float, query, *, url=None,
+                     reused: bool = False, duration=0, cookies: bool = False,
+                     reason=None) -> None:
+    """O SINGURA linie per incercare de redare, cu tot ce trebuie ca sa o explici.
+
+    Pana acum, ca sa intelegi o seara proasta trebuia sa aduni zeci de linii
+    imprastiate: clientul dintr-un log de resolve, modul de cookies din altul,
+    verdictul din al treilea, iar un hit de cache nu lasa aproape nicio urma. Cu un
+    format fix se poate grep-a si numara: cate redari au fost din cache, cate au
+    folosit jar-ul, unde se duce timpul, care e distributia de eșecuri.
+    """
+    elapsed = max(0.0, time.time() - started_at)
+    fields = [
+        f"rezultat={outcome}",
+        f"sursa={'cache' if reused else 'descarcat'}",
+        f"cookies={int(bool(cookies))}",
+        f"durata={int(duration or 0)}s",
+        f"elapsed={elapsed:.1f}s",
+        f"id={video_id(url) or '?'}",
+    ]
+    if reason:
+        # Un singur rand, oricat de urat e textul brut de la yt-dlp.
+        fields.append(f"motiv={str(reason)[:120]!r}".replace('\n', ' '))
+    log.info('PLAY ' + ' '.join(fields))
+
+
 def _discard_partial(filename, reused: bool) -> None:
     """Sterge fisierul doar daca redarea asta chiar l-a descarcat.
 
@@ -148,7 +174,7 @@ def init(bot_ref, ui_func, start_to, cancel_to):
     cancel_timeout = cancel_to
 
 
-async def trigger_radio(ctx):
+async def trigger_radio(ctx, token: int | None = None):
     state = get_state(ctx.guild.id)
     try:
         if not state.queue:
@@ -160,7 +186,7 @@ async def trigger_radio(ctx):
             raise ValueError("Nu s-au gasit piese pentru autoplay.")
     except Exception as e:
         log.warning(f"Autoplay error (guild {ctx.guild.id}): {e}")
-        state.is_loading = False
+        _release_loading(state, token)
         state.autoplay = False
         try:
             await ctx.send("Autoplay s-a oprit.", delete_after=10)
@@ -169,14 +195,27 @@ async def trigger_radio(ctx):
         start_timeout(ctx)
 
 
-async def _play_next_async(ctx):
+def _release_loading(state, token: int | None) -> None:
+    """Stinge steagul de incarcare respectand proprietatea.
+
+    Cu un token, `end_loading` verifica intai daca incarcarea care ține steagul e
+    chiar a noastra. Fara (apeluri mai vechi care nu il duc), cade pe atribuirea
+    directa — comportamentul de dinainte, pastrat ca sa nu rămâna un steag aprins.
+    """
+    if token is None:
+        state.is_loading = False
+    else:
+        end_loading(state, token)
+
+
+async def _play_next_async(ctx, token: int | None = None):
     state = get_state(ctx.guild.id)
     next_item = None
     try:
         async with state._lock:
             vc = ctx.voice_client
             if not vc or not vc.is_connected():
-                state.is_loading = False
+                _release_loading(state, token)
                 return
             if not state.skip_request and state.last_url:
                 if state.loop_mode == 1:
@@ -200,13 +239,13 @@ async def _play_next_async(ctx):
                     log.warning(f"Prefill dupa skip esuat: {e}")
         elif state.autoplay and state.last_url:
             cancel_timeout(ctx)
-            await trigger_radio(ctx)
+            await trigger_radio(ctx, token)
         else:
-            state.is_loading = False
+            _release_loading(state, token)
             start_timeout(ctx)
     except Exception as e:
         log.error(f"play_next EROARE: {e}", exc_info=True)
-        state.is_loading = False
+        _release_loading(state, token)
         start_timeout(ctx)
 
 
@@ -248,19 +287,40 @@ def resume_if_idle(ctx) -> str:
 
 
 def play_next(ctx):
+    """Programeaza urmatoarea piesa. Sincrona: se cheama si din thread-ul FFmpeg.
+
+    Doua defecte reparate aici, ambele in jurul steagului de incarcare:
+
+    1. `state.is_loading = True` direct ocolea `begin_loading`, deci NU incrementa
+       token-ul de proprietate. Un `process_play` care se termina imediat dupa isi
+       chema `end_loading` cu token-ul lui — care inca se potrivea — si stingea
+       steagul pus aici. Comanda urmatoare vedea "liber" si pornea o a doua
+       rezolvare in paralel. Aceeasi clasa cu bug-ul din ramura de playlist.
+    2. Cand nu exista bucla, functia ieșea prin `return` lasand steagul APRINS si
+       nimic programat: din acel moment fiecare `!play` raspundea "in coada"
+       pentru o incarcare care nu exista, iar nimic nu mai scurgea coada.
+    """
     global _loop
     state = get_state(ctx.guild.id)
-    state.is_loading = True
+    token = begin_loading(state)
     if _loop is None:
         try:
             _loop = asyncio.get_event_loop()
-        except RuntimeError:
+        except RuntimeError as e:
+            log.error(f"play_next fara bucla de evenimente: {e}")
+            _release_loading(state, token)
             return
-    asyncio.run_coroutine_threadsafe(_play_next_async(ctx), _loop)
+    try:
+        asyncio.run_coroutine_threadsafe(_play_next_async(ctx, token), _loop)
+    except RuntimeError as e:
+        # Bucla inchisa (oprire in curs). Tot ce conteaza e sa nu lasam steagul.
+        log.error(f"play_next nu a putut programa redarea: {e}")
+        _release_loading(state, token)
 
 
 async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
     state = get_state(ctx.guild.id)
+    started_at = time.time()
     vc = ctx.voice_client
     if not vc or not vc.is_connected():
         state.is_loading = False
@@ -459,6 +519,12 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
                     pass
             vc.play(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTS), after=after_play)
 
+        # A ieșit audio din proces. Momentul asta e singurul raspuns la "mai
+        # merge?" care nu costa nicio cerere catre YouTube.
+        state.last_play_ok = time.time()
+        _log_play_result('ok', started_at, query, url=web_url, reused=reused,
+                         duration=state.last_duration, cookies=jar_authenticated)
+
         # History si insoțitorul se scriu DUPA ce redarea a pornit cu adevarat.
         # Cand erau mai sus, o deconectare intre pregatire si `vc.play` lasa in
         # history o piesa care nu s-a auzit niciodata — iar history alimenteaza
@@ -553,6 +619,8 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         # retea, care trebuie sa rămâna vizibile.
         log.info(f"Redare intrerupta: {e}")
         _discard_partial(filename, reused)
+        _log_play_result('intrerupt', started_at, query, url=web_url,
+                         reused=reused, reason=e)
     except TrackRejected as e:
         # Regula noastra, nu defectiune: nu atinge _consecutive_errors si nu
         # trece prin diagnose_error, care ar traduce-o in "Eroare necunoscuta".
@@ -560,11 +628,15 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         _discard_partial(filename, reused)
         state._consecutive_rejects += 1
         rejected = str(e)
+        _log_play_result('refuzat', started_at, query, url=web_url,
+                         reused=reused, reason=e)
     except Exception as e:
         log.error(f"Eroare process_play: {e}", exc_info=True)
         _discard_partial(filename, reused)
         state._consecutive_errors += 1
         failure = e
+        _log_play_result('eroare', started_at, query, url=web_url,
+                         reused=reused, reason=state.last_raw_error or e)
     finally:
         # Doar ultimul proprietar elibereaza steagul: altfel un process_play
         # care se termina ar debloca un altul aflat inca in lucru.

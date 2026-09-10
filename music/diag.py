@@ -101,6 +101,12 @@ def build(bot, guild_states, *, now=None, pot=None) -> dict:
             'idle_timer_armed': bool(state.timeout_task
                                      and not state.timeout_task.done()),
             'last_idle_reason': state.last_idle_reason or None,
+            # Cate secunde de cand a ieșit ULTIMA data audio din proces. None =
+            # niciodata de la pornire. Nu e o problema in sine (un bot pe care
+            # nimeni nu l-a rugat nimic toata noaptea e sanatos), dar e singurul
+            # raspuns la "mai merge?" care nu costa nicio cerere catre YouTube.
+            'last_play_ok_sec_ago': (round(now - state.last_play_ok)
+                                     if state.last_play_ok else None),
             'last_error': scrub(state.last_raw_error)[:200] if state.last_raw_error else None,
         }
 

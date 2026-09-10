@@ -484,9 +484,16 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             inline=True)
 
         guild = snapshot['guilds_detail'].get(str(ctx.guild.id), {})
+        # "Cand a ieșit ultima data audio" e prima intrebare pe care o pune cineva
+        # cand crede ca botul e mort, si pana acum nu avea niciun raspuns.
+        ago = guild.get('last_play_ok_sec_ago')
+        last_play = 'niciodata de la pornire' if ago is None else (
+            f"acum {ago // 3600}h" if ago >= 3600 else
+            f"acum {ago // 60}m" if ago >= 60 else f"acum {ago}s")
         embed.add_field(
             name="Sesiune",
-            value=(f"Coada: `{guild.get('queue', 0)}` · "
+            value=(f"Ultima redare reusita: `{last_play}`\n"
+                   f"Coada: `{guild.get('queue', 0)}` · "
                    f"Erori: `{guild.get('consecutive_errors', 0)}`\n"
                    f"Intrerupator: `{guild.get('breaker_sec_left', 0)}s` · "
                    f"Incarcare: `{guild.get('is_loading')}`"),

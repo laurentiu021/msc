@@ -705,6 +705,103 @@ def test_an_interrupted_cache_hit_does_not_evict_the_cached_file():
             'a inregistrat in history o piesa care nu s-a auzit niciodata')
 
 
+def test_a_successful_play_records_when_audio_last_came_out():
+    """Singurul semnal de "mai merge?" care nu costa nicio cerere.
+
+    O sonda periodica spre YouTube ar arde cereri cu cookies pe exact IP-ul care ne
+    provoaca — motivul pentru care proba de la pornire e opt-in. Momentul ultimei
+    redari reusite da acelasi raspuns gratis.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        st = _fresh_state()
+        assert st.last_play_ok == 0.0, 'starea noua nu porneste de la zero'
+        ctx = _FakeCtx(_FakeVoiceClient())
+        before = time.time()
+        with _Harness(target):
+            asyncio.run(player.process_play(ctx, 'ceva'))
+
+        assert st.last_play_ok >= before, (
+            'o redare reusita nu a inregistrat momentul: !health nu poate spune '
+            'cand a ieșit ultima data audio')
+
+        # Si ajunge in instantaneu, ca sa fie vizibil in !health si /status.
+        from music import diag
+        snap = diag.build(None, {77: st}, now=st.last_play_ok + 125,
+                          pot=(True, 'ok'))
+        assert snap['guilds_detail']['77']['last_play_ok_sec_ago'] == 125, (
+            snap['guilds_detail']['77'])
+
+
+def test_a_failed_play_does_not_count_as_audio_coming_out():
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        st = _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient())
+        with _Harness(target, full_info={}):
+            asyncio.run(player.process_play(
+                ctx, 'https://www.youtube.com/watch?v=nimic'))
+        assert st.last_play_ok == 0.0, (
+            'un eșec a fost inregistrat ca redare reusita')
+
+        from music import diag
+        snap = diag.build(None, {77: st}, now=time.time(), pot=(True, 'ok'))
+        assert snap['guilds_detail']['77']['last_play_ok_sec_ago'] is None
+
+
+def test_every_play_attempt_leaves_one_structured_line():
+    """Ca sa poti explica o seara proasta fara sa aduni zeci de linii."""
+    import logging
+
+    records = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    sink = _Sink()
+    logger = logging.getLogger('gogu.music')
+    logger.addHandler(sink)
+    # Fara nivel explicit, root-ul e pe WARNING in teste si `log.info` nici nu
+    # construieste inregistrarea — testul ar trece degeaba pe o lista goala.
+    saved_level = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, 'vid123.opus')
+            with open(target, 'wb') as fh:
+                fh.write(b'audio')
+            _fresh_state()
+            ctx = _FakeCtx(_FakeVoiceClient())
+            with _Harness(target):
+                asyncio.run(player.process_play(ctx, 'ceva'))
+            ok_lines = [m for m in records if m.startswith('PLAY ')]
+
+            records.clear()
+            _fresh_state()
+            with _Harness(target, full_info={}):
+                asyncio.run(player.process_play(
+                    ctx, 'https://www.youtube.com/watch?v=nimic'))
+            fail_lines = [m for m in records if m.startswith('PLAY ')]
+    finally:
+        logger.removeHandler(sink)
+        logger.setLevel(saved_level)
+
+    assert len(ok_lines) == 1, f'redarea reusita: {ok_lines}'
+    for field in ('rezultat=ok', 'sursa=descarcat', 'cookies=', 'durata=200s',
+                  'elapsed=', 'id=vid123'):
+        assert field in ok_lines[0], f'{field!r} lipseste din: {ok_lines[0]}'
+
+    assert len(fail_lines) == 1, f'eșecul: {fail_lines}'
+    assert 'rezultat=eroare' in fail_lines[0], fail_lines[0]
+    assert 'motiv=' in fail_lines[0], fail_lines[0]
+    assert chr(10) not in fail_lines[0], 'linia structurata s-a rupt in mai multe'
+
+
 # --- promovarea copiei bune de cookies --------------------------------------
 # `cookies_valid` e pur STRUCTURALA: se uita doar la numele din jar. Putrezirea
 # tipica pastreaza numele si omoara valorile, deci un jar deja refuzat de YouTube

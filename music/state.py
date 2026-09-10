@@ -27,6 +27,12 @@ class GuildState:
         self.current_msg = None
         self.is_loading = False
         self.last_start_time = 0
+        # Ultima data cand a ieșit CHIAR audio din proces, adica `vc.play` a
+        # reusit. Singurul semnal care raspunde la "mai merge?" fara sa cheltuie
+        # nicio cerere: o sonda periodica ar arde cereri cu cookies pe exact IP-ul
+        # care ne provoaca — motivul pentru care proba de la pornire e opt-in.
+        # 0.0 = nu s-a redat nimic de la pornirea procesului.
+        self.last_play_ok = 0.0
         # Momentul pauzei, 0 cand se reda. Fara el, panoul calcula finalul
         # ca last_start_time + durata, deci dupa o pauza de 10 minute anunta
         # ca piesa s-a terminat acum 6 minute.
