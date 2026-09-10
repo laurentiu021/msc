@@ -9,8 +9,25 @@ import yt_dlp
 
 log = logging.getLogger('gogu.music')
 
-DOWNLOAD_DIR = 'downloads'
+# Volumul persistent, daca exista. Definit inainte de DOWNLOAD_DIR pentru ca si
+# audio-ul si cache-ul yt-dlp trebuie sa ajunga pe el.
+COOKIE_DIR = os.getenv('COOKIE_DIR', '/data')
+_ON_VOLUME = os.path.isdir(COOKIE_DIR)
+
+# Pe volum cand exista: un fisier deja descarcat inseamna zero cereri catre
+# YouTube, zero octeti de media, zero rulari de Deno, niciun slot de throttle si
+# nicio expunere la 429 sau la cookie-uri expirate. Pe disc efemer, fiecare
+# deploy pierdea tot ce se ascultase.
+DOWNLOAD_DIR = os.path.join(COOKIE_DIR, 'audio') if _ON_VOLUME else 'downloads'
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# Cache-ul propriu al yt-dlp (semnaturi, provocari EJS). Fara cachedir explicit
+# ajunge in ~/.cache/yt-dlp, efemer in container, deci prima piesa de dupa fiecare
+# deploy platea din nou rezolvarea semnaturii.
+YTDLP_CACHE_DIR = os.path.join(COOKIE_DIR, 'ytdlp-cache') if _ON_VOLUME else None
+
+# Cat audio pastram inainte sa stergem cele mai vechi fisiere.
+DOWNLOAD_CACHE_BYTES = int(os.getenv('DOWNLOAD_CACHE_MB', '300')) * 1024 * 1024
 
 BLACKLIST = [
     "jazz", "piano", "relaxing", "chill", "lofi", "ambient",
@@ -129,11 +146,16 @@ YDL_OPTS_SEARCH = {
     'ignore_no_formats_error': True,
     'extractor_args': _YT_EXTRACTOR_ARGS,
     'logger': YDL_LOGGER,
+    'cachedir': YTDLP_CACHE_DIR or True,
 }
 
 MAX_TRACK_SECONDS = 660
 MIN_TRACK_SECONDS = 30
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
+# Plafon separat pentru incercarea HLS. Chiar si cerand bestaudio, o redare HLS
+# poate fi muxata; 30MB acopera orice piesa rezonabila si opreste din start un
+# transfer de video pe un bot audio.
+HLS_MAX_BYTES = 30 * 1024 * 1024
 
 YDL_OPTS_DOWNLOAD = {
     'format': 'bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
@@ -155,6 +177,7 @@ YDL_OPTS_DOWNLOAD = {
     'socket_timeout': 15,
     'extractor_args': _YT_EXTRACTOR_ARGS,
     'logger': YDL_LOGGER,
+    'cachedir': YTDLP_CACHE_DIR or True,
 }
 
 if _proxy:
@@ -167,12 +190,11 @@ if _proxy:
 # Cookies disponibile ca fallback (pt content care cere cont: age-restricted, privat)
 _cookies_path = None
 
-# Directorul volumului persistent, daca exista. yt-dlp rescrie fisierul de
+# COOKIE_DIR e definit sus, langa DOWNLOAD_DIR. yt-dlp rescrie fisierul de
 # cookies cu valorile rotite de YouTube (__Secure-1PSIDTS si SIDCC se schimba
 # des). Pe disc efemer rotatia se pierde la fiecare restart si se revine la
 # valorile din env, care imbatranesc pana cand YouTube le refuza. Pe volum,
 # rotatia supravietuieste si cookie-urile tin mult mai mult.
-COOKIE_DIR = os.getenv('COOKIE_DIR', '/data')
 
 
 def _cookie_file_paths():
@@ -340,6 +362,12 @@ def has_real_formats(formats_list: list) -> bool:
     return count_real_formats(formats_list) > 0
 
 
+# Doar -vn. Verificat in discord.py 2.7.1 instalat: FFmpegOpusAudio emite deja
+# `-ar 48000 -ac 2 -b:a {bitrate}k`, iar sirul nostru se adauga DUPA, deci
+# `-b:a 128k` suprascria bitrate-ul pe care from_probe tocmai il masurase din
+# fisier (pe calea de transcodare; pe `-c:a copy` ffmpeg il ignora oricum).
+# FFmpegPCMAudio emite `-f s16le -ar 48000 -ac 2`, deci si acolo restul era
+# duplicat inutil.
 FFMPEG_OPTS = {
-    'options': '-vn -b:a 128k -ar 48000 -ac 2',
+    'options': '-vn',
 }

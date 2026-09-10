@@ -174,7 +174,14 @@ def test_replacing_a_playing_track_also_stops_it():
         assert vc.orphaned == []
 
 
-def test_displaced_file_is_deleted():
+def test_displaced_file_stays_in_the_cache():
+    """Piesa inlocuita nu se sterge: rămâne intrare de cache.
+
+    Ce trebuie sa nu se mai intample e ALTCEVA: callback-ul invechit nu curata
+    nimic, iar calea de inlocuire nu prelua fisierul, deci nimeni nu il mai
+    atingea niciodata. Acum proprietatea trece la cache, iar evacuarea se face pe
+    marime.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         target = os.path.join(tmp, 'noua.opus')
         old = os.path.join(tmp, 'veche.opus')
@@ -185,10 +192,17 @@ def test_displaced_file_is_deleted():
         vc = _VoiceClient()
         vc.play(object())
         vc.calls.clear()
-        with _Harness(target) as h:
-            asyncio.run(player.process_play(_Ctx(vc), 'ceva nou'))
-        assert old in h.cleaned, (
-            f'fisierul inlocuit nu a fost sters: {h.cleaned}; fiecare !nplay lasa unul pe disc')
+        trims = []
+        saved_trim = player.trim_cache
+        player.trim_cache = lambda: trims.append(True)
+        try:
+            with _Harness(target) as h:
+                asyncio.run(player.process_play(_Ctx(vc), 'ceva nou'))
+        finally:
+            player.trim_cache = saved_trim
+        assert old not in h.cleaned, f'a sters o intrare buna de cache: {h.cleaned}'
+        assert os.path.exists(old), 'fisierul inlocuit a dispărut de pe disc'
+        assert trims, 'nu s-a chemat evacuarea cache-ului la inlocuire'
 
 
 def test_displaced_file_is_kept_when_it_is_the_same_file():

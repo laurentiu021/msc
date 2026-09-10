@@ -3,14 +3,16 @@ import discord
 import asyncio
 import os
 import time
-from music.config import FFMPEG_OPTS, MAX_TRACK_SECONDS, log
-from music.config import (clear_ydl_reason, cookies_available,
+from music.config import (FFMPEG_OPTS, MAX_DOWNLOAD_BYTES,
+                          MAX_TRACK_SECONDS, log)
+from music.config import (HLS_MAX_BYTES, clear_ydl_reason, cookies_available,
                           count_real_formats, has_real_formats,
                           last_ydl_reason, make_download_opts,
                           make_search_opts, yt_client_args, WEB_CLIENTS)
 from music import ytdlp
 from music.state import begin_loading, end_loading, get_state, loading
-from music.utils import is_clean, cleanup_file, item_title
+from music.utils import (cached_download, cleanup_file, is_clean, item_title,
+                         trim_download_cache)
 from music.autoplay import prefill_autoplay_queue
 from music.diag import scrub as _scrub
 from music.errors import diagnose_error
@@ -44,6 +46,21 @@ class TrackRejected(Exception):
 
 # Cate refuzuri consecutive acceptam inainte sa ne oprim din a avansa coada.
 MAX_CONSECUTIVE_REJECTS = 5
+
+# (selector de format, plafon de octeti), in ordinea incercarilor. La nivel de
+# modul ca testele sa citeasca valoarea reala, nu textul sursei.
+#
+# A doua incercare cere AUDIO din HLS, nu `best`. `best[protocol=m3u8*]` e o
+# redare muxata video+audio, iar `-vn` arunca imaginea abia DUPA ce a ajuns pe
+# disc: un bot audio descarca astfel zeci de MB de video pe un IP care ne
+# limiteaza. Plafonul ei e mai strans, fiindca HLS-ul e o plasa de siguranta, nu
+# calea normala.
+DOWNLOAD_ATTEMPTS = [
+    ('bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
+     MAX_DOWNLOAD_BYTES),
+    ('bestaudio[protocol^=m3u8]/bestaudio*[protocol^=m3u8]/best[protocol^=m3u8]',
+     HLS_MAX_BYTES),
+]
 
 
 async def _resolve_query_to_url(state, query: str) -> str:
@@ -120,6 +137,26 @@ def _unplayable_reason(info) -> str | None:
     return None
 
 
+def _worth_another_format(state) -> bool:
+    """Merita a doua incercare cu alt format?
+
+    Doar cand eșecul e chiar despre formate. Un 429, un cookie expirat sau un
+    video indisponibil dau acelasi raspuns oricat de diferit ai scrie selectorul,
+    deci o a doua rundă e doar o cerere in plus pe un IP deja limitat — si inca
+    una cu buget propriu de 240 de secunde.
+    """
+    if not state.last_raw_error:
+        # Nicio eroare raportata inseamna respins de filtru (durata, live), nu o
+        # problema de format.
+        return False
+    error_type, _ = diagnose_error(state.last_raw_error)
+    worth = error_type in ('format', 'unknown')
+    if not worth:
+        log.info(f"Nu mai incerc alt format: cauza e '{error_type}', "
+                 f"nu selectorul de format")
+    return worth
+
+
 def _meta(*sources, keys):
     """Prima valoare utila pentru oricare dintre chei, in ordinea surselor.
 
@@ -137,6 +174,43 @@ def _meta(*sources, keys):
             if value:
                 return value
     return None
+
+
+def _video_id(url: str) -> str | None:
+    """ID-ul de videoclip dintr-un URL de YouTube, sau None.
+
+    Cheia de cache: `outtmpl` e deja `%(id)s.%(ext)s`, deci numele fisierului de
+    pe disc ESTE ID-ul.
+    """
+    text = str(url or '')
+    if 'v=' in text:
+        return text.split('v=')[-1].split('&')[0] or None
+    if 'youtu.be/' in text:
+        return text.split('youtu.be/')[-1].split('?')[0] or None
+    return None
+
+
+def _history_entry(state, video_id: str) -> dict | None:
+    """Intrarea de history pentru acest ID, ca sa nu re-cerem metadata."""
+    if not video_id:
+        return None
+    for entry in reversed(state.history):
+        if _video_id(entry.get('url')) == video_id and entry.get('title'):
+            return entry
+    return None
+
+
+def trim_cache() -> None:
+    """Evacueaza cache-ul audio, protejand ce se reda chiar acum.
+
+    Inlocuieste stergerea de dupa fiecare piesa. O piesa stearsa la 2 secunde
+    dupa final trebuie re-descarcata integral cand cineva o cere din nou —
+    acelasi link, butonul Back, loop pe coada, saltul din select, sau autoplay
+    care o re-propune. Cu cache, a doua redare costa zero cereri.
+    """
+    from music.state import guild_states
+    keep = {st.current_file for st in guild_states.values() if st.current_file}
+    trim_download_cache(keep)
 
 
 def bump_play_generation(state) -> int:
@@ -161,7 +235,8 @@ def make_after_play(ctx, state, filename):
             # Oprire deliberata: altcineva preia redarea si fisierul.
             return
         if state.loop_mode != 1:
-            cleanup_file(filename, _loop)
+            # NU stergem fisierul: rămâne in cache pentru urmatoarea redare.
+            trim_cache()
         play_next(ctx)
 
     return after_play
@@ -302,14 +377,15 @@ async def process_play(ctx, query, is_radio=False):
     # bucla de descarcare nu ruleaza deloc: altfel citirea de mai jos ar fi un
     # NameError exact pe calea cea mai frecventa.
     dl_info = None
-    formats_to_try = [
-        'bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
-        'best[protocol=m3u8_native]/best[protocol=m3u8]',
-    ]
+
+    reused = False
+    web_url = None
+    selected = None
+    target_url = None
 
     try:
         # Repetare (loop pe piesa) sau re-adaugarea aceluiasi URL: fisierul e
-        # deja pe disc, deci nu mai cerem nimic de la YouTube.
+        # chiar cel care se reda, deci nu cerem absolut nimic.
         if (query and query == state.last_url and state.current_file
                 and os.path.exists(state.current_file)):
             log.info("Refolosesc fisierul deja descarcat (loop / acelasi URL)")
@@ -324,14 +400,34 @@ async def process_play(ctx, query, is_radio=False):
                 'webpage_url': state.last_url,
             }
         else:
-            reused = False
-
-        if not reused:
             # Alegerea piesei se face pe metadata IEFTINA, apoi extragem complet
             # exact un videoclip. Cu ytsearch5 fara extract_flat, yt-dlp extragea
             # integral toate cele cinci rezultate: ~20 de cereri catre YouTube
             # pentru un singur !play, toate intr-un singur slot de throttle.
             target_url = await _resolve_query_to_url(state, query)
+
+            # Cache pe disc, de la o redare anterioara. Verificarea vine DUPA
+            # rezolvarea la URL (un text de cautare nu are ID) si INAINTE de
+            # extractia completa, deci un hit costa zero cereri catre YouTube,
+            # zero octeti de media, niciun slot de throttle si nicio expunere la
+            # 429. Titlul si durata le luam din history, unde piesa e deja.
+            cached_id = _video_id(target_url)
+            cached_path = cached_download(cached_id) if cached_id else None
+            known = _history_entry(state, cached_id) if cached_path else None
+            if cached_path and known:
+                log.info(f"Cache audio: refolosesc {os.path.basename(cached_path)}")
+                filename = cached_path
+                reused = True
+                web_url = known.get('url') or target_url
+                selected = {
+                    'title': known.get('title'),
+                    'duration': known.get('duration'),
+                    'thumbnail': known.get('thumbnail'),
+                    'channel': known.get('channel'),
+                    'webpage_url': web_url,
+                }
+
+        if not reused:
 
             # Cookies primele, pentru ca de pe IP-ul de datacenter al Railway
             # calea de guest ajunge la 429 pe webpage -> lipsa Visitor Data ->
@@ -428,17 +524,24 @@ async def process_play(ctx, query, is_radio=False):
             if reason:
                 raise TrackRejected(reason)
 
-            # Download: incearca prima data cu combinatia care a mers la search
+            # Download: format-ul in bucla EXTERIOARA, modul de cookies in cea
+            # interioara. Un 429 sau un cookie expirat nu devine alt raspuns daca
+            # intrebi cu alt sir de format, deci varianta veche (format in
+            # interior) putea plati patru extractii complete plus patru
+            # transferuri partiale, fiecare cu buget propriu de 240s, pentru
+            # aceeasi cauza.
             clear_ydl_reason()
             cookie_order = [True, False] if successful_cookies else [False, True]
-            for use_cookies_dl in cookie_order:
+            for fmt, size_cap in DOWNLOAD_ATTEMPTS:
                 if filename and os.path.exists(filename):
                     break
-                for fmt in formats_to_try:
+                if fmt != DOWNLOAD_ATTEMPTS[0][0] and not _worth_another_format(state):
+                    break
+                for use_cookies_dl in cookie_order:
                     try:
                         if use_cookies_dl and not cookies_available():
-                            break
-                        overrides = {'format': fmt}
+                            continue
+                        overrides = {'format': fmt, 'max_filesize': size_cap}
                         if successful_client:
                             overrides['extractor_args'] = yt_client_args(*successful_client)
                         dl_opts = make_download_opts(with_cookies=use_cookies_dl,
@@ -514,7 +617,8 @@ async def process_play(ctx, query, is_radio=False):
             # e responsabilitatea noastra. Nu il stergem daca e chiar cel pe
             # care urmeaza sa il redam (loop / acelasi URL).
             if displaced and displaced != filename:
-                cleanup_file(displaced, _loop)
+                # Piesa inlocuita rămâne in cache; doar evacuam daca e nevoie.
+                trim_cache()
         if not vc.is_connected():
             raise PlaybackInterrupted("Voice deconectat dupa stop.")
 

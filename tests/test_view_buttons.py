@@ -75,17 +75,29 @@ def _press(name, state):
         player.cancel_timeout, player.start_timeout = saved
 
 
-def test_stop_button_deletes_the_current_audio_file():
+def test_stop_button_releases_the_file_without_deleting_it():
+    """Butonul curata SESIUNEA; fisierul rămâne intrare de cache.
+
+    Inainte nu facea niciuna din cele doua: stergea un camp mort
+    (`state.preloaded`, mereu None) si nu atingea `state.current_file`, deci
+    fiecare oprire din panou lasa un fisier pe care nimeni nu-l mai revendica.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, 'piesa.opus')
         with open(path, 'wb') as fh:
             fh.write(b'audio')
         st = _fresh_state()
         st.current_file = path
-        _press('stop_btn', st)
-        # loop=None, deci cleanup_file sterge sincron.
-        assert not os.path.exists(path), 'fisierul a rămas pe disc'
+        trims = []
+        saved = player.trim_cache
+        player.trim_cache = lambda: trims.append(True)
+        try:
+            _press('stop_btn', st)
+        finally:
+            player.trim_cache = saved
         assert st.current_file is None, 'current_file a rămas setat'
+        assert os.path.exists(path), 'a sters o intrare buna de cache'
+        assert trims, 'nu s-a chemat evacuarea cache-ului'
 
 
 def test_stop_button_leaves_the_session_clean():

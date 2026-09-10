@@ -191,9 +191,9 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         state.queue.clear(); set_autoplay(state, False, by_user=True)
         state.loop_mode = 0
         state.is_loading = False; state.always_on = False
-        if state.current_file:
-            cleanup_file(state.current_file, bot.loop)
-            state.current_file = None
+        # Fisierul rămâne in cache; doar nu mai e "al" sesiunii.
+        state.current_file = None
+        player_mod.trim_cache()
         player_mod.bump_play_generation(state)
         cancel_timeout(ctx)
         if ctx.voice_client: await ctx.voice_client.disconnect()

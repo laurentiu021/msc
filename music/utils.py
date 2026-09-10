@@ -5,8 +5,8 @@ import re
 import time
 
 import discord
-from music.config import (BLACKLIST, DOWNLOAD_DIR, MAX_TRACK_SECONDS,
-                          MIN_TRACK_SECONDS, log)
+from music.config import (BLACKLIST, DOWNLOAD_CACHE_BYTES, DOWNLOAD_DIR,
+                          MAX_TRACK_SECONDS, MIN_TRACK_SECONDS, log)
 
 
 async def safe_delete(msg):
@@ -53,38 +53,113 @@ def item_title(item, limit: int | None = None) -> str:
     return text[:limit] if limit else text
 
 
-def sweep_downloads(keep, max_age_sec: int = 1800, directory: str | None = None) -> int:
-    """Sterge fisierele audio orfane. Returneaza cate a sters.
+def cached_download(video_id: str, directory: str | None = None) -> str | None:
+    """Fisierul deja descarcat pentru acest ID, sau None.
 
-    Singura curatare a directorului se facea la pornire, iar `cleanup_file`
-    sterge exact un nume primit. Tot ce scapa printre ele — o descarcare
-    intrerupta de un restart, fisierul unei sesiuni terminate prost — rămânea pe
-    disc pana la urmatoarea repornire a containerului.
+    Un hit inseamna zero cereri catre YouTube, zero octeti de media, zero rulari
+    de Deno, niciun slot de throttle si nicio expunere la 429 sau la cookie-uri
+    expirate. Intr-un grup de cațiva oameni aceleasi piese revin constant: acelasi
+    link dat din nou, butonul Back, loop pe coada, selectul de salt, sau autoplay
+    care re-propune o piesa ieșita din cele 20 de intrari de history.
 
-    `keep` sunt fisierele in uz chiar acum; nu se ating niciodata, indiferent de
-    varsta, pentru ca o piesa poate rula mai mult decat max_age_sec.
+    Nu intoarce NICIODATA un `.part`: o descarcare intrerupta de un SIGKILL ar fi
+    redata ca piesa corupta. Nici fisiere de zero octeti.
+    """
+    if not video_id:
+        return None
+    directory = directory or DOWNLOAD_DIR
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return None
+    for name in sorted(names):
+        stem, ext = os.path.splitext(name)
+        if stem != video_id or ext in ('.part', '.ytdl', ''):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            if os.path.getsize(path) <= 0:
+                continue
+            # Atinge fisierul, ca LRU-ul sa reflecte folosirea, nu descarcarea.
+            os.utime(path, None)
+        except OSError:
+            continue
+        return path
+    return None
+
+
+def trim_download_cache(keep, max_bytes: int | None = None,
+                        directory: str | None = None) -> int:
+    """Tine cache-ul audio sub plafon, stergand cele mai vechi. Returneaza cate.
+
+    `keep` sunt fisierele in uz chiar acum si nu se sterg niciodata, indiferent
+    cat de plin e cache-ul: mai bine depasim plafonul cu o piesa decat sa tragem
+    fisierul de sub FFmpeg.
     """
     directory = directory or DOWNLOAD_DIR
+    max_bytes = DOWNLOAD_CACHE_BYTES if max_bytes is None else max_bytes
     protected = {os.path.abspath(p) for p in keep if p}
-    now = time.time()
-    removed = 0
+    entries = []
+    total = 0
     try:
         names = os.listdir(directory)
     except OSError:
         return 0
     for name in names:
         path = os.path.abspath(os.path.join(directory, name))
-        if path in protected or not os.path.isfile(path):
+        try:
+            if not os.path.isfile(path):
+                continue
+            size = os.path.getsize(path)
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        total += size
+        if path not in protected:
+            entries.append((mtime, size, path))
+
+    if total <= max_bytes:
+        return 0
+
+    removed = 0
+    for _, size, path in sorted(entries):          # cele mai vechi primele
+        if total <= max_bytes:
+            break
+        try:
+            os.remove(path)
+        except OSError as e:
+            log.debug(f"Nu am putut sterge {path}: {e}")
+            continue
+        total -= size
+        removed += 1
+    if removed:
+        log.info(f"Cache audio: {removed} fisiere vechi sterse "
+                 f"({total // 1024 // 1024}MB rămași)")
+    return removed
+
+
+def sweep_partials(directory: str | None = None) -> int:
+    """Sterge descarcarile intrerupte. De rulat la pornire.
+
+    Un SIGKILL in mijlocul unei descarcari lasa un `.part`; fara curatarea asta,
+    cache-ul ar putea servi mai tarziu un fisier trunchiat.
+    """
+    directory = directory or DOWNLOAD_DIR
+    removed = 0
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.endswith(('.part', '.ytdl')):
             continue
         try:
-            if now - os.path.getmtime(path) < max_age_sec:
-                continue
-            os.remove(path)
+            os.remove(os.path.join(directory, name))
             removed += 1
-        except OSError as e:
-            log.debug(f"Nu am putut sterge {name}: {e}")
+        except OSError:
+            pass
     if removed:
-        log.info(f"Curatenie: {removed} fisiere audio orfane sterse")
+        log.info(f"Curatenie la pornire: {removed} descarcari intrerupte sterse")
     return removed
 
 

@@ -82,19 +82,29 @@ def test_stale_after_play_does_nothing():
 
 
 def test_current_after_play_advances():
+    """Sfarsitul normal: avanseaza coada si NU sterge fisierul.
+
+    Fisierul rămâne in cache pe volum, iar evacuarea se face pe marime. Varianta
+    veche il stergea la 2 secunde dupa final, deci a doua redare a aceleiasi
+    piese — acelasi link, butonul Back, loop pe coada, autoplay care o re-propune
+    — o re-descarca integral.
+    """
     state = GuildState()
-    calls = {'cleanup': 0, 'next': 0}
-    orig_cleanup, orig_next, orig_loop = player.cleanup_file, player.play_next, player._loop
-    player.cleanup_file = lambda *a, **k: calls.__setitem__('cleanup', calls['cleanup'] + 1)
+    calls = {'trim': 0, 'next': 0, 'cleanup': 0}
+    orig = (player.trim_cache, player.play_next, player._loop, player.cleanup_file)
+    player.trim_cache = lambda *a, **k: calls.__setitem__('trim', calls['trim'] + 1)
     player.play_next = lambda *a, **k: calls.__setitem__('next', calls['next'] + 1)
+    player.cleanup_file = lambda *a, **k: calls.__setitem__('cleanup', calls['cleanup'] + 1)
     player._loop = None
     try:
         current = player.make_after_play(_FakeCtx(), state, 'curent.opus')
         current(None)
-        assert calls == {'cleanup': 1, 'next': 1}, (
-            f'sfarsitul normal de piesa nu a avansat coada: {calls}')
+        assert calls['next'] == 1, f'nu a avansat coada: {calls}'
+        assert calls['trim'] == 1, f'nu a evacuat cache-ul: {calls}'
+        assert calls['cleanup'] == 0, 'a sters fisierul in loc sa il pastreze in cache'
     finally:
-        player.cleanup_file, player.play_next, player._loop = orig_cleanup, orig_next, orig_loop
+        (player.trim_cache, player.play_next, player._loop,
+         player.cleanup_file) = orig
 
 
 def test_generation_is_monotonic():

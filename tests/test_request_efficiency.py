@@ -83,11 +83,64 @@ def test_text_search_is_flat_then_one_full_extraction():
 
 
 def test_format_list_is_short_and_without_duplicates():
-    src = inspect.getsource(player.process_play)
-    block = src.split('formats_to_try = [')[1].split(']')[0]
-    entries = [line.strip().strip("',") for line in block.split('\n') if line.strip()]
-    assert len(entries) <= 3, f'prea multe formate incercate: {len(entries)}'
-    assert len(set(entries)) == len(entries), 'formate duplicate'
+    """Pe valoarea reala, nu pe textul sursei.
+
+    Varianta veche despica `inspect.getsource` pe 'formats_to_try = [' si pe
+    ']' — deci in clipa in care lista a devenit una de tupluri, testul a
+    continuat sa treaca masurand fragmente de text fara sens.
+    """
+    attempts = player.DOWNLOAD_ATTEMPTS
+    formats = [fmt for fmt, _ in attempts]
+    assert 1 <= len(attempts) <= 3, f'prea multe incercari: {len(attempts)}'
+    assert len(set(formats)) == len(formats), 'formate duplicate'
+    for fmt, cap in attempts:
+        assert isinstance(cap, int) and cap > 0, f'{fmt}: plafon invalid {cap}'
+
+
+def test_the_hls_fallback_asks_for_audio_not_video():
+    """`best[protocol=m3u8]` e o redare muxata video+audio.
+
+    `-vn` arunca imaginea abia DUPA ce a ajuns pe disc, deci un bot audio
+    descarca zeci de MB de video pe un IP care ne limiteaza deja.
+    """
+    fallbacks = [(fmt, cap) for fmt, cap in player.DOWNLOAD_ATTEMPTS
+                 if 'm3u8' in fmt]
+    assert fallbacks, 'nu mai exista nicio incercare HLS'
+    for fmt, cap in fallbacks:
+        assert fmt.startswith('bestaudio'), f'HLS cere video: {fmt}'
+        assert cap < config.MAX_DOWNLOAD_BYTES, (
+            f'plafonul HLS ({cap}) nu e mai strans decat cel normal')
+
+
+def test_a_rate_limit_does_not_trigger_a_second_format_attempt():
+    """Acelasi 429 nu devine alt raspuns cu alt selector de format."""
+    st = GuildState()
+    for message, expected in (
+            ('HTTP Error 429: Too Many Requests', False),
+            ("Sign in to confirm you're not a bot. Use --cookies", False),
+            ('This video is not available', False),
+            ('Requested format is not available', True),
+            ('ceva ce nu am mai vazut', True),
+    ):
+        st.last_raw_error = message
+        got = player._worth_another_format(st)
+        assert got is expected, f'{message[:40]!r}: {got} != {expected}'
+
+    # Fara nicio eroare raportata = respins de filtru, nu problema de format.
+    st.last_raw_error = None
+    assert player._worth_another_format(st) is False
+
+
+def test_ffmpeg_options_do_not_override_the_probed_bitrate():
+    """discord.py emite deja -ar/-ac/-b:a, iar sirul nostru se adauga DUPA.
+
+    Verificat in discord.py 2.7.1 instalat: FFmpegOpusAudio.__init__ pune
+    `-ar 48000 -ac 2 -b:a {bitrate}k` inainte de `options`, iar `from_probe`
+    trece bitrate-ul masurat din fisier — pe care un `-b:a 128k` al nostru il
+    suprascria.
+    """
+    options = config.FFMPEG_OPTS['options'].split()
+    assert options == ['-vn'], options
 
 
 def test_preload_is_gone():

@@ -160,10 +160,10 @@ class MusicControlView(discord.ui.View):
         # Butonul de stop lasa fisierul curent pe disc, spre deosebire de
         # !stop: fiecare oprire din panou pierdea un fisier audio pana la
         # repornirea containerului.
-        if state.current_file:
-            from music.utils import cleanup_file
-            cleanup_file(state.current_file, self.ctx.bot.loop)
-            state.current_file = None
+        # Fisierul rămâne in cache pentru urmatoarea redare; doar il eliberam
+        # din sesiune si lasam evacuarea pe marime sa decida.
+        state.current_file = None
+        _p.trim_cache()
         if self.ctx.voice_client:
             await self.ctx.voice_client.disconnect()
         await safe_delete(state.current_msg)

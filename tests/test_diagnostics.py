@@ -12,6 +12,9 @@ Doua proprietati nenegociabile:
    eșecuri de redare: un blocaj YouTube ar lua serviciul complet jos exact cand nu
    e vina noastra.
 
+Curatenia de pe disc e in tests/test_download_cache.py, langa politica de cache
+pe care o serveste.
+
     python tests/test_diagnostics.py
 """
 import os
@@ -27,7 +30,6 @@ os.environ.setdefault('DISCORD_TOKEN', 'token-de-test')
 
 from music import diag
 from music.state import GuildState
-from music.utils import sweep_downloads
 
 NOW = 2_000_000.0
 
@@ -263,43 +265,6 @@ def test_the_healthcheck_does_not_depend_on_cookies():
     attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     assert 'cookie_status' not in names and 'cookies_available' not in names
     assert 'cookies' not in attrs
-
-
-# --- curatenie pe disc ------------------------------------------------------
-
-def test_sweep_removes_only_old_unused_files():
-    with tempfile.TemporaryDirectory() as tmp:
-        fresh = os.path.join(tmp, 'proaspat.opus')
-        old = os.path.join(tmp, 'vechi.opus')
-        in_use = os.path.join(tmp, 'se_reda.opus')
-        for path in (fresh, old, in_use):
-            with open(path, 'wb') as fh:
-                fh.write(b'audio')
-        long_ago = time.time() - 7200
-        os.utime(old, (long_ago, long_ago))
-        os.utime(in_use, (long_ago, long_ago))
-
-        removed = sweep_downloads({in_use}, max_age_sec=1800, directory=tmp)
-
-        assert removed == 1, removed
-        assert os.path.exists(fresh), 'a sters un fisier recent'
-        assert os.path.exists(in_use), 'a sters fisierul care se reda ACUM'
-        assert not os.path.exists(old), 'nu a sters fisierul orfan'
-
-
-def test_sweep_survives_a_missing_directory():
-    assert sweep_downloads(set(), directory=os.path.join('nu', 'exista')) == 0
-
-
-def test_sweep_keeps_everything_when_all_files_are_in_use():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, 'a.opus')
-        with open(path, 'wb') as fh:
-            fh.write(b'x')
-        long_ago = time.time() - 99999
-        os.utime(path, (long_ago, long_ago))
-        assert sweep_downloads({path}, max_age_sec=1, directory=tmp) == 0
-        assert os.path.exists(path)
 
 
 if __name__ == '__main__':

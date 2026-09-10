@@ -37,7 +37,7 @@ from music.config import DOWNLOAD_DIR, log as music_log
 from music.state import (get_state, guild_states, mark_paused, mark_resumed,
                          set_autoplay)
 from music.idle import DISCONNECT, RADIO, decide_idle_action
-from music.utils import safe_delete, cleanup_file, sweep_downloads
+from music.utils import safe_delete
 from music.autoplay import prefill_autoplay_queue
 from music import diag
 from music import ytdlp as ytdlp_mod
@@ -47,12 +47,12 @@ if not TOKEN:
     log.error("DISCORD_TOKEN not set.")
     sys.exit(1)
 
-# Cleanup downloads la pornire
-for f in os.listdir(DOWNLOAD_DIR):
-    try:
-        os.remove(os.path.join(DOWNLOAD_DIR, f))
-    except OSError:
-        pass
+# La pornire stergem DOAR descarcarile intrerupte. Stergerea intregului
+# director arunca la fiecare deploy tot ce fusese ascultat, iar pe volum acel
+# audio e chiar cache-ul care face a doua redare gratuita.
+from music.utils import sweep_partials, trim_download_cache
+sweep_partials()
+trim_download_cache(set())
 
 # Write YouTube cookies if provided via env var
 from music.config import apply_cookies, seed_cookies_from_env
@@ -267,7 +267,8 @@ async def on_voice_state_update(member, before, after):
         state.loop_mode = 0
         state.is_loading = False
         if state.current_file:
-            cleanup_file(state.current_file, bot.loop)
+            state.current_file = None
+            player.trim_cache()
             state.current_file = None
         player.bump_play_generation(state)
         cancel_timeout(member.guild)
@@ -408,7 +409,7 @@ async def _heartbeat():
             if now - last_sweep >= SWEEP_EVERY_SEC:
                 last_sweep = now
                 keep = {st.current_file for st in guild_states.values() if st.current_file}
-                await bot.loop.run_in_executor(None, lambda: sweep_downloads(keep))
+                await bot.loop.run_in_executor(None, lambda: trim_download_cache(keep))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -514,9 +515,9 @@ async def _shutdown():
         await safe_delete(state.current_msg)
         state.current_msg = None
         state.current_view = None
-        if state.current_file:
-            cleanup_file(state.current_file)
-            state.current_file = None
+        # La oprire NU stergem audio-ul: pe volum e cache, iar urmatoarea
+        # pornire il gaseste si redarea aceleiasi piese e gratuita.
+        state.current_file = None
     for vc in list(bot.voice_clients):
         try:
             await vc.disconnect(force=True)

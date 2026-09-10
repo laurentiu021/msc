@@ -293,6 +293,73 @@ def test_history_entries_carry_the_channel():
                       st.history[-1]['channel']) == 'canalul lui'
 
 
+def test_a_cached_file_costs_zero_youtube_requests():
+    """Proba centrala a cache-ului, capat la capat.
+
+    Cu fisierul deja pe disc si piesa in history, un !play pe acelasi link nu are
+    voie sa faca nici extractie, nici descarcare.
+    """
+    import music.utils as utils_mod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cached = os.path.join(tmp, 'vid123.opus')
+        with open(cached, 'wb') as fh:
+            fh.write(b'audio')
+
+        st = _fresh_state()
+        st.history = [{'url': 'https://www.youtube.com/watch?v=vid123',
+                       'title': 'Artistul - Piesa', 'channel': 'Canalul'}]
+        vc = _FakeVoiceClient()
+        ctx = _FakeCtx(vc)
+
+        saved_dir = utils_mod.DOWNLOAD_DIR
+        utils_mod.DOWNLOAD_DIR = tmp
+        saved_trim = player.trim_cache
+        player.trim_cache = lambda: None
+        try:
+            with _Harness('/nu/se/foloseste') as h:
+                asyncio.run(player.process_play(
+                    ctx, 'https://www.youtube.com/watch?v=vid123'))
+        finally:
+            utils_mod.DOWNLOAD_DIR = saved_dir
+            player.trim_cache = saved_trim
+
+        assert vc.played, 'nu a redat nimic din cache'
+        assert st.current_file == cached, st.current_file
+        assert h.download_calls == [], f'a descarcat degeaba: {h.download_calls}'
+        assert h.extract_calls == [], f'a extras degeaba: {h.extract_calls}'
+        assert st.last_title == 'Artistul - Piesa', st.last_title
+
+
+def test_a_cached_file_without_history_still_gets_its_metadata():
+    """Fara titlu in history nu putem afisa nimic, deci extragem — dar tot o data."""
+    import music.utils as utils_mod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, 'vid123.opus'), 'wb') as fh:
+            fh.write(b'audio')
+        target = os.path.join(tmp, 'descarcat.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+
+        st = _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient())
+        saved_dir = utils_mod.DOWNLOAD_DIR
+        utils_mod.DOWNLOAD_DIR = tmp
+        saved_trim = player.trim_cache
+        player.trim_cache = lambda: None
+        try:
+            with _Harness(target) as h:
+                asyncio.run(player.process_play(
+                    ctx, 'https://www.youtube.com/watch?v=vid123'))
+        finally:
+            utils_mod.DOWNLOAD_DIR = saved_dir
+            player.trim_cache = saved_trim
+
+        assert st.last_title, 'nicio metadata pentru panou'
+        assert h.extract_calls, 'nu a luat metadata'
+
+
 def _reject_run(full_info, query='https://www.youtube.com/watch?v=vid123',
                 state=None):
     """Ruleaza process_play cu un videoclip care trebuie refuzat."""
