@@ -72,6 +72,9 @@ class _Harness:
         self.cleaned = []
         self.play_next_calls = []
         self.timeouts = []
+        # Ce intoarce descarcarea ca metadata. Testele de reutilizare a
+        # metadatelor il inlocuiesc, ca sa verifice ce ajunge in stare.
+        self.download_info = {'id': 'vid123', 'ext': 'opus'}
 
     def __enter__(self):
         self.saved = {a: getattr(player, a, None) for a in self.ATTRS}
@@ -103,7 +106,7 @@ class _Harness:
 
         async def fake_download(opts, query, loop=None, stage=''):
             self.download_calls.append((stage, dict(opts)))
-            return {'id': 'vid123', 'ext': 'opus'}, self.download_target
+            return dict(self.download_info), self.download_target
 
         class _FakeSource:
             @classmethod
@@ -217,6 +220,77 @@ def test_missing_file_is_reported_not_silently_played():
         assert st.is_loading is False
         assert st._consecutive_errors == 1
         assert ctx.sent, 'utilizatorul nu a fost anuntat'
+
+
+def _run_with_api_stub(download_info):
+    """process_play cu Data API instrumentat, ca sa vedem daca il mai cheama."""
+    import tempfile as _tempfile
+
+    api_calls = []
+
+    with _tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        open(target, 'wb').write(b'audio')
+        st = _fresh_state()
+        ctx = _FakeCtx(_FakeVoiceClient())
+        saved = (player.yt_api.is_available, player.yt_api.get_video_details)
+        player.yt_api.is_available = lambda: True
+        player.yt_api.get_video_details = lambda ids: (
+            api_calls.append(tuple(ids)) or
+            {ids[0]: {'views': 999, 'likes': 99, 'channel': 'Din API',
+                      'thumbnail': 'http://api', 'duration': 111}})
+        async def drive():
+            # Completarea din Data API ruleaza prin run_in_executor, deci are
+            # nevoie de o bucla reala; harness-ul pune _loop = None.
+            player._loop = asyncio.get_running_loop()
+            await player.process_play(ctx, 'ceva')
+
+        try:
+            with _Harness(target) as h:
+                h.download_info = download_info
+                asyncio.run(drive())
+        finally:
+            player.yt_api.is_available, player.yt_api.get_video_details = saved
+    return st, api_calls
+
+
+def test_download_metadata_is_reused_instead_of_buying_it():
+    """yt-dlp da view_count si like_count la o extractie completa.
+
+    dl_info era atribuit si niciodata citit, iar panoul se umplea din extractia
+    de selectie; apoi fiecare piesa mai platea o unitate de cota, o runda HTTPS si
+    un al doilea update de panou pentru date deja aflate in memorie.
+    """
+    st, api_calls = _run_with_api_stub({
+        'id': 'vid123', 'ext': 'opus', 'title': 'Din Download',
+        'duration': 222, 'view_count': 12345, 'like_count': 678,
+        'channel': 'Canal Download', 'thumbnail': 'http://dl',
+    })
+    assert st.last_views == 12345 and st.last_likes == 678, (st.last_views, st.last_likes)
+    assert st.last_title == 'Din Download', st.last_title
+    assert st.last_duration == 222
+    assert st.last_channel == 'Canal Download'
+    assert api_calls == [], f'a chemat Data API degeaba: {api_calls}'
+
+
+def test_the_api_still_fills_in_what_ytdlp_did_not_give():
+    """Cand extractia nu aduce statistici, completarea rămâne justificata."""
+    st, api_calls = _run_with_api_stub({'id': 'vid123', 'ext': 'opus'})
+    assert api_calls, 'nu a completat statisticile lipsa'
+    assert st.last_views == 999 and st.last_likes == 99
+
+
+def test_history_entries_carry_the_channel():
+    """artist_key cade pe canal cand titlul nu are separator, dar history nu il purta."""
+    st, _ = _run_with_api_stub({
+        'id': 'vid123', 'ext': 'opus', 'title': 'Manele',
+        'channel': 'Canalul Lui', 'view_count': 5, 'like_count': 1,
+    })
+    assert st.history[-1]['channel'] == 'Canalul Lui', st.history[-1]
+
+    from music.autoplay import artist_key
+    assert artist_key(st.history[-1]['title'],
+                      st.history[-1]['channel']) == 'canalul lui'
 
 
 def _reject_run(full_info, query='https://www.youtube.com/watch?v=vid123',

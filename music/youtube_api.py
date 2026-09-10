@@ -3,25 +3,79 @@
 Folosit pentru search si autoplay (mai stabil decat yt-dlp scraping).
 yt-dlp ramane doar pentru download audio.
 """
-import os
-import urllib.request
-import urllib.parse
+import datetime
 import json
+import os
 import re
+import urllib.parse
+import urllib.request
+
 from music.config import log, BLACKLIST
 from music.utils import clean_search_title
 
 API_KEY = os.getenv('YOUTUBE_API_KEY')
 _BASE = 'https://www.googleapis.com/youtube/v3'
 
+# Costul in unitati de cota, per endpoint. Nu e o estimare: e tariful publicat de
+# YouTube. Il tinem aici ca sa fie imposibil sa faci o cerere fara sa o plateasti.
+UNIT_COST = {'search': 100, 'videos': 1}
+
+# Plafonul zilnic pe care ni-l permitem. Cota gratuita e 10.000, dar autoplay e
+# doar o strategie de rezerva (Mix-ul yt-dlp e primul si e gratis), deci nu are
+# ce sa consume toata ziua. Fara plafon, `_api_get` primea 403 dupa epuizare, il
+# loga ca warning si autoplay se oprea in tacere.
+DAILY_UNIT_CAP = int(os.getenv('YOUTUBE_API_DAILY_UNITS', '4000'))
+
+_units_spent = 0
+_quota_day = None
+_cap_logged = False
+
+
+def _utc_day() -> str:
+    """Cota se reseteaza la miezul nopții Pacific, dar UTC e o aproximare buna."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+
+
+def units_spent() -> int:
+    """Cate unitati de cota am consumat azi (0 dupa schimbarea zilei)."""
+    _roll_day()
+    return _units_spent
+
+
+def _roll_day() -> None:
+    global _units_spent, _quota_day, _cap_logged
+    today = _utc_day()
+    if _quota_day != today:
+        _quota_day = today
+        _units_spent = 0
+        _cap_logged = False
+
 
 def is_available() -> bool:
-    """Verifica daca API key-ul e setat."""
-    return bool(API_KEY)
+    """Cheia exista SI mai avem cota pe ziua de azi."""
+    global _cap_logged
+    if not API_KEY:
+        return False
+    _roll_day()
+    if _units_spent >= DAILY_UNIT_CAP:
+        if not _cap_logged:
+            _cap_logged = True
+            log.warning(f"YouTube API: plafon zilnic atins ({_units_spent}/"
+                        f"{DAILY_UNIT_CAP} unitati). Autoplay merge doar pe yt-dlp.")
+        return False
+    return True
 
 
 def _api_get(endpoint: str, params: dict) -> dict | None:
-    """GET request la YouTube Data API."""
+    """GET la YouTube Data API, contorizand cota consumata.
+
+    Cererea e taxata chiar daca raspunsul e o eroare: YouTube scade unitatile
+    la primire, nu la succes.
+    """
+    global _units_spent
+    cost = UNIT_COST[endpoint]        # KeyError deliberat: un endpoint nou trebuie taxat
+    _roll_day()
+    _units_spent += cost
     params['key'] = API_KEY
     url = f"{_BASE}/{endpoint}?{urllib.parse.urlencode(params)}"
     try:
@@ -29,7 +83,7 @@ def _api_get(endpoint: str, params: dict) -> dict | None:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
-        log.warning(f"YouTube API error ({endpoint}): {e}")
+        log.warning(f"YouTube API error ({endpoint}, {cost}u): {e}")
         return None
 
 def search(query: str, max_results: int = 5) -> list[dict]:
@@ -69,6 +123,7 @@ def search(query: str, max_results: int = 5) -> list[dict]:
             r['duration'] = d.get('duration', 0)
             r['views'] = d.get('views', 0)
             r['likes'] = d.get('likes', 0)
+            r['live_status'] = d.get('live_status')
             if d.get('thumbnail'):
                 r['thumbnail'] = d['thumbnail']
 
@@ -114,6 +169,7 @@ def search_music(query: str, max_results: int = 5) -> list[dict]:
             r['duration'] = d.get('duration', 0)
             r['views'] = d.get('views', 0)
             r['likes'] = d.get('likes', 0)
+            r['live_status'] = d.get('live_status')
             if d.get('thumbnail'):
                 r['thumbnail'] = d['thumbnail']
 
@@ -147,6 +203,12 @@ def get_video_details(video_ids: list[str]) -> dict:
         thumb = (thumbs.get('maxres') or thumbs.get('high') or
                  thumbs.get('medium') or thumbs.get('default') or {}).get('url', '')
 
+        # liveBroadcastContent: 'none' | 'live' | 'upcoming'. Il traducem in
+        # vocabularul yt-dlp, ca filtrele din _add_to_queue sa aiba o singura
+        # forma de verificat, indiferent de unde vine piesa.
+        live_map = {'live': 'is_live', 'upcoming': 'is_upcoming'}
+        live_status = live_map.get(snippet.get('liveBroadcastContent'))
+
         result[vid_id] = {
             'duration': duration,
             'views': int(stats.get('viewCount', 0)),
@@ -154,23 +216,37 @@ def get_video_details(video_ids: list[str]) -> dict:
             'channel': snippet.get('channelTitle', ''),
             'title': snippet.get('title', ''),
             'thumbnail': thumb,
+            'live_status': live_status,
         }
     return result
 
 
-def get_related_videos(video_id: str, max_results: int = 15) -> list[dict]:
-    """Gaseste video-uri similare prin search bazat pe video curent.
-    Strategie: canal/artist first (diversitate), apoi titlu (similaritate).
+def get_related_videos(video_id: str, max_results: int = 15, *,
+                       title: str = '', channel: str = '',
+                       needed: int | None = None) -> list[dict]:
+    """Video-uri similare, prin search pe canal (diversitate) apoi pe titlu.
+
+    `title` si `channel` se primesc de la apelant cand le are deja. Botul le are
+    mereu: sunt `state.last_title` si `state.last_channel` pentru exact acest
+    videoclip. Fara ele, functia cumpara cu o cerere ceva ce era deja in memorie.
+
+    `needed` e cate piese lipsesc de fapt. A doua cautare se facea cand
+    `len(results) < max_results`, iar apelantul cerea 20: o pagina nu da aproape
+    niciodata 20 de supravietuitori ai filtrelor, deci a doua cerere de 100 de
+    unitati pornea aproape mereu, chiar cand prima adusese destul.
     """
-    details = get_video_details([video_id])
-    info = details.get(video_id, {})
-    channel = info.get('channel', '')
-    video_title = info.get('title', '')
+    video_title = title
+    if not video_title and not channel:
+        details = get_video_details([video_id])          # 1 unitate
+        info = details.get(video_id, {})
+        channel = info.get('channel', '')
+        video_title = info.get('title', '')
 
     if not video_title and not channel:
         return []
 
-    clean_title = _clean_search_title(video_title) if video_title else ''
+    enough = max(1, needed if needed else max_results)
+    clean_title = clean_search_title(video_title) if video_title else ''
     results = []
     seen_ids = {video_id}
 
@@ -204,7 +280,7 @@ def get_related_videos(video_id: str, max_results: int = 15) -> list[dict]:
                 seen_ids.add(vid_id)
 
     # Strategy 2: search by cleaned title if not enough results
-    if len(results) < max_results and clean_title:
+    if len(results) < enough and clean_title:
         data = _api_get('search', {
             'part': 'snippet',
             'q': clean_title,
@@ -231,7 +307,20 @@ def get_related_videos(video_id: str, max_results: int = 15) -> list[dict]:
                 })
                 seen_ids.add(vid_id)
 
-    return results[:max_results]
+    results = results[:max_results]
+
+    # O singura cerere batch (1 unitate) pentru durata si starea de live. Fara
+    # ea, `search` nu intoarce nimic despre durata, deci filtrele de durata si de
+    # live din _add_to_queue nu rulau niciodata pe rezultatele API: live-urile si
+    # colajele de 40 de minute ajungeau in coada, iar abia match_filter le
+    # refuza la descarcare, in tacere.
+    if results:
+        details = get_video_details([r['id'] for r in results])
+        for r in results:
+            d = details.get(r['id'], {})
+            r['duration'] = d.get('duration', 0)
+            r['live_status'] = d.get('live_status')
+    return results
 
 
 def _song_part(title: str) -> str:
@@ -271,21 +360,3 @@ def _parse_duration(iso: str) -> int:
     mins = int(m.group(2) or 0)
     s = int(m.group(3) or 0)
     return h * 3600 + mins * 60 + s
-
-
-def _clean_search_title(title: str) -> str:
-    """Curata titlul video pentru search mai relevant.
-    'Los Del Rio - Macarena (Official Video)' -> 'Los Del Rio Macarena'
-    """
-    clean = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
-    clean = re.sub(
-        r'\b(official|video|audio|lyrics|lyric|hd|hq|4k|mv|music\s*video|'
-        r'visualizer|visualiser|clip|feat\.?|ft\.?|prod\.?|remix|'
-        r'challenge|reaction|tutorial|cover|live|performance|vevo)\b',
-        '', clean, flags=re.I
-    ).strip()
-    # Collapse multiple spaces
-    clean = re.sub(r'\s+', ' ', clean).strip()
-    # Remove trailing separators like " - " or " | "
-    clean = re.sub(r'\s*[-|]+\s*$', '', clean).strip()
-    return clean if len(clean) >= 3 else title

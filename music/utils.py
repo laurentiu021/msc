@@ -26,9 +26,9 @@ def clean_search_title(title) -> str:
     title = str(title or '')
     clean = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
     clean = re.sub(
-        r'(official|video|audio|lyrics|lyric|hd|hq|4k|mv|music\s*video|'
+        r'\b(official|video|audio|lyrics|lyric|hd|hq|4k|mv|music\s*video|'
         r'visualizer|visualiser|clip|feat\.?|ft\.?|prod\.?|remix|'
-        r'challenge|reaction|tutorial|cover|live|performance|vevo)',
+        r'challenge|reaction|tutorial|cover|live|performance|vevo)\b',
         '', clean, flags=re.I
     ).strip()
     clean = re.sub(r'\s+', ' ', clean).strip()

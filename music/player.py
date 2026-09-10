@@ -135,6 +135,25 @@ def _unplayable_reason(info) -> str | None:
     return None
 
 
+def _meta(*sources, keys):
+    """Prima valoare utila pentru oricare dintre chei, in ordinea surselor.
+
+    Exista pentru ca metadata de la DESCARCARE (`dl_info`) era atribuita si
+    niciodata citita, iar panoul se umplea din extractia de selectie, mai
+    sarace. yt-dlp intoarce `view_count` si `like_count` la o extractie completa,
+    deci datele pentru care se plateau o unitate de cota API, o runda HTTPS si un
+    al doilea update de panou erau deja in memorie.
+    """
+    for source in sources:
+        if not source:
+            continue
+        for key in keys:
+            value = source.get(key)
+            if value:
+                return value
+    return None
+
+
 def bump_play_generation(state) -> int:
     """Invalideaza callback-ul after_play al piesei curente.
 
@@ -294,6 +313,10 @@ async def process_play(ctx, query, is_radio=False):
     failure = None
     rejected = None
     filename = None
+    # Trebuie sa existe si pe calea de refolosire (loop / acelasi URL), unde
+    # bucla de descarcare nu ruleaza deloc: altfel citirea de mai jos ar fi un
+    # NameError exact pe calea cea mai frecventa.
+    dl_info = None
     formats_to_try = [
         'bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
         'best[protocol=m3u8_native]/best[protocol=m3u8]',
@@ -470,14 +493,19 @@ async def process_play(ctx, query, is_radio=False):
             raise FileNotFoundError("Niciun format nu a reusit descarcarea")
 
         state.last_url = web_url
-        state.last_title = selected['title']
-        state.last_duration = selected.get('duration', 0)
-        state.last_thumbnail = selected.get('thumbnail')
+        state.last_title = _meta(dl_info, selected, keys=('title',)) or 'Necunoscut'
+        state.last_duration = _meta(dl_info, selected, keys=('duration',)) or 0
+        state.last_thumbnail = _meta(dl_info, selected, keys=('thumbnail',))
         state.is_radio_now = is_radio
-        state.last_channel = selected.get('channel') or selected.get('uploader', '')
-        state.last_views = 0
-        state.last_likes = 0
-        state.history.append({'url': web_url, 'title': selected['title']})
+        state.last_channel = _meta(dl_info, selected,
+                                   keys=('channel', 'uploader')) or ''
+        state.last_views = _meta(dl_info, selected, keys=('view_count',)) or 0
+        state.last_likes = _meta(dl_info, selected, keys=('like_count',)) or 0
+        # Canalul intra si in history: artist_key cade pe el cand titlul nu are
+        # separator, dar intrarile de history nu il purtau, deci plafonul de
+        # diversitate nu se aplica piesele cu titlu de un singur cuvant.
+        state.history.append({'url': web_url, 'title': state.last_title,
+                              'channel': state.last_channel})
         if len(state.history) > 20:
             state.history.pop(0)
 
@@ -535,8 +563,13 @@ async def process_play(ctx, query, is_radio=False):
         state._last_notified_error = None
         await update_player_ui(ctx, send_new=True)
 
-        # Enrich metadata from YouTube API (async, non-blocking)
-        if yt_api.is_available():
+        # Completare din Data API, DOAR pentru ce nu am primit de la yt-dlp.
+        # Inainte rula la fiecare piesa: o unitate de cota, o runda HTTPS si un
+        # al doilea update de panou, ca sa scrie peste valori pe care extractia
+        # le adusese deja. Singurele campuri pe care le foloseste panoul si care
+        # pot lipsi sunt views si likes (ui.py le citeste, nimic altceva).
+        missing_stats = not (state.last_views or state.last_likes)
+        if missing_stats and yt_api.is_available():
             try:
                 vid_id = web_url.split('v=')[-1].split('&')[0] if 'v=' in web_url else None
                 if vid_id:
@@ -544,18 +577,24 @@ async def process_play(ctx, query, is_radio=False):
                         None, lambda: yt_api.get_video_details([vid_id])
                     )
                     d = details.get(vid_id, {})
-                    if d:
-                        state.last_views = d.get('views', 0)
-                        state.last_likes = d.get('likes', 0)
-                        if d.get('channel'):
-                            state.last_channel = d['channel']
-                        if d.get('thumbnail'):
-                            state.last_thumbnail = d['thumbnail']
-                        if d.get('duration') and not state.last_duration:
-                            state.last_duration = d['duration']
+                    changed = False
+                    for field, key in (('last_views', 'views'),
+                                       ('last_likes', 'likes'),
+                                       ('last_channel', 'channel'),
+                                       ('last_thumbnail', 'thumbnail')):
+                        value = d.get(key)
+                        if value and not getattr(state, field):
+                            setattr(state, field, value)
+                            changed = True
+                    if d.get('duration') and not state.last_duration:
+                        state.last_duration = d['duration']
+                        changed = True
+                    if changed:
+                        # Doar cand s-a schimbat ceva: un edit inutil consuma din
+                        # limita de rata a Discord si re-creeaza view-ul.
                         await update_player_ui(ctx)
             except Exception:
-                pass  # Non-critical, don't break playback
+                log.debug("Completarea din Data API a eșuat", exc_info=True)
 
     except asyncio.CancelledError:
         # O comanda noua ne-a anulat. CancelledError e BaseException, deci fara

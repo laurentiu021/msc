@@ -154,18 +154,28 @@ def _add_to_queue(state, vid_id, title, skip_ids, artist_counts=None, channel=''
 
 
 async def _try_api_related(state, bot_loop, origin_id, skip_ids, needed, artist_counts=None):
-    """YouTube API: related videos. Stabil, costa 100 units."""
+    """YouTube API: piese similare. 100 unitati pe cautare, 1 pe batch de detalii.
+
+    Titlul si canalul se trimit din stare: sunt exact ale acestui videoclip, deci
+    o cerere `videos.list` doar ca sa le afle era o unitate cumparata degeaba.
+    `needed` opreste a doua cautare de 100 de unitati cand prima a adus destul.
+    """
     try:
         results = await bot_loop.run_in_executor(
-            None, lambda: yt_api.get_related_videos(origin_id, max_results=20)
+            None, lambda: yt_api.get_related_videos(
+                origin_id, max_results=20, title=state.last_title or '',
+                channel=state.last_channel or '', needed=needed)
         )
-        log.info(f"Autoplay API related: {len(results)} results")
+        log.info(f"Autoplay API related: {len(results)} results "
+                 f"({yt_api.units_spent()}u cheltuite azi)")
         added = 0
         for r in results:
             if added >= needed:
                 break
             if _add_to_queue(state, r['id'], r['title'], skip_ids,
-                             artist_counts, r.get('channel', '')):
+                             artist_counts, r.get('channel', ''),
+                             duration=r.get('duration'),
+                             live_status=r.get('live_status')):
                 added += 1
         if added:
             log.info(f"Autoplay API related: +{added}")
@@ -209,7 +219,7 @@ async def _try_api_search(state, bot_loop, title, skip_ids, needed, artist_count
     """YouTube API: search bazat pe titlu. Costa 100 units."""
     if not title:
         return 0
-    clean = _clean_title(title)
+    clean = clean_search_title(title)
     try:
         results = await bot_loop.run_in_executor(
             None, lambda: yt_api.search_music(f"{clean}", max_results=10)
@@ -220,7 +230,9 @@ async def _try_api_search(state, bot_loop, title, skip_ids, needed, artist_count
             if added >= needed:
                 break
             if _add_to_queue(state, r['id'], r['title'], skip_ids,
-                             artist_counts, r.get('channel', '')):
+                             artist_counts, r.get('channel', ''),
+                             duration=r.get('duration'),
+                             live_status=r.get('live_status')):
                 added += 1
         if added:
             log.info(f"Autoplay API search: +{added}")
@@ -234,7 +246,7 @@ async def _try_ytdlp_search(state, bot_loop, title, skip_ids, needed, artist_cou
     """yt-dlp: search fallback. Ultima sansa."""
     if not title:
         return 0
-    clean = _clean_title(title)
+    clean = clean_search_title(title)
     opts = make_search_opts(with_cookies=cookies_available(), extract_flat=True)
     try:
         info = await ytdlp.extract(opts, f"ytsearch10:{clean} music",
@@ -257,11 +269,3 @@ async def _try_ytdlp_search(state, bot_loop, title, skip_ids, needed, artist_cou
     except Exception as e:
         log.warning(f"Autoplay yt-dlp search failed: {e}")
         return 0
-
-
-def _clean_title(title: str) -> str:
-    """Curata titlul de tag-uri inutile pentru search."""
-    clean = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
-    clean = re.sub(r'\b(official|video|audio|lyrics|hd|hq|4k|mv|music\s*video)\b',
-                   '', clean, flags=re.I).strip()
-    return clean if len(clean) >= 3 else title
