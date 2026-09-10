@@ -36,6 +36,12 @@ class TrackRejected(Exception):
 # Cate refuzuri consecutive acceptam inainte sa ne oprim din a avansa coada.
 MAX_CONSECUTIVE_REJECTS = 5
 
+# Pauza dupa prea multe refuzuri la rand. Mai scurta decat BREAKER_COOLDOWN_SEC:
+# refuzurile nu inseamna ca YouTube ne blocheaza, doar ca ce s-a cerut nu se poate
+# reda (live-uri, seturi de doua ore). Dar trebuie sa fie o pauza REALA, altfel
+# tick-ul de 24/7 reia radioul la 60 de secunde si mesajul "Ma opresc" e o minciuna.
+REJECT_COOLDOWN_SEC = 300
+
 def _meta(*sources, keys):
     """Prima valoare utila pentru oricare dintre chei, in ordinea surselor.
 
@@ -559,6 +565,20 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
             # costa o extractie completa, deci nu o parcurgem pana la capat.
             state._consecutive_rejects = 0
             state.autoplay = False
+            # `breaker_until` si golirea cozii nu sunt opționale, si lipsa lor facea
+            # din mesajul "Ma opresc" o minciuna sub 24/7. `decide_idle_action`
+            # citeste `autoplay=False` cu `autoplay_user_off=False` ca pe o
+            # defectiune si reia radioul, iar tick-ul sare peste prefill cat timp
+            # coada nu e goala — deci la 60 de secunde `play_next` se intorcea pe
+            # exact aceleasi elemente. Rezultat masurat: 6 mesaje pe Discord si 5
+            # extractii complete pe minut, pana la epuizarea cozii.
+            #
+            # Coada se goleste fiindca tocmai a fost declarata neredabila: asa
+            # tick-ul urmator aduce material nou in loc sa reia acelasi.
+            state.breaker_until = time.time() + REJECT_COOLDOWN_SEC
+            state.queue.clear()
+            log.info(f"Prea multe refuzuri la rand: pauza {REJECT_COOLDOWN_SEC}s "
+                     f"si coada golita")
             start_timeout(ctx)
         elif state.autoplay or state.queue:
             play_next(ctx)

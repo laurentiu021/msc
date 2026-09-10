@@ -15,6 +15,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -601,6 +602,59 @@ def test_a_failure_reports_its_own_reason_not_the_previous_track_s():
             f'a raportat cauza piesei precedente: {text[:200]}')
         assert 'gasit nimic' in text or 'rezultat' in text.lower(), (
             f'nu a raportat cauza REALA (nimic gasit): {text[:200]}')
+
+
+def test_the_reject_brake_is_a_real_pause_under_247():
+    """Mesajul "Ma opresc" era o minciuna sub 24/7.
+
+    Frâna punea doar `autoplay = False`, fara `breaker_until` — iar
+    `decide_idle_action` citeste `autoplay=False` cu `autoplay_user_off=False` ca pe
+    o defectiune si reia radioul. Cum coada nu era goala, tick-ul sarea peste
+    prefill si `play_next` se intorcea la 60 de secunde pe exact aceleasi elemente:
+    6 mesaje pe Discord si 5 extractii complete pe minut, pana la epuizarea cozii.
+    """
+    from music.idle import RADIO, decide_idle_action
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        with open(target, 'wb') as fh:
+            fh.write(b'audio')
+        st = _fresh_state()
+        st.always_on = True
+        st.autoplay = True
+        st.last_url = 'https://www.youtube.com/watch?v=deja'
+        st.queue = [{'query': f'https://www.youtube.com/watch?v=lung{i}',
+                     'title': f'Set de doua ore {i}'} for i in range(25)]
+        st._consecutive_rejects = player.MAX_CONSECUTIVE_REJECTS - 1
+        ctx = _FakeCtx(_FakeVoiceClient())
+
+        # Un live: refuzat de reguli, nu o defectiune tehnica.
+        live = {'id': 'lung1', 'title': 'Set de doua ore', 'duration': 7200,
+                'live_status': 'is_live', 'is_live': True,
+                'webpage_url': 'https://www.youtube.com/watch?v=lung1',
+                'formats': [{'acodec': 'opus', 'url': 'http://x',
+                             'protocol': 'https'}]}
+        with _Harness(target, full_info=live):
+            asyncio.run(player.process_play(
+                ctx, 'https://www.youtube.com/watch?v=lung1'))
+
+        now = time.time()
+        assert st.autoplay is False, 'frâna nu a oprit radioul'
+        assert st.breaker_until > now, (
+            'frâna nu a pus nicio pauza reala: tick-ul de 24/7 o anuleaza in 60s')
+        assert st.queue == [], (
+            'coada declarata neredabila a rămas, deci tick-ul o reia in loc sa '
+            'aduca material nou')
+
+        decision = decide_idle_action(st, connected=True, playing=False,
+                                     paused=False, now=now + 60)
+        assert decision.action != RADIO, (
+            f'tick-ul de la +60s reia radioul: {decision.reason}')
+        # Dar pauza chiar trece: frâna nu are voie sa fie definitiva.
+        later = decide_idle_action(st, connected=True, playing=False, paused=False,
+                                   now=st.breaker_until + 1)
+        assert later.action == RADIO, (
+            f'radioul nu mai revine niciodata: {later.reason}')
 
 
 # --- promovarea copiei bune de cookies --------------------------------------
