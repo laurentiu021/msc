@@ -13,7 +13,7 @@ from music.config import (FFMPEG_OPTS, cookies_available, log,
                           make_search_opts)
 from music.state import get_state, guild_states, loading, set_autoplay
 from music.utils import (DISCORD_ERRORS, cleanup_file, format_time, item_title,
-                         safe_delete, suggest_tracks)
+                         make_opus_source, safe_delete, suggest_tracks)
 from music.autoplay import prefill_autoplay_queue
 from music import diag
 from music import ytdlp
@@ -387,7 +387,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         seek_opts = dict(FFMPEG_OPTS)
         seek_opts['before_options'] = f'-ss {seconds}'
         try:
-            source = await discord.FFmpegOpusAudio.from_probe(filename, **seek_opts)
+            source = await make_opus_source(filename, vc.channel, **seek_opts)
             vc.play(source, after=after_play)
         except Exception:
             # Acelasi fallback ca in player.py, dar acolo se si LOGHEAZA. Aici

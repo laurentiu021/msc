@@ -58,6 +58,27 @@ DOWNLOAD_ATTEMPTS = [
 ]
 
 
+def format_summary(info: dict | None) -> str:
+    """Ce a ales de fapt selectorul de format.
+
+    Sirul de format din log e o CERERE, nu un rezultat. Fara linia asta,
+    `bestaudio[acodec=opus]/.../best` acoperea la fel de bine un opus de 130 kbps
+    si un AAC de 48 kbps muxat cu video — adica singura intrebare care conteaza
+    cand cineva spune "se aude prost" nu avea niciun raspuns in loguri.
+    """
+    if not isinstance(info, dict):
+        return '?'
+    picked = (info.get('requested_downloads') or [{}])[0] or {}
+
+    def field(key):
+        value = picked.get(key)
+        return info.get(key) if value is None else value
+
+    return (f"id={field('format_id')} acodec={field('acodec')} "
+            f"abr={field('abr')} asr={field('asr')} vcodec={field('vcodec')} "
+            f"proto={field('protocol')} ext={field('ext')}")
+
+
 
 @dataclass
 class Resolved:
@@ -337,6 +358,7 @@ async def _download(web_url: str, client: tuple | None, prefer_cookies: bool,
                             filename = base + ext
                             break
                 if filename and os.path.exists(filename):
+                    log.info(f"Format descarcat: {format_summary(dl_info)}")
                     # Succes: nu raportam nicio eroare, nici a extractiei, nici a
                     # incercarilor anterioare. Un text brut lasat aici ar fi ajuns
                     # in `state.last_raw_error` pe calea reusita si ar fi devenit

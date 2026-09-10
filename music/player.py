@@ -9,8 +9,8 @@ from music.resolve import (cached_for, resolve_from_url, search_to_url,
                            video_id)
 from music.state import begin_loading, end_loading, get_state
 from music.utils import (DISCORD_ERRORS, cleanup_file, item_title,
-                         read_track_meta, trim_download_cache,
-                         write_track_meta)
+                         make_opus_source, read_track_meta,
+                         trim_download_cache, write_track_meta)
 from music.autoplay import prefill_autoplay_queue
 from music.diag import scrub as _scrub
 from music.errors import diagnose_error
@@ -507,11 +507,11 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
 
         source = None
         try:
-            source = await discord.FFmpegOpusAudio.from_probe(filename, **FFMPEG_OPTS)
+            source = await make_opus_source(filename, vc.channel, **FFMPEG_OPTS)
             vc.play(source, after=after_play)
         except Exception:
             log.warning("OpusAudio esuat, fallback PCM", exc_info=True)
-            # Daca from_probe a reusit dar vc.play a crapat, procesul FFmpeg
+            # Daca sursa s-a construit dar vc.play a crapat, procesul FFmpeg
             # pornit de el rămânea in viata; il inchidem inainte de fallback.
             if source is not None:
                 try:

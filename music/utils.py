@@ -34,6 +34,52 @@ async def safe_delete(msg):
             log.debug(f"Nu am putut sterge un mesaj: {e}")
 
 
+# Plafoanele de codare. Opus la 128 kbps e transparent pentru muzica, iar sursa
+# de la YouTube nu depaseste ~130 kbps oricum, deci mai mult e doar risipa.
+MAX_ENCODE_KBPS = 128
+MIN_ENCODE_KBPS = 48
+# Bitrate-ul implicit al unui canal de voce Discord fara boost.
+DEFAULT_CHANNEL_KBPS = 64
+
+
+def encode_bitrate_kbps(channel) -> int:
+    """Cat are voie sa primeasca canalul asta, in kbps.
+
+    `VoiceChannel.bitrate` e in bps. Cand lipsește (un canal fals, un obiect
+    partial) cadem pe valoarea implicita a lui Discord, nu pe zero.
+    """
+    raw = getattr(channel, 'bitrate', None)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+        raw = DEFAULT_CHANNEL_KBPS * 1000
+    return max(MIN_ENCODE_KBPS, min(int(raw // 1000), MAX_ENCODE_KBPS))
+
+
+async def make_opus_source(filename: str, channel, **ffmpeg_opts):
+    """Sursa Opus cu bitrate ALES DE NOI, nu de sonda lui discord.py.
+
+    `FFmpegOpusAudio.from_probe` pare exact ce trebuie, dar discord.py 2.7.1
+    calculeaza `bitrate = max(round(bit_rate / 1000), 512)` in
+    `_probe_codec_native` (player.py:677 in versiunea instalata) — un `max` unde
+    intentia era evident un `min`. Deci `from_probe` cere lui FFmpeg MINIM 512
+    kbps, indiferent de sursa.
+
+    Cat timp YouTube da opus nu se aude nimic din asta: codec-ul probat e 'opus',
+    discord.py pune `-c:a copy` si FFmpeg ignora `-b:a`. Dar cand YouTube nu mai
+    da opus — experimentul SABR-only lasa doar AAC — se intra pe reencodare si
+    FFmpeg produce un flux de 512 kbps pentru un canal de 64.
+
+    Codec-ul il luam tot de la sonda: acolo e corect, si un fisier deja opus
+    rămâne pe `-c:a copy`, adica zero reencodare.
+    """
+    codec, _ = await discord.FFmpegOpusAudio.probe(filename)
+    bitrate = encode_bitrate_kbps(channel)
+    copies = codec in ('opus', 'libopus', 'copy')
+    log.info(f"Audio: codec={codec} -> {'copy' if copies else 'reencodare libopus'} "
+             f"@{bitrate}k (canal {getattr(channel, 'bitrate', '?')})")
+    return discord.FFmpegOpusAudio(filename, codec=codec, bitrate=bitrate,
+                                   **ffmpeg_opts)
+
+
 def clean_search_title(title) -> str:
     """Curata un titlu pentru cautare.
 
