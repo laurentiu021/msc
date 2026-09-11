@@ -1057,6 +1057,63 @@ def test_clear_reports_the_real_count():
     assert not st.queue
 
 
+# --- un playlist adaugat trebuie sa se VADA -----------------------------------
+
+def _fake_playlist(count):
+    """Inlocuieste poarta yt-dlp cu un playlist de `count` intrari."""
+    from music import ytdlp
+
+    saved = ytdlp.extract
+
+    async def extract(opts, query, download=False, loop=None, stage=''):
+        return {'entries': [{'id': f'vid{n}', 'title': f'Piesa {n}'}
+                            for n in range(count)]}
+
+    ytdlp.extract = extract
+    return ytdlp, saved
+
+
+def test_a_playlist_added_over_a_playing_track_says_how_many():
+    """30 de piese adaugate si absolut nimic vizibil.
+
+    Comanda isi sterge propriul mesaj, iar panoul schimba doar un contor in footer,
+    pe un mesaj care poate fi mult mai sus in canal. Pentru O piesa exista deja
+    confirmare explicita, exact din motivul asta; ramura de playlist nu o avea.
+    """
+    st = _fresh_state()
+    ctx = _FakeCtx(_FakeVoiceClient(playing=True), channel=None)
+    ytdlp, saved = _fake_playlist(4)
+    try:
+        with _Wiring() as w:
+            asyncio.run(w.bot.registry['play'](
+                ctx, search='https://www.youtube.com/playlist?list=PLxyz'))
+    finally:
+        ytdlp.extract = saved
+
+    assert len(st.queue) == 4, f'nu a adaugat tot playlist-ul: {len(st.queue)}'
+    said = ' '.join(str(m) for m in ctx.sent)
+    assert said.strip(), 'nicio confirmare: utilizatorul nu afla ca s-a intamplat ceva'
+    assert '4' in said, f'confirmarea nu spune cate piese: {said!r}'
+
+
+def test_a_playlist_on_an_idle_bot_starts_and_still_reports_the_rest():
+    st = _fresh_state()
+    ctx = _FakeCtx(_FakeVoiceClient(playing=False), channel=None)
+    ytdlp, saved = _fake_playlist(3)
+    try:
+        with _Wiring() as w:
+            asyncio.run(w.bot.registry['play'](
+                ctx, search='https://youtu.be/vid0?list=PLxyz'))
+            plays = list(w.plays)
+    finally:
+        ytdlp.extract = saved
+
+    assert plays and 'vid0' in plays[0], f'nu a pornit prima piesa: {plays}'
+    assert len(st.queue) == 2, f'restul playlist-ului nu a intrat in coada: {st.queue}'
+    said = ' '.join(str(m) for m in ctx.sent)
+    assert '2' in said, f'nu a spus cate au rămas in coada: {said!r}'
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

@@ -449,10 +449,25 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                 first_url = first.get('url') or first.get('id')
                 if first_url and not first_url.startswith('http'):
                     first_url = f"https://www.youtube.com/watch?v={first_url}"
+                # Confirmare explicita, pentru acelasi motiv ca la o singura piesa
+                # (vezi mai jos): comanda isi sterge propriul mesaj, iar panoul
+                # schimba doar un contor in footer, pe un mesaj care poate fi mult
+                # mai sus in canal. Aici e chiar mai important: 30 de piese
+                # adaugate si absolut nimic vizibil care sa spuna ca s-a intamplat
+                # ceva. Contorul se ia INAINTE de inserare, ca sa raporteze cate am
+                # adus noi, nu cat de lunga e coada.
+                added = len(entries) + 1
                 if vc.is_playing() or vc.is_paused() or state.is_loading:
                     state.queue.insert(0, {'query': first_url, 'title': first.get('title') or 'Necunoscut'})
+                    await ctx.send(
+                        f"➕ **{added}** piese din playlist in coada "
+                        f"(urmatoarea: {item_title(first.get('title') or 'Necunoscut', 50)})",
+                        delete_after=12)
                     await update_player_ui(ctx)
                 else:
+                    if added > 1:
+                        await ctx.send(f"➕ **{added - 1}** piese din playlist in "
+                                       f"coada, pornesc prima.", delete_after=12)
                     await process_play(ctx, first_url)
             except Exception as e:
                 log.error(f"Eroare playlist: {e}", exc_info=True)
