@@ -278,6 +278,151 @@ def test_an_unreadable_platform_link_re_arms_the_idle_timer():
     assert hits == 2, f'aȘteptam doua locuri (play si nplay), am gasit {hits}'
 
 
+# --- text cu doua puncte refuzat ca schema ------------------------------------
+
+def test_a_title_with_a_colon_is_a_search_not_a_scheme():
+    """"Coldplay: Yellow" e o forma normala de a scrie o piesa.
+
+    Verificarea de schema exista ca sa respinga `javascript:` si `data:`, dar
+    prindea si orice `Nume:`, deci raspundea "Schema `coldplay` nu e permisa".
+    """
+    from music.commands import sanitize_query
+
+    for text in ('Coldplay: Yellow', 'Guta: Am o inima', 'Vama:Perfect',
+                 'Nirvana: Come as you are'):
+        query, reason = sanitize_query(text)
+        assert reason is None, f'{text!r} refuzat: {reason}'
+        assert query == text
+
+
+def test_dangerous_schemes_are_still_refused():
+    """Relaxarea nu are voie sa lase nimic care poate fi URMARIT."""
+    from music.commands import sanitize_query
+
+    for text in ('data:text/html,<script>x</script>', 'javascript:alert(1)',
+                 'file:///etc/passwd', 'vbscript:x', 'blob:http://x',
+                 'ftp://host/f', 'gopher://host/1'):
+        query, reason = sanitize_query(text)
+        assert query is None and reason, f'{text!r} a trecut: {query!r}'
+
+
+def test_the_host_allowlist_still_applies():
+    from music.commands import sanitize_query
+
+    assert sanitize_query('https://evil.example/x')[0] is None
+    assert sanitize_query('https://www.youtube.com/watch?v=x')[0]
+
+
+# --- un live intre rezultate omora comanda ------------------------------------
+
+def test_a_live_result_is_filtered_out_of_a_search():
+    """Un live are `duration` None, deci trecea toate verificarile, era ales, si
+    abia `match_filter` de la descarcare il refuza — adica o eroare pe o cautare
+    unde celelalte rezultate erau perfect bune."""
+    from music.utils import is_clean, reject_reason
+
+    assert is_clean('Radio Manele LIVE 24/7', None, '', 'is_live') is False
+    assert reject_reason('Radio', None, '', 'is_live') == 'transmisiune live'
+    assert is_clean('Concert', None, '', 'is_upcoming') is False
+    assert is_clean('Artist - Piesa', 200, '', None) is True
+
+
+# --- id-uri de /shorts/, /live/, /embed/ ---------------------------------------
+
+def test_every_youtube_link_shape_yields_an_id():
+    """Fara ele, `cached_for` intorcea None: fiecare redare plătea din nou
+    extracția si transferul, iar prefetch-ul le sărea complet."""
+    from music.resolve import video_id
+
+    for url in ('https://www.youtube.com/watch?v=abc123&t=5',
+                'https://youtu.be/abc123?si=x',
+                'https://www.youtube.com/shorts/abc123',
+                'https://www.youtube.com/live/abc123?feature=share',
+                'https://www.youtube.com/embed/abc123'):
+        assert video_id(url) == 'abc123', (url, video_id(url))
+    assert video_id('https://open.spotify.com/track/x') is None
+    assert video_id('') is None
+
+
+# --- !seek pe pauza si cu timp negativ ---------------------------------------
+
+def test_seek_treats_paused_as_playing():
+    """discord.py raporteaza `is_playing()==False` cat timp e pauzat, deci `!seek`
+    pe o piesa pusa pe pauza raspundea "Nu se reda nimic" — desi piesa era acolo."""
+    import ast
+    import inspect
+
+    from music import commands as commands_mod
+
+    src = inspect.getsource(commands_mod.setup_music_commands)
+    for node in ast.walk(ast.parse(src.strip())):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == 'seek':
+            body = ast.unparse(node)
+            assert 'is_paused' in body, (
+                '`!seek` se uita doar la is_playing(): refuza o piesa pusa pe pauza')
+            assert 'negativ' in body, (
+                'fara marginea de jos, un timp negativ reporneste piesa de la zero '
+                'si raspunde "Seek la 0:00"')
+            return
+    raise AssertionError('comanda seek nu mai exista')
+
+
+# --- gardul de canal, acum si pe comenzi -------------------------------------
+
+def test_the_control_rule_lives_in_exactly_one_place():
+    from music.utils import may_control
+
+    channel = object()
+    other = object()
+    guild = type('G', (), {'voice_client': type('V', (), {'channel': channel})()})()
+    inside = type('M', (), {'voice': type('V', (), {'channel': channel})()})()
+    outside = type('M', (), {'voice': type('V', (), {'channel': other})()})()
+    nowhere = type('M', (), {'voice': None})()
+
+    assert may_control(guild, inside) is True
+    assert may_control(guild, outside) is False
+    assert may_control(guild, nowhere) is False
+    # Fara sesiune nu e nimic de protejat.
+    free = type('G', (), {'voice_client': None})()
+    assert may_control(free, nowhere) is True
+
+
+def test_the_buttons_delegate_to_that_rule():
+    """Cele doua cai nu au voie sa divergea — exact asta s-a intamplat pana acum."""
+    import ast
+    import inspect
+    import textwrap
+
+    from music import views
+
+    src = textwrap.dedent(inspect.getsource(
+        views.MusicControlView.interaction_check))
+    called = {ast.unparse(n.func) for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.Call)}
+    assert 'may_control' in called, called
+
+
+def test_every_session_mutating_command_is_gated():
+    """O comanda noua nu are voie sa rămâna nepazita din neatentie."""
+    import ast
+    import inspect
+
+    from music import commands as commands_mod
+
+    src = inspect.getsource(commands_mod.setup_music_commands)
+    must = {'stop', 'skip', 'nplay', 'shuffle', 'clear', 'remove', 'move', 'seek',
+            'always_on'}
+    found = set()
+    for node in ast.walk(ast.parse(src.strip())):
+        if not isinstance(node, ast.AsyncFunctionDef) or node.name not in must:
+            continue
+        decorators = {ast.unparse(d) for d in node.decorator_list}
+        assert 'only_in_session' in decorators, (
+            f'!{node.name} poate fi dat de oricine, din orice canal: {decorators}')
+        found.add(node.name)
+    assert found == must, f'lipsesc din verificare: {sorted(must - found)}'
+
+
 if __name__ == '__main__':
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')

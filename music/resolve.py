@@ -180,8 +180,16 @@ def video_id(url: str) -> str | None:
     text = str(url or '')
     if 'v=' in text:
         return text.split('v=')[-1].split('&')[0] or None
-    if 'youtu.be/' in text:
-        return text.split('youtu.be/')[-1].split('?')[0] or None
+    # `/shorts/`, `/live/` si `/embed/` sunt forme normale de link YouTube si nu au
+    # `v=`. Fara ele, `cached_for` intorcea None pentru orice astfel de link, deci
+    # fiecare redare plătea din nou extracția si transferul, prefetch-ul le sărea
+    # complet, iar `_history_entry` nu le gasea niciodata.
+    for marker in ('youtu.be/', '/shorts/', '/live/', '/embed/'):
+        if marker in text:
+            tail = text.split(marker)[-1]
+            for sep in ('?', '&', '#', '/'):
+                tail = tail.split(sep)[0]
+            return tail or None
     return None
 
 
@@ -215,13 +223,15 @@ async def search_to_url(query: str, *, avoid_title: str = '',
 
     reasons = []
     for entry in entries:
-        if is_clean(entry.get('title'), entry.get('duration'), avoid_title):
+        if is_clean(entry.get('title'), entry.get('duration'), avoid_title,
+                    entry.get('live_status')):
             log.info(f"Ales din {len(entries)} rezultate: {item_title(entry, 60)}")
             url = entry.get('url') or entry.get('id')
             if url and not str(url).startswith('http'):
                 url = f"https://www.youtube.com/watch?v={url}"
             return url, None
-        why = reject_reason(entry.get('title'), entry.get('duration'), avoid_title)
+        why = reject_reason(entry.get('title'), entry.get('duration'),
+                            avoid_title, entry.get('live_status'))
         reasons.append(why)
         log.info(f"Sarit ({why}): {item_title(entry, 50)} "
                  f"durata={entry.get('duration')} live={entry.get('live_status')}")

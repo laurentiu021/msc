@@ -46,6 +46,13 @@ class _FakeVoiceClient:
         self.disconnects.append(force)
         self.connected = False
 
+    def stop(self):
+        self.playing = False
+        self.paused = False
+
+    def play(self, source, after=None):
+        self.playing = True
+
     async def move_to(self, channel):
         self.moves.append(channel)
         if self._move_lands:
@@ -701,6 +708,118 @@ def test_a_move_that_silently_fails_is_reported():
     assert vc.moves == [new], vc.moves
     assert w.plays == [], 'a redat desi mutarea nu a reusit'
     assert ctx.sent, 'mutarea eșuata a fost tacuta'
+
+
+def test_stop_from_another_channel_is_refused():
+    """Garda exista de mult, dar numai pe butoane: oricine din server, din orice
+    canal, putea opri sesiunea altcuiva scriind `!stop` — chiar dacă butonul cu
+    exact acelasi efect il refuza."""
+    st = _fresh_state()
+    st.queue = [{'query': 'x', 'title': 'X'}]
+    bot_channel = _FakeVoiceChannel()
+    bot_channel.name = 'Unde cânta'
+    other = _FakeVoiceChannel()
+    other.name = 'Alt canal'
+    vc = _FakeVoiceClient(playing=True, channel=bot_channel)
+    ctx = _FakeCtx(vc, channel=other)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['stop'](ctx))
+    assert st.queue, 'un strain a golit coada sesiunii'
+    assert vc.disconnects == [], 'un strain a scos botul din voce'
+    assert any('Unde cânta' in str(m) for m in ctx.sent), ctx.sent
+
+
+def test_stop_from_the_same_channel_still_works():
+    st = _fresh_state()
+    st.queue = [{'query': 'x', 'title': 'X'}]
+    channel = _FakeVoiceChannel()
+    vc = _FakeVoiceClient(playing=True, channel=channel)
+    ctx = _FakeCtx(vc, channel=channel)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['stop'](ctx))
+    assert st.queue == [], 'garda a blocat pe cine avea dreptul'
+    assert vc.disconnects, 'nu a ieșit din voce'
+
+
+def test_commands_are_free_when_there_is_no_session():
+    """Fara client de voce nu e nimic de protejat."""
+    st = _fresh_state()
+    st.queue = [{'query': 'x', 'title': 'X'}]
+    ctx = _FakeCtx(None)
+    ctx.guild.voice_client = None
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['clear'](ctx))
+    assert st.queue == [], 'a refuzat o comanda desi nu exista nicio sesiune'
+
+
+def test_seek_refuses_a_negative_time_instead_of_restarting():
+    """Fara marginea de jos, `!seek -30` repornea piesa de la zero si raspundea
+    "Seek la `0:00`" — adica facea altceva decat ce a cerut omul, si spunea ca a
+    reusit."""
+    import tempfile
+
+    st = _fresh_state()
+    channel = _FakeVoiceChannel()
+    vc = _FakeVoiceClient(playing=True, channel=channel)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'piesa.opus')
+        with open(path, 'wb') as fh:
+            fh.write(b'audio')
+        st.current_file = path
+        st.last_duration = 200
+        ctx = _FakeCtx(vc, channel=channel)
+        # Sursa audio inlocuita si aici: daca garda cade, testul trebuie sa pice pe
+        # aserțiunea lui, nu pe absenta FFmpeg-ului din mediu.
+        saved_source = commands_mod.make_opus_source
+
+        async def fake_source(filename, channel_, **kwargs):
+            return object()
+
+        commands_mod.make_opus_source = fake_source
+        try:
+            with _Wiring() as w:
+                asyncio.run(w.bot.registry['seek'](ctx, timestamp='-30'))
+        finally:
+            commands_mod.make_opus_source = saved_source
+
+    assert any('negativ' in str(m) for m in ctx.sent), (
+        f'nu a refuzat un timp negativ: {ctx.sent}')
+    assert not any('Seek la' in str(m) for m in ctx.sent), (
+        f'a raportat un seek care nu s-a intamplat: {ctx.sent}')
+    assert st.last_start_time == 0.0, (
+        'a mutat momentul de start pentru un timp respins')
+
+
+def test_seek_on_a_paused_track_is_accepted():
+    """discord.py raporteaza `is_playing()==False` cat timp e pauzat."""
+    import tempfile
+
+    st = _fresh_state()
+    channel = _FakeVoiceChannel()
+    vc = _FakeVoiceClient(playing=False, paused=True, channel=channel)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'piesa.opus')
+        with open(path, 'wb') as fh:
+            fh.write(b'audio')
+        st.current_file = path
+        st.last_duration = 200
+        ctx = _FakeCtx(vc, channel=channel)
+        # Sursa audio se inlocuiește: altfel testul porneste FFmpeg-ul real, deci
+        # trece sau cade in funcție de ce e instalat pe mașina, nu de cod.
+        saved_source = commands_mod.make_opus_source
+
+        async def fake_source(filename, channel_, **kwargs):
+            return object()
+
+        commands_mod.make_opus_source = fake_source
+        try:
+            with _Wiring() as w:
+                asyncio.run(w.bot.registry['seek'](ctx, timestamp='0:30'))
+        finally:
+            commands_mod.make_opus_source = saved_source
+
+    assert not any('Nu se reda nimic' in str(m) for m in ctx.sent), (
+        f'a refuzat un seek pe o piesa pusa pe pauza: {ctx.sent}')
 
 
 def test_the_command_tree_is_no_longer_wiped_before_syncing():

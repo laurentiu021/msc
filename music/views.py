@@ -5,7 +5,8 @@ import discord
 from music.config import log
 from music.state import (get_state, loading, mark_paused, mark_resumed,
                          set_autoplay)
-from music.utils import DISCORD_ERRORS, safe_delete, item_title
+from music.utils import (DISCORD_ERRORS, item_title, may_control,
+                         safe_delete)
 from music.autoplay import prefill_autoplay_queue
 
 
@@ -16,11 +17,9 @@ class MusicControlView(discord.ui.View):
         Inainte, orice membru al serverului putea apasa Stop pe sesiunea
         altcuiva, din orice canal.
         """
-        vc = self.ctx.voice_client
-        if not vc or not vc.channel:
-            return True
-        author_voice = getattr(interaction.user, 'voice', None)
-        if author_voice and author_voice.channel == vc.channel:
+        # Regula sta in `utils.may_control`, ca butoanele si comenzile sa nu poata
+        # divergea: exact asta s-a intamplat pana acum, cand doar butoanele o aveau.
+        if may_control(self.ctx.guild, interaction.user):
             return True
         try:
             await interaction.response.send_message(

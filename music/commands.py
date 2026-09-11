@@ -1,6 +1,7 @@
 """Toate comenzile muzicale."""
 import asyncio
 import contextlib
+import functools
 import os
 import random
 import re
@@ -13,7 +14,8 @@ from music.config import (FFMPEG_OPTS, cookies_available, log,
                           make_search_opts)
 from music.state import get_state, guild_states, loading, set_autoplay
 from music.utils import (DISCORD_ERRORS, cleanup_file, format_time, item_title,
-                         make_opus_source, safe_delete, suggest_tracks)
+                         make_opus_source, may_control, safe_delete,
+                         suggest_tracks)
 from music.autoplay import prefill_autoplay_queue
 from music import diag
 from music import ytdlp
@@ -29,6 +31,13 @@ ALLOWED_HOSTS = {
     'open.spotify.com', 'spotify.com',
     'deezer.com', 'www.deezer.com', 'link.deezer.com',
 }
+
+# Schemele fara `//` care NU sunt niciodata un titlu de piesa. Enumerate, nu
+# deduse: orice altceva urmat de `:` e text ("Coldplay: Yellow"), iar un text nu
+# ajunge la yt-dlp decat prin prefixul explicit `ytsearch5:`.
+FORBIDDEN_SCHEMES = frozenset({
+    'data', 'javascript', 'vbscript', 'file', 'blob', 'about', 'jar', 'view-source',
+})
 
 # Conectarea la voce. Vezi `_ensure_voice` pentru de ce nu mai e 15s si de ce se
 # reincearca: Discord raspunde la o reasignare de server de voce cu un endpoint
@@ -53,12 +62,27 @@ def sanitize_query(raw: str) -> tuple[str | None, str | None]:
         return None, "Link Spotify pe care nu il pot citi."
     # Verificam SCHEMA, nu prezenta lui '://': 'data:audio/mpeg;base64,...' si
     # 'javascript:' nu au '://' si treceau ca text de cautare.
-    scheme_match = re.match(r'^([a-zA-Z][a-zA-Z0-9+.\-]*):', q)
+    # Dar un `nume:` la inceput nu e neapărat o schema: "Coldplay: Yellow" e o
+    # forma perfect normala de a scrie o piesa, si era refuzata cu "Schema
+    # `coldplay` nu e permisa". Deci:
+    #
+    #   - `schema://…` -> URL. Doar http/https, si numai spre host-uri permise.
+    #   - `schema:…` fara `//` -> URI doar dacă schema e una periculoasa
+    #     cunoscuta; altfel e text de cautare.
+    #
+    # Relaxarea e sigura fiindca un text nu ajunge NICIODATA la yt-dlp ca URL:
+    # `process_play` trimite orice nu incepe cu http(s) prin `search_query()`,
+    # adica cu prefixul explicit `ytsearch5:`, deci `data:...` devine literal
+    # Șirul cautat pe YouTube. Lista de mai jos rămâne oricum, ca o schimbare
+    # viitoare care ar scoate prefixul sa nu redeschida gaura in liniște.
+    scheme_match = re.match(r'^([a-zA-Z][a-zA-Z0-9+.\-]*):(//)?', q)
     if not scheme_match:
         return q, None
     scheme = scheme_match.group(1).lower()
     if scheme not in ('http', 'https'):
-        return None, f"Schema `{scheme}` nu e permisa."
+        if scheme_match.group(2) or scheme in FORBIDDEN_SCHEMES:
+            return None, f"Schema `{scheme}` nu e permisa."
+        return q, None                     # "Artist: Titlu", nu un URI
     parsed = urlparse(q)
     host = (parsed.hostname or '').lower()
     if host not in ALLOWED_HOSTS:
@@ -104,6 +128,27 @@ def autocomplete_choices(current: str) -> list:
 
 def setup_music_commands(bot, process_play, play_next, update_player_ui, start_timeout, cancel_timeout):
     """Inregistreaza toate comenzile muzicale pe bot."""
+
+    def only_in_session(fn):
+        """Garda de canal, aplicata la DEFINIȚIE.
+
+        Regula e in `utils.may_control`, aceeasi pe care o folosesc butoanele.
+        Pusa aici, si nu in fiecare corp, o comanda noua nu poate rămâne nepazita
+        din neatentie — iar `tests/test_command_gating.py` verifica mecanic ca
+        fiecare comanda care schimba sesiunea o are.
+        """
+        @functools.wraps(fn)
+        async def guarded(ctx, *args, **kwargs):
+            if not may_control(ctx.guild, ctx.author):
+                await safe_delete(ctx.message)
+                vc = ctx.guild.voice_client
+                await ctx.send(
+                    f"Trebuie sa fii in **{vc.channel.name}** ca sa comanzi "
+                    f"redarea.", delete_after=10)
+                return None
+            return await fn(ctx, *args, **kwargs)
+
+        return guarded
 
     async def _drop_voice(ctx):
         """Inchide orice client de voce pe jumatate deschis.
@@ -375,6 +420,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             await process_play(ctx, search)
 
     @bot.command()
+    @only_in_session
     async def stop(ctx):
         await safe_delete(ctx.message)
         state = get_state(ctx.guild.id)
@@ -393,6 +439,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         await forget_panel(state)
 
     @bot.command()
+    @only_in_session
     async def skip(ctx):
         await safe_delete(ctx.message)
         state = get_state(ctx.guild.id)
@@ -410,6 +457,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             await ctx.send("Nu se reda nimic.", delete_after=5)
 
     @bot.command()
+    @only_in_session
     async def nplay(ctx, *, search):
         await safe_delete(ctx.message)
         search, reason = sanitize_query(search)
@@ -456,6 +504,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         await update_player_ui(ctx, send_new=True)
 
     @bot.command()
+    @only_in_session
     async def shuffle(ctx):
         await safe_delete(ctx.message)
         state = get_state(ctx.guild.id)
@@ -465,6 +514,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         await update_player_ui(ctx)
 
     @bot.command()
+    @only_in_session
     async def clear(ctx):
         await safe_delete(ctx.message)
         state = get_state(ctx.guild.id)
@@ -473,6 +523,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         await update_player_ui(ctx)
 
     @bot.command()
+    @only_in_session
     async def remove(ctx, index: int):
         await safe_delete(ctx.message)
         state = get_state(ctx.guild.id)
@@ -483,6 +534,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         await update_player_ui(ctx)
 
     @bot.command()
+    @only_in_session
     async def move(ctx, from_idx: int, to_idx: int):
         await safe_delete(ctx.message)
         state = get_state(ctx.guild.id)
@@ -494,11 +546,15 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         await update_player_ui(ctx)
 
     @bot.command()
+    @only_in_session
     async def seek(ctx, timestamp: str):
         await safe_delete(ctx.message)
         state = get_state(ctx.guild.id)
         vc = ctx.voice_client
-        if not vc or not vc.is_playing():
+        # `is_paused()` conteaza la fel de mult: discord.py raporteaza
+        # `is_playing()==False` cat timp e pauzat, deci `!seek` pe o piesa pusa pe
+        # pauza raspundea "Nu se reda nimic" — desi piesa era chiar acolo.
+        if not vc or not (vc.is_playing() or vc.is_paused()):
             return await ctx.send("Nu se reda nimic.", delete_after=5)
         if not state.current_file or not os.path.exists(state.current_file):
             return await ctx.send("Nu pot face seek.", delete_after=5)
@@ -510,6 +566,11 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             else: raise ValueError()
         except ValueError:
             return await ctx.send("Format invalid. Ex: !seek 1:30", delete_after=5)
+        if seconds < 0:
+            # Fara marginea de jos, `-30` repornea piesa de la zero si raspundea
+            # "Seek la `0:00`" — adica facea altceva decat ce a cerut omul, si
+            # spunea ca a reusit.
+            return await ctx.send("Timpul nu poate fi negativ.", delete_after=5)
         if state.last_duration and seconds >= state.last_duration:
             return await ctx.send("Depaseste durata piesei.", delete_after=5)
         filename = state.current_file
@@ -536,6 +597,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         await update_player_ui(ctx)
 
     @bot.command(name='247')
+    @only_in_session
     async def always_on(ctx):
         await safe_delete(ctx.message)
         state = get_state(ctx.guild.id)

@@ -26,6 +26,24 @@ DISCORD_ERRORS = (discord.HTTPException, OSError, aiohttp.ClientError,
                   asyncio.TimeoutError)
 
 
+def may_control(guild, member) -> bool:
+    """Cine are voie sa comande redarea. O singura copie a regulii.
+
+    Garda exista de mult, dar numai pe butoanele panoului: `!stop`, `!skip`,
+    `!clear`, `!remove`, `!move`, `!shuffle`, `!seek`, `!nplay` si `!247` erau
+    complet nepazite. Adica oricine din server, din orice canal, putea opri
+    sesiunea altcuiva scriind o comanda — chiar dacă butonul cu exact acelasi efect
+    il refuza.
+
+    Fara sesiune de voce nu e nimic de protejat, deci atunci trece oricine.
+    """
+    channel = getattr(getattr(guild, 'voice_client', None), 'channel', None)
+    if channel is None:
+        return True
+    voice = getattr(member, 'voice', None)
+    return bool(voice and voice.channel == channel)
+
+
 class UndecodableAudio(Exception):
     """Fisierul nu are flux audio: nu e o pana de transport, e o intrare stricata.
 
@@ -441,13 +459,19 @@ def playback_remaining(now: float, start_time: float, duration: float,
     return min(elapsed, duration), max(0.0, duration - elapsed)
 
 
-def reject_reason(title, duration, last_title: str) -> str:
+def reject_reason(title, duration, last_title: str, live_status=None) -> str:
     """De ce a fost respins un rezultat. Sir gol = a trecut.
 
     Un singur loc pentru regula, si pentru explicația ei: mesajul de refuz spunea
     fix "live, prea scurte sau prea lungi" oricare ar fi fost cauza, iar cauza era
     de obicei cu totul alta.
     """
+    # LIVE-ul primul, si nu prin durata: un live are `duration` None, deci trecea
+    # toate verificarile de aici, era ales din cautare, si abia `match_filter` de la
+    # descarcare il refuza — adica utilizatorul primea o eroare pe o cautare unde
+    # celelalte rezultate erau perfect bune.
+    if live_status in ('is_live', 'is_upcoming', 'post_live'):
+        return 'transmisiune live'
     if duration and duration > MAX_TRACK_SECONDS:
         return 'prea lunga'
     if duration and duration < MIN_TRACK_SECONDS:
@@ -466,8 +490,8 @@ def reject_reason(title, duration, last_title: str) -> str:
     return ''
 
 
-def is_clean(title, duration, last_title: str) -> bool:
-    return not reject_reason(title, duration, last_title)
+def is_clean(title, duration, last_title: str, live_status=None) -> bool:
+    return not reject_reason(title, duration, last_title, live_status)
 
 
 def format_time(seconds) -> str:
