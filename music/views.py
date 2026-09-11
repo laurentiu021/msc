@@ -283,7 +283,16 @@ class MusicControlView(discord.ui.View):
     async def loop_btn(self, interaction: discord.Interaction, button):
         state = get_state(self.ctx.guild.id)
         state.loop_mode = (state.loop_mode + 1) % 3
-        if state.loop_mode > 0: set_autoplay(state, False, by_user=True)
+        if state.loop_mode > 0:
+            # `by_user=False`, DELIBERAT. Radioul si loop-ul se bat (unul aduce
+            # piese noi, celalalt repeta), deci oprirea lui aici e corecta — dar
+            # `by_user=True` scria si veto-ul "omul a oprit radioul", singurul lucru
+            # peste care tick-ul de 24/7 nu are voie sa treaca. Iar Loop cicleaza:
+            # trei apasari il aduc inapoi pe 0, si de atunci coada goala nu mai era
+            # niciodata reumpluta — botul rămânea in canal, tacut, pentru toata viata
+            # procesului, desi nimeni nu ceruse oprirea radioului. Veto-ul aparține
+            # butonului Autoplay si comenzilor de stop, care chiar sunt despre radio.
+            set_autoplay(state, False, by_user=False)
         await self._safe_defer(interaction)
         from music.ui import update_player_ui
         await update_player_ui(self.ctx)

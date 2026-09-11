@@ -441,6 +441,83 @@ def test_a_double_acknowledgement_is_reported_and_contained():
     assert 'deja confirmata' in out, out
 
 
+# --- Loop nu are voie sa anuleze radioul pentru totdeauna ----------------------
+
+def _no_ui():
+    """Inlocuieste trimiterea panoului; butoanele o cheama la final."""
+    from music import ui as ui_mod
+
+    saved = ui_mod.update_player_ui
+
+    async def stub(ctx, send_new=False):
+        return None
+
+    ui_mod.update_player_ui = stub
+    return ui_mod, saved
+
+
+def test_the_loop_button_does_not_veto_the_radio_for_good():
+    """Loop cicleaza off -> piesa -> coada -> off.
+
+    Prima apasare oprea radioul cu `by_user=True`, adica scria si veto-ul "omul a
+    oprit radioul". Dupa trei apasari, loop-ul e din nou 0 — dar veto-ul rămâne, si
+    de atunci tick-ul de 24/7 nu mai reumple niciodata coada: botul sta in canal,
+    tacut, toata viata procesului, desi nimeni nu ceruse oprirea radioului.
+    """
+    from music.idle import RADIO, decide_idle_action
+
+    st = _fresh_state()
+    st.always_on = True
+    st.autoplay = True
+    st.last_url = 'https://www.youtube.com/watch?v=x'
+    ui_mod, saved = _no_ui()
+    try:
+        for _ in range(3):
+            _press('loop_btn', st)
+    finally:
+        ui_mod.update_player_ui = saved
+
+    assert st.loop_mode == 0, f'Loop nu a revenit pe off: {st.loop_mode}'
+    decision = decide_idle_action(st, connected=True, playing=False, paused=False,
+                                  now=1000.0)
+    assert decision.action == RADIO, (
+        f'24/7 nu mai reporneste radioul: {decision.reason}')
+
+
+def test_the_loop_button_still_turns_the_radio_off_while_looping():
+    """Comportamentul dorit rămâne: cat timp se repeta, radioul tace."""
+    st = _fresh_state()
+    st.autoplay = True
+    ui_mod, saved = _no_ui()
+    try:
+        _press('loop_btn', st)
+    finally:
+        ui_mod.update_player_ui = saved
+    assert st.loop_mode == 1, st.loop_mode
+    assert st.autoplay is False, 'radioul a rămas pornit peste loop'
+
+
+def test_the_autoplay_button_still_vetoes_the_radio():
+    """Veto-ul nu se pierde: pe butonul care CHIAR e despre radio, el rămâne."""
+    from music.idle import NOTHING, decide_idle_action
+
+    st = _fresh_state()
+    st.always_on = True
+    st.autoplay = True
+    st.last_url = 'https://www.youtube.com/watch?v=x'
+    ui_mod, saved = _no_ui()
+    try:
+        _press('autoplay_btn', st)
+    finally:
+        ui_mod.update_player_ui = saved
+
+    assert st.autoplay is False, 'butonul nu a stins radioul'
+    decision = decide_idle_action(st, connected=True, playing=False, paused=False,
+                                  now=1000.0)
+    assert decision.action == NOTHING, decision
+    assert 'utilizator' in decision.reason, decision.reason
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.
