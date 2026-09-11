@@ -6,7 +6,7 @@ import os
 import random
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import discord
 
@@ -31,6 +31,35 @@ ALLOWED_HOSTS = {
     'open.spotify.com', 'spotify.com',
     'deezer.com', 'www.deezer.com', 'link.deezer.com',
 }
+
+# Derivat din allowlist, nu scris a doua oara: doua liste de host-uri YouTube ar
+# ajunge sa nu mai fie de acord, iar cea folosita la playlist-uri e exact cea care
+# nu se vede in teste.
+YOUTUBE_HOSTS = frozenset(h for h in ALLOWED_HOSTS if 'youtu' in h)
+
+
+def is_youtube_playlist(url: str) -> bool:
+    """Un link de YouTube care duce si un playlist?
+
+    Verificarea era `'list=' in search and 'youtube.com' in search`, si al doilea
+    termen e chiar forma pe care butonul Share din aplicatia de telefon NU o
+    produce: el da `https://youtu.be/<id>?list=<PL...>`. Deci cine trimitea un
+    playlist de pe telefon primea o singura piesa, fara niciun mesaj care sa spuna
+    de ce — cazul cel mai obișnuit de partajare.
+
+    Pe host, nu pe subȘir: `youtube.com` apare si intr-un titlu de cautare
+    ("cel mai bun playlist de pe youtube.com") si intr-un query de pe alt domeniu.
+    """
+    try:
+        parsed = urlparse(url or '')
+    except ValueError:
+        return False
+    if parsed.scheme not in ('http', 'https'):
+        return False
+    if (parsed.hostname or '').lower() not in YOUTUBE_HOSTS:
+        return False
+    return any(value.strip() for value in parse_qs(parsed.query).get('list', []))
+
 
 # Schemele fara `//` care NU sunt niciodata un titlu de piesa. Enumerate, nu
 # deduse: orice altceva urmat de `:` e text ("Coldplay: Yellow"), iar un text nu
@@ -388,7 +417,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                     delete_after=15)
             search = resolved
 
-        if 'list=' in search and 'youtube.com' in search:
+        if is_youtube_playlist(search):
             ydl_opts_pl = make_search_opts(
                 with_cookies=cookies_available(),
                 extract_flat=True, playlistend=30, noplaylist=False,

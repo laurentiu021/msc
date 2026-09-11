@@ -169,6 +169,70 @@ def test_the_bot_can_never_ping_anyone_with_echoed_text():
     assert payload == discord.AllowedMentions.none().to_dict(), payload
 
 
+# --- linkul de playlist trimis de pe telefon ----------------------------------
+
+def test_a_playlist_shared_from_the_phone_is_recognised():
+    """Butonul Share din aplicatia de telefon da `youtu.be/<id>?list=<PL...>`.
+
+    Garda cerea subȘirul 'youtube.com', pe care forma asta nu il conține, deci
+    playlist-ul era ignorat si se reda O SINGURA piesa — fara niciun mesaj care sa
+    spuna de ce. Adica exact cazul cel mai obișnuit de partajare.
+    """
+    from music.commands import is_youtube_playlist
+
+    for url in ('https://youtu.be/dQw4w9WgXcQ?list=PLxyz',
+                'https://youtu.be/dQw4w9WgXcQ?si=abc&list=PLxyz',
+                'https://www.youtube.com/watch?v=a&list=PLxyz',
+                'https://m.youtube.com/watch?list=PLxyz&v=a',
+                'https://music.youtube.com/playlist?list=PLxyz'):
+        assert is_youtube_playlist(url) is True, url
+
+
+def test_a_plain_video_is_not_a_playlist():
+    from music.commands import is_youtube_playlist
+
+    for url in ('https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+                'https://youtu.be/dQw4w9WgXcQ',
+                'https://youtu.be/dQw4w9WgXcQ?list=',        # parametru gol
+                'https://www.youtube.com/shorts/abc'):
+        assert is_youtube_playlist(url) is False, url
+
+
+def test_the_check_is_on_the_host_not_on_a_substring():
+    """'youtube.com' apare si intr-un text de cautare si in query-ul altui domeniu.
+    Un playlist citit de pe alt host ar duce cookie-urile acolo."""
+    from music.commands import is_youtube_playlist
+
+    for text in ('cel mai bun playlist de pe youtube.com list=PLxyz',
+                 'https://evil.example/?list=PLxyz&ref=youtube.com',
+                 'https://evil.example/youtube.com/watch?v=a&list=PLxyz',
+                 'ftp://youtube.com/?list=PLxyz'):
+        assert is_youtube_playlist(text) is False, text
+
+
+def test_the_host_list_comes_from_the_allowlist():
+    """Doua liste de host-uri YouTube ar ajunge sa nu mai fie de acord, iar cea
+    folosita la playlist-uri e exact cea care nu se vede in teste."""
+    from music.commands import ALLOWED_HOSTS, YOUTUBE_HOSTS
+
+    assert YOUTUBE_HOSTS <= ALLOWED_HOSTS, YOUTUBE_HOSTS - ALLOWED_HOSTS
+    assert 'open.spotify.com' not in YOUTUBE_HOSTS
+    assert {'youtu.be', 'www.youtube.com', 'music.youtube.com'} <= YOUTUBE_HOSTS
+
+
+def test_the_play_command_uses_the_helper():
+    """O garda pe care comanda nu o cheama nu repara nimic."""
+    import ast
+    import inspect
+
+    from music import commands as commands_mod
+
+    src = inspect.getsource(commands_mod.setup_music_commands)
+    called = {ast.unparse(n.func) for n in ast.walk(ast.parse(src.strip()))
+              if isinstance(n, ast.Call)}
+    assert 'is_youtube_playlist' in called, 'ramura de playlist nu foloseste garda'
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.
