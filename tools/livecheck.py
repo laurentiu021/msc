@@ -556,6 +556,11 @@ async def commands_on_an_empty_session_do_not_explode(live, r):
         except Exception as e:
             r.check(False, f'{cmd} a aruncat {type(e).__name__}: {e}')
             continue
+        # AȘteptare, nu citire imediata: `ctx.send` se intoarce cand a venit
+        # raspunsul HTTP, dar mesajul il vad prin evenimentul de gateway, care
+        # poate ajunge cateva zeci de ms mai tarziu. Fara asta verificarea era
+        # flaky: `!remove` trecea si `!move` nu, pe cod care raspunde identic.
+        await live.wait(lambda: live.said(mark), 5)
         said = live.text_of(mark).replace('\n', ' ')
         r.check(bool(said.strip()), f'{cmd} -> {said[:90]!r}')
         await asyncio.sleep(0.4)
