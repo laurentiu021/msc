@@ -126,6 +126,34 @@ def autocomplete_choices(current: str) -> list:
     return choices
 
 
+# Numele si descrierea fiecarei comenzi, o singura data. Ajutorul se
+# construieste din tabelul asta, iar un test verifica mecanic ca fiecare
+# comanda inregistrata pe bot apare aici — altfel o comanda noua ar exista
+# fara ca nimeni sa afle de ea.
+HELP_SECTIONS = [
+    ("🎵 Muzică", [
+        ('play', '<piesa sau link>', 'Reda acum, sau adauga in coada'),
+        ('nplay', '<piesa sau link>', 'Reda imediat, peste piesa curenta'),
+        ('skip', '', 'Trece la piesa urmatoare'),
+        ('stop', '', 'Opreste tot si iese din canal'),
+        ('np', '', 'Ce se reda acum (panoul cu butoane)'),
+        ('seek', '<1:30>', 'Salt la un moment din piesa'),
+    ]),
+    ("📋 Coada", [
+        ('shuffle', '', 'Amesteca coada'),
+        ('clear', '', 'Goleste coada'),
+        ('remove', '<nr>', 'Scoate piesa cu numarul dat'),
+        ('move', '<de la> <la>', 'Mută o piesa in alta poziție'),
+        ('247', '', 'Rămâne in canal non-stop, cu autoplay'),
+    ]),
+    ("🔧 Diagnostic", [
+        ('health', '', 'De ce nu merge: cookies, PO Token, cota, erori'),
+        ('debug', '', 'Latenta, CPU, RAM, coada'),
+        ('help', '', 'Lista asta (merge si !comenzi, !h, !mhelp)'),
+    ]),
+]
+
+
 def setup_music_commands(bot, process_play, play_next, update_player_ui, start_timeout, cancel_timeout):
     """Inregistreaza toate comenzile muzicale pe bot."""
 
@@ -424,6 +452,8 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
     async def stop(ctx):
         await safe_delete(ctx.message)
         state = get_state(ctx.guild.id)
+        vc = ctx.voice_client
+        had_session = bool(vc or state.queue or state.is_loading or state.always_on)
         state.queue.clear(); set_autoplay(state, False, by_user=True)
         state.loop_mode = 0
         state.is_loading = False; state.always_on = False
@@ -437,6 +467,12 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         # in ViewStore-ul lui discord.py pentru un mesaj sters.
         from music.ui import forget_panel
         await forget_panel(state)
+        # Singura comanda care nu raspundea NIMIC. Cand chiar era ceva de oprit,
+        # plecarea din canal si dispariția panoului tineau loc de confirmare; cand
+        # nu era, `!stop` arata exact ca un bot mort. Toate celelalte comenzi
+        # raspund si pe cazul gol ("Nu se reda nimic.", "Coada e prea scurta.").
+        await ctx.send("Oprit." if had_session else "Nu era nimic de oprit.",
+                       delete_after=5)
 
     @bot.command()
     @only_in_session
@@ -519,7 +555,8 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         await safe_delete(ctx.message)
         state = get_state(ctx.guild.id)
         n = len(state.queue); state.queue.clear()
-        await ctx.send(f"Coada golita ({n} piese).", delete_after=5)
+        await ctx.send(f"Coada golita ({n} piese)." if n else "Coada era deja goala.",
+                       delete_after=5)
         await update_player_ui(ctx)
 
     @bot.command()
@@ -651,33 +688,6 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             await ctx.send("24/7 OFF.", delete_after=5)
             await update_player_ui(ctx)
             if ctx.voice_client and not ctx.voice_client.is_playing(): start_timeout(ctx)
-
-    # Numele si descrierea fiecarei comenzi, o singura data. Ajutorul se
-    # construieste din tabelul asta, iar un test verifica mecanic ca fiecare
-    # comanda inregistrata pe bot apare aici — altfel o comanda noua ar exista
-    # fara ca nimeni sa afle de ea.
-    HELP_SECTIONS = [
-        ("🎵 Muzică", [
-            ('play', '<piesa sau link>', 'Reda acum, sau adauga in coada'),
-            ('nplay', '<piesa sau link>', 'Reda imediat, peste piesa curenta'),
-            ('skip', '', 'Trece la piesa urmatoare'),
-            ('stop', '', 'Opreste tot si iese din canal'),
-            ('np', '', 'Ce se reda acum (panoul cu butoane)'),
-            ('seek', '<1:30>', 'Salt la un moment din piesa'),
-        ]),
-        ("📋 Coada", [
-            ('shuffle', '', 'Amesteca coada'),
-            ('clear', '', 'Goleste coada'),
-            ('remove', '<nr>', 'Scoate piesa cu numarul dat'),
-            ('move', '<de la> <la>', 'Mută o piesa in alta poziție'),
-            ('247', '', 'Rămâne in canal non-stop, cu autoplay'),
-        ]),
-        ("🔧 Diagnostic", [
-            ('health', '', 'De ce nu merge: cookies, PO Token, cota, erori'),
-            ('debug', '', 'Latenta, CPU, RAM, coada'),
-            ('help', '', 'Lista asta'),
-        ]),
-    ]
 
     def _help_embed():
         embed = discord.Embed(

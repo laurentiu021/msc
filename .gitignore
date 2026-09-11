@@ -18,6 +18,9 @@ log
 *.log
 downloads/
 data/
+.livecheck/
+# Momentul ultimei porniri, scris la fiecare rulare: stare de runtime, nu cod.
+.last_boot
 audio/
 *.webm
 *.m4a

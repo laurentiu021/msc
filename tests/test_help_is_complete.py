@@ -75,6 +75,18 @@ def test_every_registered_command_appears_in_the_help():
     assert not missing, f'comenzi fara linie de ajutor: {sorted(missing)}'
 
 
+def test_every_alias_appears_in_the_help():
+    """Un alias despre care nimeni nu afla nu ajuta pe nimeni.
+
+    Testul de mai sus se uita doar la NUMELE comenzilor, deci `!mhelp` a trait
+    nedocumentat pana l-a gasit rularea live pe Discord.
+    """
+    text = _help_text()
+    aliases = {a for c in _commands().values() for a in c.aliases}
+    missing = sorted(a for a in aliases if f'!{a}' not in text)
+    assert not missing, f'aliasuri fara nicio mentiune in ajutor: {missing}'
+
+
 def test_the_help_does_not_advertise_commands_that_do_not_exist():
     import re
 

@@ -1005,6 +1005,58 @@ def test_resume_if_idle_arms_the_timer_when_there_is_nothing_to_play():
     assert w.starts, 'nu a armat niciun timer'
 
 
+# --- fiecare comanda trebuie sa raspunda ceva ---------------------------------
+
+def test_stop_answers_even_when_there_is_nothing_to_stop():
+    """Gasit in rularea live: `!stop` era singura comanda care NU raspundea nimic.
+
+    Cand chiar era ceva de oprit, plecarea din canal si dispariția panoului tineau
+    loc de confirmare. Cand nu era — nimic: niciun mesaj, nicio schimbare vizibila,
+    adica exact ce vede cineva cand botul e mort. Toate celelalte comenzi raspund
+    si pe cazul gol ("Nu se reda nimic.", "Coada e prea scurta.", "Index invalid").
+    """
+    _fresh_state()
+    ctx = _FakeCtx(None)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['stop'](ctx))
+    assert ctx.sent, '!stop nu a raspuns nimic'
+    assert 'nimic' in str(ctx.sent[0]).lower(), ctx.sent
+
+
+def test_stop_confirms_when_it_really_stopped_something():
+    st = _fresh_state()
+    st.queue.append({'query': 'ceva', 'title': 'ceva'})
+    vc = _FakeVoiceClient(playing=True)
+    ctx = _FakeCtx(vc)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['stop'](ctx))
+    assert ctx.sent and 'oprit' in str(ctx.sent[0]).lower(), ctx.sent
+    assert vc.disconnects, 'nu a ieșit din canal'
+    assert not st.queue
+
+
+def test_clear_does_not_claim_to_have_emptied_an_empty_queue():
+    """"Coada golita (0 piese)" raporta o acțiune care nu s-a intamplat."""
+    _fresh_state()
+    ctx = _FakeCtx(_FakeVoiceClient())
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['clear'](ctx))
+    assert ctx.sent, '!clear nu a raspuns nimic'
+    said = str(ctx.sent[0]).lower()
+    assert 'deja goala' in said, said
+    assert '0 piese' not in said, said
+
+
+def test_clear_reports_the_real_count():
+    st = _fresh_state()
+    st.queue.extend({'query': f'q{i}'} for i in range(3))
+    ctx = _FakeCtx(_FakeVoiceClient())
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['clear'](ctx))
+    assert '3 piese' in str(ctx.sent[0]), ctx.sent
+    assert not st.queue
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

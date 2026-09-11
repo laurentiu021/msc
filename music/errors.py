@@ -79,9 +79,56 @@ def diagnose_error(error) -> tuple[str, str]:
             "➡️ Asteapta cateva minute si incearca din nou."
         ))
 
+    # Motive punctuale, pe care YouTube le spune limpede si despre care se poate
+    # spune ceva folositor. Toate ieseau ca "Eroare necunoscuta" cu textul in
+    # engleza citat inapoi utilizatorului si un "trimite-mi mesajul asta" —
+    # pentru situatii perfect cunoscute. Verificate live pe Discord.
+    if "live stream recording is not available" in e:
+        return ("live", (
+            "📡 **Asta e o transmisiune live.**\n"
+            "YouTube nu da nicio inregistrare din care sa se poata reda.\n"
+            "➡️ Alege o inregistrare normala a piesei."
+        ))
+
+    if "processing this video" in e:
+        return ("processing", (
+            "⏳ **YouTube inca proceseaza video-ul.**\n"
+            "E abia incarcat, deci nu exista inca niciun format audio.\n"
+            "➡️ Incearca din nou in cateva minute, sau alege alta versiune."
+        ))
+
+    if ("premieres in" in e or "live event will begin" in e
+            or "this live event" in e):
+        return ("upcoming", (
+            "📅 **Video-ul nu a inceput inca.**\n"
+            "E o premiera sau un live programat mai tarziu.\n"
+            "➡️ Alege alta versiune a piesei."
+        ))
+
+    if ("members-only" in e or "members only" in e
+            or "join this channel" in e):
+        return ("members", (
+            "🔒 **Video doar pentru membrii canalului.**\n"
+            "YouTube il refuza fara un cont abonat la canalul respectiv.\n"
+            "➡️ Alege alta versiune a piesei."
+        ))
+
+    if ("not available in your country" in e
+            or "blocked it in your country" in e
+            or "who has blocked it on copyright grounds" in e):
+        return ("geo", (
+            "🌍 **Blocat in regiunea serverului.**\n"
+            "Proprietarul nu permite redarea din tara in care ruleaza botul.\n"
+            "➡️ Alege alta versiune a piesei."
+        ))
+
     # "is not available" singur prindea si "Requested format is not available",
-    # care e o problema de formate, nu un video sters.
+    # care e o problema de formate, nu un video sters. De asta fraze intregi — dar
+    # ATENTIE la formulare: YouTube scrie de obicei "This video is unavailable",
+    # iar tiparul "video unavailable" nu il prinde, fiindca intre cele doua cuvinte
+    # sta "is". Un video sters era raportat ca eroare necunoscuta.
     if ("video unavailable" in e
+            or "video is unavailable" in e
             or "this video is not available" in e
             or "not made this video available" in e
             or "video has been removed" in e

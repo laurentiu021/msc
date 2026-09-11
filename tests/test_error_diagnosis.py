@@ -41,6 +41,28 @@ REAL_MESSAGES = {
     "<urlopen error [Errno -3] Temporary failure in name resolution>": 'network',
     "ffprobe/ffmpeg not found. Please install or provide the path": 'ffmpeg',
     "ERROR: [youtube] x: Failed to extract any player response": 'unknown',
+    # din rularea live pe Discord, 2026-09-11. Toate trei ieseau ca "Eroare
+    # necunoscuta" cu textul in engleza citat inapoi utilizatorului si un
+    # "trimite-mi mesajul asta" — pentru situatii perfect cunoscute. A treia e
+    # motivul pentru care tiparul de video sters nu se potrivea: YouTube scrie
+    # "is unavailable", iar "video unavailable" nu prinde asta.
+    "ERROR: [youtube] jfKfPfyJRdk: This live stream recording is not "
+    "available.": 'live',
+    "ERROR: [youtube] aaaaaaaaaaa: This video is unavailable": 'unavailable',
+    "ERROR: [youtube] 5qap5aO4i9A: We're processing this video. Check back "
+    "later.": 'processing',
+}
+
+# Motivele de "playability" vin ca text de la YouTube, nu din yt-dlp, deci nu se
+# pot cita dintr-un fisier: potrivirea se face pe fragmentul distinctiv. Astea trei
+# nu au fost inca vazute in logurile noastre, dar sunt formularile pe care YouTube
+# le foloseste, si fara ele fiecare ar fi "Eroare necunoscuta".
+PLAYABILITY_REASONS = {
+    "ERROR: [youtube] x: Join this channel to get access to members-only "
+    "content": 'members',
+    "ERROR: [youtube] x: This video is not available in your country": 'geo',
+    "ERROR: [youtube] x: Premieres in 3 hours": 'upcoming',
+    "ERROR: [youtube] x: This live event will begin in 5 hours": 'upcoming',
 }
 
 # Mesaje care NU trebuie sa fie diagnosticate greșit.
@@ -53,6 +75,25 @@ MUST_NOT_MATCH = [
     ("discord.errors.Forbidden: 403 Forbidden (error code: 50013): "
      "Missing Permissions", 'po_token'),
 ]
+
+
+def test_playability_reasons_get_their_own_advice():
+    wrong = [(m, diagnose_error(m)[0], want)
+             for m, want in PLAYABILITY_REASONS.items()
+             if diagnose_error(m)[0] != want]
+    assert not wrong, wrong
+
+
+def test_no_known_condition_is_reported_as_unknown():
+    """"Eroare necunoscuta: <text in engleza>" e ultima soluție, nu raspunsul
+    pentru un video sters sau un live. Cine primeste asa ceva nu poate face nimic
+    cu el, iar mesajul ii cere sa TRIMITA eroarea mai departe."""
+    for message in list(REAL_MESSAGES) + list(PLAYABILITY_REASONS):
+        if REAL_MESSAGES.get(message) == 'unknown':
+            continue
+        kind, text = diagnose_error(message)
+        assert kind != 'unknown', f'{message[:70]!r} -> necunoscuta'
+        assert 'necunoscut' not in text.lower(), (message[:70], text[:60])
 
 
 def test_real_messages_map_to_the_right_type():
