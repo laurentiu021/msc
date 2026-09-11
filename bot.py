@@ -375,6 +375,33 @@ async def _log_command_invoke(ctx):
 
 
 @bot.event
+async def on_interaction(interaction):
+    """Fiecare interactiune, cu VARSTA ei.
+
+    Discord invalideaza o interactiune neconfirmata in 3 secunde si arata
+    "Gogu didn't respond in time". Pana acum o apasare de buton nu lasa NICIO
+    linie in loguri, deci cele doua cauze posibile nu se puteau deosebi: clickul a
+    ajuns si am fost prea lenți, sau nu a ajuns niciodata la handler — cazul in
+    care discord.py il arunca cu un `_log.debug`, invizibil la nivel INFO.
+
+    Varsta e masurata din snowflake-ul interactiunii, deci acopera si intarzierea
+    de rețea, nu doar munca noastra.
+
+    Fara autor si fara conținut: repo-ul e public. `custom_id`-urile sunt ale
+    noastre, nu date de utilizator.
+
+    Evenimentul e doar un ascultator in plus: `parse_interaction_create` a
+    dispecerizat deja componenta sau comanda inainte sa il emita, deci nu trebuie
+    sa mai chemam nimic aici.
+    """
+    data = interaction.data or {}
+    name = data.get('custom_id') or data.get('name') or '?'
+    age = (discord.utils.utcnow() - interaction.created_at).total_seconds()
+    log.info("Interaction: type=%s id=%s varsta=%.2fs",
+             interaction.type.name, name, age)
+
+
+@bot.event
 async def setup_hook():
     """Bataia porneste AICI, nu in on_ready.
 

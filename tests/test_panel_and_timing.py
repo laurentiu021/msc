@@ -26,11 +26,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Importul lui bot.py loga o eroare de token altfel; nu se conecteaza nimic.
 os.environ.setdefault('DISCORD_TOKEN', 'test-token-nefolosit')
 
+import discord
+
 from music import state as state_mod, ui
 from music.state import (GuildState, mark_paused, mark_resumed)
 from music.utils import playback_remaining
 
 GUILD_ID = 21
+MESSAGE_ID = 9876543210
 
 
 class _FakeVoiceClient:
@@ -51,14 +54,22 @@ class _FakeVoiceClient:
 
 
 class _FakeMessage:
-    def __init__(self, sink):
+    def __init__(self, sink, store=None):
         self.sink = sink
         self.edits = 0
         self.deleted = False
+        self.id = MESSAGE_ID
+        # Cand primeste un ViewStore real, `edit` face exact ce face
+        # `Message.edit` in discord.py 2.7.1 (message.py:1417): inregistreaza
+        # view-ul sub ID-ul mesajului.
+        self.store = store
 
     async def edit(self, **kwargs):
         self.edits += 1
         self.sink.append('edit')
+        view = kwargs.get('view')
+        if self.store is not None and view and not view.is_finished():
+            self.store.add_view(view, self.id)
 
     async def delete(self):
         self.deleted = True
@@ -102,7 +113,12 @@ def test_an_existing_panel_is_edited_not_re_sent():
     assert ctx.events == ['edit'], ctx.events
 
 
-def test_the_edit_branch_stops_the_old_view():
+def test_the_send_branch_stops_the_old_view():
+    """Mesajul vechi DISPARE, deci view-ul lui nu mai are ce sa asculte.
+
+    Message.delete() nu il scoate din ViewStore-ul lui discord.py, deci fara
+    oprire fiecare panou nou lasa un view viu pe viata procesului.
+    """
     st = _fresh_state()
     ctx = _FakeCtx(_FakeVoiceClient(playing=True))
     st.current_msg = _FakeMessage(ctx.events)
@@ -114,9 +130,48 @@ def test_the_edit_branch_stops_the_old_view():
             stopped.append(True)
 
     st.current_view = _OldView()
-    asyncio.run(ui.update_player_ui(ctx, send_new=False))
-    assert stopped, 'view-ul vechi a rămas viu in ViewStore la fiecare piesa'
+    asyncio.run(ui.update_player_ui(ctx, send_new=True))
+    assert stopped, 'view-ul vechi a rămas viu in ViewStore dupa ce mesajul lui a fost sters'
     assert st.current_view is not None and not isinstance(st.current_view, _OldView)
+
+
+def test_the_panel_buttons_survive_a_refresh():
+    """Bug-ul: butoanele mureau dupa PRIMUL refresh al panoului.
+
+    Se folosește ViewStore-ul REAL din discord.py, fiindca bug-ul trăia exact in
+    semantica lui: `add_view` inregistreaza item-ii in `_views[message_id]` dupa
+    cheia `(tip_component, custom_id)`, iar `View.stop()` cheama `remove_view`,
+    care SCOATE aceleasi chei din acelasi dicționar. Cu ambele view-uri pe acelasi
+    mesaj, cheile sunt identice — deci oprirea celui vechi DUPA edit dezinregistra
+    butoanele tocmai inregistrate. Discord nu mai gasea nimic si arunca fiecare
+    click cu un `_log.debug`, invizibil la nivel INFO: utilizatorul vedea doar
+    "Gogu didn't respond in time".
+
+    Un fals cu doar `.stop()` nu putea vedea nimic din asta — de aceea a trecut.
+    """
+    from discord.ui.view import ViewStore
+
+    store = ViewStore(None)
+    st = _fresh_state()
+    ctx = _FakeCtx(_FakeVoiceClient(playing=True))
+    st.current_msg = _FakeMessage(ctx.events, store=store)
+
+    async def two_refreshes():
+        await ui.update_player_ui(ctx, send_new=False)   # inregistreaza butoanele
+        await ui.update_player_ui(ctx, send_new=False)   # nu are voie sa le scoata
+
+    asyncio.run(two_refreshes())
+
+    assert st.current_msg.edits == 2, st.current_msg.edits
+    button = discord.ComponentType.button.value
+    registered = store._views.get(MESSAGE_ID) or {}
+    assert (button, 'skip') in registered, (
+        f'butoanele panoului nu mai sunt ascultate dupa refresh: '
+        f'{sorted(cid for _t, cid in registered)}')
+    assert registered[(button, 'skip')].view is st.current_view, (
+        'butonul ascultat aparține unui view vechi, nu celui de pe ecran')
+    assert store._synced_message_views.get(MESSAGE_ID) is st.current_view, (
+        'mesajul nu mai e legat de niciun view')
 
 
 def test_sending_a_new_panel_deletes_the_old_one():

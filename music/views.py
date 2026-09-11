@@ -5,7 +5,7 @@ import discord
 from music.config import log
 from music.state import (get_state, loading, mark_paused, mark_resumed,
                          set_autoplay)
-from music.utils import safe_delete, item_title
+from music.utils import DISCORD_ERRORS, safe_delete, item_title
 from music.autoplay import prefill_autoplay_queue
 
 
@@ -99,10 +99,25 @@ class MusicControlView(discord.ui.View):
             await self._safe_defer(interaction)
 
     async def _safe_defer(self, interaction: discord.Interaction):
+        """Confirma interactiunea. Un eșec de aici se VEDE.
+
+        `DISCORD_ERRORS`, nu doar `HTTPException`: discord.py nu invelește
+        eșecurile de transport, iar `DiscordServerError` e oricum subclasa de
+        `HTTPException`, deci vechea pereche acoperea o singura clasa reala.
+        `InteractionResponded` intra si el: e un `ClientException`, adica un semn
+        ca am raspuns deja de doua ori — un defect al nostru, nu o pana.
+
+        Si mai important, nu mai tace: cand confirmarea eșua, utilizatorul vedea
+        "Gogu didn't respond in time" si in loguri nu exista absolut nimic.
+        """
         try:
             await interaction.response.defer()
-        except (discord.HTTPException, discord.errors.DiscordServerError):
-            pass
+        except discord.InteractionResponded:
+            log.warning("Interactiunea era deja confirmata: %s",
+                        (interaction.data or {}).get('custom_id'))
+        except DISCORD_ERRORS as e:
+            log.warning("Nu am putut confirma interactiunea %s: %s",
+                        (interaction.data or {}).get('custom_id'), e)
 
     @discord.ui.button(label="Inapoi", style=discord.ButtonStyle.secondary, custom_id="prev", row=0)
     async def back_btn(self, interaction: discord.Interaction, button):

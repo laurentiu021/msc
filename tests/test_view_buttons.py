@@ -172,6 +172,64 @@ def test_the_autoplay_button_starts_playing_after_its_prefill():
         'nimic: piesa rămâne in coada pentru totdeauna')
 
 
+def _defer_failure(exc):
+    """Ruleaza `_safe_defer` peste o confirmare care eșueaza. Intoarce logurile."""
+    import io
+    import logging
+
+    from music.config import log as music_log
+
+    class _Broken:
+        data = {'custom_id': 'skip'}
+
+        class response:
+            @staticmethod
+            async def defer():
+                raise exc
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    level = music_log.level
+    music_log.addHandler(handler)
+    music_log.setLevel(logging.INFO)
+    try:
+        view = views.MusicControlView(_FakeCtx(_FakeVoiceClient()))
+        asyncio.run(view._safe_defer(_Broken()))
+    finally:
+        music_log.removeHandler(handler)
+        music_log.setLevel(level)
+    return stream.getvalue()
+
+
+def test_a_failed_acknowledgement_is_never_silent():
+    """Utilizatorul vedea "Gogu didn't respond in time" si logurile erau goale.
+
+    Vechiul `except (HTTPException, DiscordServerError): pass` acoperea o singura
+    clasa reala (a doua e subclasa primei) si nu scria nimic. Un transport inchis
+    de Discord — `OSError` sau `aiohttp.ClientError`, pe care discord.py nu le
+    invelește — scapa cu totul si ajungea in `View.on_error`.
+    """
+    import aiohttp
+    import discord
+
+    for exc in (OSError('conexiune inchisa'),
+                aiohttp.ClientError('transport'),
+                asyncio.TimeoutError(),
+                discord.DiscordServerError.__new__(discord.DiscordServerError)):
+        out = _defer_failure(exc)
+        assert 'skip' in out, (
+            f'{type(exc).__name__} a fost inghitit in silențiu: {out!r}')
+
+
+def test_a_double_acknowledgement_is_reported_and_contained():
+    """`InteractionResponded` e un defect al NOSTRU, dar nu are voie sa propage:
+    ar ajunge in `View.on_error` si butonul ar rămâne mort."""
+    import discord
+
+    out = _defer_failure(discord.InteractionResponded(_FakeInteraction()))
+    assert 'deja confirmata' in out, out
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

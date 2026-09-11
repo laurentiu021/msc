@@ -385,6 +385,64 @@ def test_247_switched_on_during_the_grace_period_is_respected():
 
 # --- 4. valorile numerice din env nu au voie sa omoare procesul --------------
 
+def _interaction_log(data, kind='component'):
+    """Cheama on_interaction si intoarce ce a scris in log."""
+    import datetime
+    import io
+    import logging
+
+    import discord
+
+    class _Fake:
+        created_at = discord.utils.utcnow() - datetime.timedelta(seconds=1.5)
+        type = type('T', (), {'name': kind})()
+
+    fake = _Fake()
+    fake.data = data
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    level = bot_mod.log.level
+    bot_mod.log.addHandler(handler)
+    bot_mod.log.setLevel(logging.INFO)
+    try:
+        asyncio.run(bot_mod.on_interaction(fake))
+    finally:
+        bot_mod.log.removeHandler(handler)
+        bot_mod.log.setLevel(level)
+    return stream.getvalue()
+
+
+def test_every_interaction_leaves_a_line_with_its_age():
+    """Fara ea, o apasare de buton nu lasa NICIO urma.
+
+    Cele doua cauze ale unui "Gogu didn't respond in time" nu se puteau deosebi:
+    clickul a ajuns si am fost prea lenți, sau nu a ajuns la niciun handler — caz
+    in care discord.py il arunca cu un `_log.debug`, invizibil la nivel INFO.
+    """
+    out = _interaction_log({'custom_id': 'skip'})
+    assert 'skip' in out, out
+    assert 'component' in out, out
+    assert '1.5' in out or '1.4' in out or '1.6' in out, (
+        f'varsta interactiunii nu e raportata, deci lentoarea rămâne invizibila: {out}')
+
+
+def test_the_interaction_log_never_carries_user_data():
+    """Repo-ul e public si logurile ajung in el. `custom_id` e al nostru."""
+    out = _interaction_log({'custom_id': 'skip', 'values': ['ceva ascultat']})
+    assert 'ceva ascultat' not in out, out
+    slash = _interaction_log({'name': 'play',
+                              'options': [{'value': 'titlul cautat'}]},
+                             kind='application_command')
+    assert 'play' in slash and 'titlul cautat' not in slash, slash
+
+
+def test_an_interaction_without_data_is_still_logged():
+    """O interactiune fara `data` (un modal gol, un payload nou) nu are voie sa
+    arunce dintr-un handler de eveniment: discord.py inghite excepția si linia
+    dispare exact cand ai nevoie de ea."""
+    assert '?' in _interaction_log(None)
+
+
 def test_a_typo_in_a_numeric_env_var_does_not_kill_the_boot():
     """Se scriu de mana in Railway, fara nicio validare si fara mesaj de eroare.
 
