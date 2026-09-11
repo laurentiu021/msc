@@ -211,6 +211,7 @@ async def idle_timer(ctx):
     """
     state = get_state(ctx.guild.id)
     cancelled = False
+    decision = None
     try:
         await asyncio.sleep(IDLE_TICK_SEC)
         vc = ctx.voice_client
@@ -264,7 +265,8 @@ async def idle_timer(ctx):
         # avea niciun efect) si doar in 24/7, unde botul trebuie sa rezista.
         # call_soon amana pana task-ul e done, ca start_timeout sa nu se
         # anuleze pe el insusi.
-        if not cancelled and state.always_on:
+        if not cancelled and (state.always_on
+                              or (decision is not None and decision.rearm)):
             bot.loop.call_soon(start_timeout, ctx)
 
 

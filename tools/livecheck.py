@@ -45,6 +45,8 @@ def _parse_args():
                    help='nu sterge mesajele de test la final')
     p.add_argument('--ipv6', action='store_true',
                    help='nu forta IPv4 (vezi comentariul de la _allow_ipv6)')
+    p.add_argument('--soak', type=int, default=0, metavar='MINUTE',
+                   help='doar proba de anduranta: !play + !247, apoi urmarire')
     return p.parse_args()
 
 
@@ -95,6 +97,25 @@ TRACK_SEARCH = 'gheboasa gasca zurli'
 TRACK_LIVE = 'https://www.youtube.com/watch?v=jfKfPfyJRdk'   # lofi girl, live permanent
 TRACK_GONE = 'https://www.youtube.com/watch?v=aaaaaaaaaaa'   # id inexistent
 TRACK_LONG = 'https://www.youtube.com/watch?v=5qap5aO4i9A'   # YouTube: 'we are processing'
+
+
+class Ghost:
+    """Un "membru" aflat in canalul de voce, fara sa fie nimeni acolo.
+
+    Comenzile se uita doar la `author.voice.channel` (ca sa stie unde sa intre) si
+    la egalitatea cu canalul botului (gardul de sesiune). Cu asta, proba de
+    anduranta ruleaza nesupravegheat — altfel ar cere pe cineva conectat cateva ore.
+    """
+
+    bot = False
+
+    def __init__(self, channel):
+        self.id = 1
+        self.name = self.display_name = 'proba-anduranta'
+        self.mention = '<@1>'
+        self.voice = type('V', (), {'channel': channel, 'mute': False,
+                                    'self_mute': False, 'deaf': False,
+                                    'self_deaf': False})()
 
 
 class Result:
@@ -540,6 +561,63 @@ async def commands_on_an_empty_session_do_not_explode(live, r):
         await asyncio.sleep(0.4)
 
 
+async def soak(live, r, minutes):
+    """Scenariul de weekend: porneste muzica, aprinde 24/7, apoi doar urmareste.
+
+    Aici nu se mai da nicio comanda. Tot ce se intampla mai departe — piesa
+    urmatoare, umplerea cozii, un edge de YouTube care cade, un blip de voce — vine
+    din bot. Ce se masoara e exact ce se aude: cat timp NU iese audio.
+    """
+    ghost = Ghost(live.voice_channel)
+    mark = live.since()
+    await live.run_command(f'!play {TRACK_SEARCH}', author=ghost)
+    if not r.check(await live.wait(lambda: live.vc and live.vc.is_playing(), 120),
+                   'a pornit prima piesa'):
+        r.note('ce a spus: ' + live.text_of(mark)[:300])
+        return
+    await live.run_command('!247', author=ghost)
+    r.check(live.state.always_on, '24/7 activ')
+
+    deadline = time.monotonic() + minutes * 60
+    titles, gaps = [], []
+    silent_since = None
+    disconnects = 0
+    max_queue, min_queue = 0, 10 ** 6
+    while time.monotonic() < deadline:
+        vc = live.vc
+        connected = bool(vc and vc.is_connected())
+        playing = bool(connected and (vc.is_playing() or vc.is_paused()))
+        title = live.state.last_title
+        if not connected:
+            disconnects += 1
+        if title and (not titles or titles[-1] != title):
+            titles.append(title)
+            print(f'[soak] piesa {len(titles)}: {title[:70]}', flush=True)
+        if playing:
+            if silent_since is not None:
+                gaps.append(time.monotonic() - silent_since)
+                silent_since = None
+        elif silent_since is None:
+            silent_since = time.monotonic()
+        q = len(live.state.queue)
+        max_queue, min_queue = max(max_queue, q), min(min_queue, q)
+        await asyncio.sleep(5)
+
+    if silent_since is not None:
+        gaps.append(time.monotonic() - silent_since)
+    worst = max(gaps) if gaps else 0.0
+    r.note(f'{len(titles)} piese in {minutes} min, coada intre {min_queue} si '
+           f'{max_queue}, {len(gaps)} pauze, cea mai lunga {worst:.0f}s')
+    r.check(disconnects == 0, f'nu a ieșit din canal ({disconnects} probe deconectate)')
+    r.check(len(titles) >= 2, f'a avansat prin coada ({len(titles)} piese)')
+    r.check(min_queue >= 1, f'coada nu a ajuns niciodata goala (minim {min_queue})')
+    # 45s: o piesa noua cere extractie + transfer, si prefetch-ul aduce doar una in
+    # avans. Peste atat, tacerea se aude ca o defectiune.
+    r.check(worst < 45, f'nicio pauza mai lunga de 45s (cea mai lunga {worst:.0f}s)')
+    errors = live.state._consecutive_errors
+    r.check(errors == 0, f'fara erori in lanț la final ({errors})')
+
+
 # --- rulare -------------------------------------------------------------------
 
 async def drive():
@@ -578,6 +656,8 @@ async def drive():
         return 2
 
     members = [m for m in voice.members if not m.bot]
+    if not members and ARGS.soak:
+        members = [Ghost(voice)]
     if not members:
         print(f'[live] nu e nimeni in {voice.name}: intra in canal si porneste iar '
               f'(am nevoie de un membru real ca sa dau comenzile in numele lui)',
@@ -604,6 +684,31 @@ async def drive():
 
     wanted = {n.strip() for n in ARGS.only.split(',') if n.strip()}
     results = []
+    if ARGS.soak:
+        r = Result(f'soak_{ARGS.soak}min')
+        t0 = time.perf_counter()
+        print(f'[live] === anduranta {ARGS.soak} minute', flush=True)
+        try:
+            await soak(live, r, ARGS.soak)
+        except Exception as e:
+            r.failures.append(f'FAIL excepție: {type(e).__name__}: {e}')
+            traceback.print_exc()
+        r.seconds = time.perf_counter() - t0
+        for line in r.notes + r.failures:
+            if line.strip():
+                print('   ' + line, flush=True)
+        try:
+            await live.cleanup_session()
+        except Exception:
+            traceback.print_exc()
+        for m in live.mine + live.sent:
+            try:
+                await m.delete()
+            except Exception:
+                pass
+        print(f'[live] anduranta: {"FAIL" if r.failures else "OK"} '
+              f'({r.seconds / 60:.1f} min)', flush=True)
+        return 1 if r.failures else 0
     try:
         for fn in SCENARIOS:
             if wanted and fn.__name__ not in wanted:

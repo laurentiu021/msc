@@ -24,6 +24,11 @@ class IdleDecision:
     action: str
     resume_autoplay: bool = False
     reason: str = ''
+    # Cere explicit re-armarea timer-ului. In afara 24/7 tick-ul nu se re-armeaza
+    # (altfel `cancel_timeout` n-ar avea efect), dar cand tick-ul nu face nimic
+    # DOAR fiindca aȘteapta o incarcare, altcineva trebuie sa decida mai tarziu —
+    # si nimeni nu o va face daca timer-ul moare aici.
+    rearm: bool = False
 
 
 def decide_idle_action(state, *, connected: bool, playing: bool, paused: bool,
@@ -64,5 +69,15 @@ def decide_idle_action(state, *, connected: bool, playing: bool, paused: bool,
         return IdleDecision(RADIO, reason='24/7 activ')
 
     if idle:
+        if state.is_loading:
+            # Simetric cu ramura de 24/7 de mai sus. `is_loading` inseamna ca o
+            # rezolvare CHIAR e in curs si va porni redarea, deci "nu se reda
+            # nimic" e temporar, nu inactivitate. Fara asta, o descarcare mai lunga
+            # decat un tick (retry-uri, un edge lent) scotea botul din canal exact
+            # in timp ce ii aducea piesa, iar redarea eșua apoi pe voce dispăruta.
+            # Ajunge aici doar cand cineva a armat timer-ul peste o incarcare in
+            # curs — `!247` OFF si ramura de playlist ilizibil se uita amandoua
+            # doar la `is_playing()`.
+            return IdleDecision(NOTHING, rearm=True, reason='o incarcare e in curs')
         return IdleDecision(DISCONNECT, reason='inactiv, fara 24/7')
     return IdleDecision(NOTHING, reason='se reda' if connected else 'neconectat')

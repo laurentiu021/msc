@@ -42,6 +42,12 @@ TABLE = [
      dict(always_on=False), dict(paused=True), NOTHING, False),
     ('fara 24/7, deconectat -> nimic',
      dict(always_on=False), dict(connected=False), NOTHING, False),
+    # Simetric cu 24/7: o incarcare in curs nu e inactivitate. Fara asta, o
+    # descarcare mai lunga decat un tick scotea botul din canal exact in timp ce
+    # ii aducea piesa. Se ajunge aici cand cineva a armat timer-ul peste o
+    # incarcare — `!247` OFF si playlist-ul ilizibil se uita doar la is_playing().
+    ('fara 24/7, dar o incarcare e in curs -> nimic',
+     dict(always_on=False, is_loading=True), dict(), NOTHING, False),
 
     ('24/7 cu radio pornit -> radio',
      dict(always_on=True, autoplay=True, last_url='u'), dict(), RADIO, False),
@@ -80,6 +86,38 @@ def test_the_decision_table():
             wrong.append(f'{name}: {d.action}/resume={d.resume_autoplay} '
                          f'!= {expected}/resume={resume}')
     assert not wrong, 'decizii greșite:\n  ' + '\n  '.join(wrong)
+
+
+def test_a_load_in_flight_keeps_the_timer_alive():
+    """NOTHING fara re-armare, in afara 24/7, inseamna un timer mort.
+
+    Tick-ul se re-armeaza singur doar in 24/7 (altfel `cancel_timeout` n-ar avea
+    efect). Deci daca tick-ul nu face nimic DOAR fiindca aȘteapta o incarcare,
+    trebuie sa ceara explicit re-armarea — altfel nimeni nu mai decide nimic pentru
+    sesiunea asta si botul rămâne in canal, tacut, la infinit.
+    """
+    d = _decide(_state(always_on=False, is_loading=True))
+    assert d.action == NOTHING, d
+    assert d.rearm is True, 'timer-ul moare aici si nimic nu-l mai reia'
+    # Iar cazul obișnuit NU are voie sa se re-armeze: acolo chiar plecam.
+    assert _decide(_state(always_on=False)).rearm is False
+
+
+def test_the_caller_honours_the_rearm_request():
+    """O decizie cu rearm=True pe care apelantul o ignora nu repara nimic."""
+    import ast
+    import inspect
+
+    import bot as bot_mod
+
+    src = inspect.getsource(bot_mod.idle_timer)
+    tree = ast.parse(src.strip())
+    finals = [n for node in ast.walk(tree) if isinstance(node, ast.Try)
+              for n in node.finalbody]
+    assert finals, 'idle_timer nu mai are finally: re-armarea s-a mutat?'
+    text = ' '.join(ast.unparse(n) for n in finals)
+    assert 'rearm' in text, (
+        'finally-ul nu consulta decision.rearm: cererea de re-armare e ignorata')
 
 
 def test_every_decision_carries_a_reason():
