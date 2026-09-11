@@ -25,4 +25,7 @@ data/
 logs.*.json
 
 tests/
+# Emulatorul de Discord si YouTube: unelte de dezvoltare, nu ceva ce ruleaza
+# in producție. Nu au ce sa caute in straturile imaginii.
+tools/
 README.md

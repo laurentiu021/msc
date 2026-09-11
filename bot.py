@@ -41,7 +41,7 @@ from music.state import (get_state, guild_states, mark_paused, mark_resumed,
 from music.idle import DISCONNECT, RADIO, decide_idle_action
 from music.utils import DISCORD_ERRORS, safe_delete
 from music.autoplay import prefill_autoplay_queue
-from music import diag
+from music import canary, diag
 from music import ytdlp as ytdlp_mod
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -483,6 +483,48 @@ def _start_heartbeat():
         log.info("Heartbeat pornit")
 
 
+# Cat de scurta trebuie sa fie o sesiune ca repornirea sa fie suspecta. Railway
+# renunța dupa `restartPolicyMaxRetries` incercari, deci o bucla de crash-uri se
+# termina cu botul MORT pana observa cineva — iar nimic nu anunța asta.
+CRASH_LOOP_UPTIME_SEC = 300
+_UPTIME_FILE = os.path.join(DOWNLOAD_DIR, os.pardir, '.last_boot')
+
+
+async def _announce_boot() -> None:
+    """Spune in canalul de status ca procesul a repornit, si cat a trait inainte.
+
+    Pe volum, nu in memorie: informația care conteaza e chiar cea pierduta la
+    repornire. Un `!help` nu spune nimic despre asta, si Railway nu alerteaza.
+    """
+    previous = None
+    path = os.path.abspath(_UPTIME_FILE)
+    try:
+        with open(path, encoding='utf-8') as fh:
+            started, ended = (float(x) for x in fh.read().split(',')[:2])
+        previous = max(0.0, ended - started)
+    except (OSError, ValueError):
+        pass                                   # prima pornire, sau volum nou
+    now = time.time()
+    try:
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(f"{now},{now}")
+    except OSError as e:
+        log.warning(f"Nu am putut nota momentul pornirii: {e}")
+
+    if previous is None:
+        log.info("Prima pornire pe acest volum")
+        return
+    minutes = previous / 60
+    log.info(f"Repornire: sesiunea anterioara a trait {minutes:.1f} minute")
+    if previous < CRASH_LOOP_UPTIME_SEC:
+        await announce(
+            f"🔁 Am repornit. Sesiunea anterioara a trait doar "
+            f"**{previous:.0f}s** — asta arata ca o bucla de crash-uri, iar "
+            f"Railway renunța dupa cateva incercari.")
+    else:
+        await announce(f"🔁 Am repornit (uptime anterior: {minutes:.0f} min).")
+
+
 @bot.event
 async def on_ready():
     # Inainte de orice await: chiar daca setup_hook a rulat deja, o bataie oprita
@@ -521,6 +563,7 @@ async def on_ready():
     except (discord.HTTPException, OSError, asyncio.TimeoutError) as e:
         # Statusul afisat e cosmetic; nu are voie sa rupa restul lui on_ready.
         log.warning(f"Nu am putut seta statusul: {e}")
+    await _announce_boot()
 
 
 @bot.event
@@ -579,6 +622,31 @@ _LAST_BEAT = time.monotonic()
 _BOOT_MONOTONIC = time.monotonic()
 
 
+# Canalul in care botul isi anunța propriile probleme. Fara el, o repornire la 3
+# dimineața si o regresie de la YouTube nu se vad nicaieri: Railway nu alerteaza,
+# iar domeniul public a fost sters intenționat, deci nu exista nici monitorizare
+# externa. Neconfigurat = totul merge la fel, doar in loguri.
+STATUS_CHANNEL_ID = env_num('STATUS_CHANNEL_ID', 0, low=0, high=2**63)
+# Cat de des intreaba canarul YouTube-ul dacă mai da ce trebuie.
+CANARY_EVERY_SEC = env_num('CANARY_EVERY_SEC', 86400, low=600, high=7 * 86400)
+_last_canary = None
+
+
+async def announce(text: str) -> None:
+    """Un mesaj in canalul de status. Tace complet daca nu e configurat."""
+    if not STATUS_CHANNEL_ID:
+        return
+    channel = bot.get_channel(STATUS_CHANNEL_ID)
+    if channel is None:
+        log.warning("STATUS_CHANNEL_ID=%s nu e un canal pe care il vad",
+                    STATUS_CHANNEL_ID)
+        return
+    try:
+        await channel.send(text)
+    except DISCORD_ERRORS as e:
+        log.warning(f"Nu am putut anunța in canalul de status: {e}")
+
+
 async def _heartbeat():
     """Bate la 15s, reface instantaneul la 60s, curata discul la 10 minute.
 
@@ -589,6 +657,9 @@ async def _heartbeat():
     global _LAST_BEAT
     last_sweep = 0.0
     last_snapshot = 0.0
+    # Prima verificare NU la boot: pornirea are deja destul de facut, iar un canar
+    # in acel moment ar concura cu prima redare pentru singurul slot de cereri.
+    last_canary = time.monotonic()
     while True:
         try:
             _LAST_BEAT = time.monotonic()
@@ -600,6 +671,11 @@ async def _heartbeat():
                 last_sweep = now
                 keep = {st.current_file for st in guild_states.values() if st.current_file}
                 await bot.loop.run_in_executor(None, lambda: trim_download_cache(keep))
+            if now - last_canary >= CANARY_EVERY_SEC:
+                last_canary = now
+                global _last_canary
+                _last_canary = await canary.check_and_report(
+                    loop=bot.loop, previous=_last_canary, announce=announce)
         except asyncio.CancelledError:
             raise
         except Exception:

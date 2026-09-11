@@ -543,6 +543,82 @@ def test_every_download_attempt_has_a_size_cap():
         assert isinstance(cap, int) and 0 < cap <= MAX_DOWNLOAD_BYTES, (fmt, cap)
 
 
+def _formats(*specs):
+    out = []
+    for acodec, vcodec in specs:
+        out.append({'acodec': acodec, 'vcodec': vcodec, 'url': 'https://x/f',
+                    'protocol': 'https', 'format_id': acodec})
+    return out
+
+
+def test_opus_is_recognised_only_when_it_is_audio_only_and_playable():
+    from music.config import has_opus_audio
+
+    assert has_opus_audio(_formats(('opus', 'none'))) is True
+    assert has_opus_audio(_formats(('mp4a.40.2', 'none'))) is False
+    # Muxat: audio-ul lui e opus, dar ar aduce si video pe un bot audio.
+    assert has_opus_audio(_formats(('opus', 'avc1.42001E'))) is False
+    assert has_opus_audio([]) is False
+    assert has_opus_audio(None) is False
+    assert has_opus_audio([{'acodec': 'opus', 'vcodec': 'none'}]) is False
+
+
+def _pick(chain_results):
+    """Ruleaza `_pick_format_source` cu extractii controlate per veriga."""
+    import asyncio
+
+    from music import resolve as resolve_mod
+
+    calls = []
+
+    async def fake_extract(opts, query, download=False, loop=None, stage=''):
+        calls.append(stage)
+        return chain_results[len(calls) - 1]
+
+    saved = (resolve_mod.ytdlp.extract, resolve_mod.cookies_available)
+    resolve_mod.ytdlp.extract = fake_extract
+    resolve_mod.cookies_available = lambda: True
+    try:
+        out = asyncio.run(resolve_mod._pick_format_source(
+            'https://www.youtube.com/watch?v=x', None))
+    finally:
+        resolve_mod.ytdlp.extract, resolve_mod.cookies_available = saved
+    return out, calls
+
+
+def test_an_aac_only_result_is_not_accepted_while_a_chain_link_remains():
+    """Contul din cookies primeste SABR-only, care Șterge formatele opus.
+
+    Aceeasi piesa cerută ca guest are itag 251 opus la ~139 kbps — masurat contra
+    YouTube-ului real. Opus trece prin `-c:a copy`; AAC inseamna reencodare, si se
+    aude. Lanțul are exact doua verigi, deci costul e O extractie in plus, si numai
+    cand prima nu a dat opus.
+    """
+    aac = {'id': 'x', 'formats': _formats(('mp4a.40.2', 'none'))}
+    opus = {'id': 'x', 'formats': _formats(('opus', 'none'))}
+    (selected, clients, use_cookies, _err), calls = _pick([aac, opus])
+    assert len(calls) == 2, f'nu a mai incercat a doua veriga: {calls}'
+    assert use_cookies is False, 'a rămas pe veriga cu cookies, fara opus'
+    assert selected is opus
+
+
+def test_opus_on_the_first_link_costs_no_extra_request():
+    opus = {'id': 'x', 'formats': _formats(('opus', 'none'))}
+    (selected, clients, use_cookies, _err), calls = _pick([opus, opus])
+    assert len(calls) == 1, f'a cerut o extractie in plus degeaba: {calls}'
+    assert use_cookies is True
+    assert selected is opus
+
+
+def test_aac_everywhere_is_still_played():
+    """Mai bine reencodat decat nimic: fallback-ul nu are voie sa dispara."""
+    aac = {'id': 'x', 'formats': _formats(('mp4a.40.2', 'none'))}
+    (selected, clients, use_cookies, _err), calls = _pick([aac, dict(aac)])
+    assert len(calls) == 2, calls
+    assert selected is not None, 'a refuzat sa redea desi exista un format redabil'
+    assert clients is not None, 'a pierdut clientul care a functionat'
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

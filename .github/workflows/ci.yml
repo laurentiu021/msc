@@ -28,6 +28,29 @@ jobs:
         # nenul la orice eșec, inclusiv la un test care crapa in loc sa asserte.
         run: python tests/run_all.py
 
+  emulator:
+    # Sesiuni de utilizator contra botului REAL, cu Discord si YouTube false.
+    # Prinde exact clasa pe care testele unitare nu o vad: butoane care nu mai
+    # sunt inregistrate, o sesiune care se blocheaza, un panou care minte, un
+    # payload pe care Discord l-ar refuza. Are nevoie de FFmpeg fiindca redarea e
+    # reala: cadre Opus adevarate, citite la cadenta de 20ms.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install pinned dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+      - name: Run every end-user scenario
+        # Fara --real-youtube: runner-ul GitHub e un IP de datacenter, la fel de
+        # blocat ca oricare altul, si nu primeste cookie-urile de producție.
+        # Latentele false sunt cele masurate in logurile reale.
+        run: python -B tools/simulate.py
+
   image:
     runs-on: ubuntu-latest
     steps:

@@ -23,7 +23,8 @@ from music import ytdlp
 from music.config import (HLS_MAX_BYTES, MAX_DOWNLOAD_BYTES, MAX_TRACK_SECONDS,
                           clear_ydl_reason, cookies_available,
                           count_real_formats, duration_within_limits,
-                          has_real_formats, last_ydl_reason, log,
+                          has_opus_audio, has_real_formats,
+                          last_ydl_reason, log,
                           make_download_opts, make_search_opts,
                           search_query, yt_client_args, WEB_CLIENTS)
 from music.errors import YtdlpTimeout, diagnose_error
@@ -247,6 +248,9 @@ async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple
     chains = COOKIE_CHAIN + GUEST_CHAIN if cookies_available() else GUEST_CHAIN
     selected = None
     raw_error = None
+    # Primul candidat redabil dar FARA opus. Nu il intoarcem imediat: lanțul mai
+    # are o veriga, iar diferenta e audibila. Vezi `has_opus_audio`.
+    without_opus = None
     for clients, use_cookies in chains:
         label = '+'.join(clients)
         if use_cookies and not cookies_available():
@@ -268,11 +272,27 @@ async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple
                      f"({count_real_formats(fmts)} redabile)")
             selected = candidate
             if has_real_formats(fmts):
-                log.info(f"Formate redabile cu client={label}, cookies={use_cookies}")
-                return selected, clients, use_cookies, raw_error
+                if has_opus_audio(fmts):
+                    log.info(f"Formate redabile cu client={label}, "
+                             f"cookies={use_cookies}")
+                    return selected, clients, use_cookies, raw_error
+                # Redabil, dar numai AAC: asta inseamna o reencodare in loc de
+                # `-c:a copy`. Lanțul are exact doua verigi (cookies, apoi guest),
+                # deci a continua costa O extractie in plus — si numai in cazul
+                # asta, nu la fiecare piesa.
+                if without_opus is None:
+                    without_opus = (candidate, clients, use_cookies)
+                    log.info(f"[{label}|cookies={use_cookies}] redabil dar fara "
+                             f"opus; mai incerc o veriga pentru calitate")
+                continue
         except Exception as e:
             raw_error = str(e)[:600]
             log.warning(f"Extractia a eșuat cu client={label}: {e}", exc_info=True)
+    if without_opus is not None:
+        candidate, clients, use_cookies = without_opus
+        log.info(f"Niciun opus in tot lanțul; folosesc "
+                 f"{'+'.join(clients)}|cookies={use_cookies} (reencodare)")
+        return candidate, clients, use_cookies, raw_error
     return selected, None, False, raw_error
 
 

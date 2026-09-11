@@ -190,6 +190,18 @@ def search_query(text: str) -> str:
 
 
 # Guest mode + PO Token (fara cookies — mai rapid si mai stabil)
+# Runtime-urile JS pentru challenge-ul `n` al YouTube-ului.
+#
+# yt-dlp activeaza implicit DOAR deno. Node e oricum in imagine (ruleaza serverul
+# de PO token) si rezolva acelasi challenge — verificat contra YouTube-ului real:
+# cu node activat, aceeasi piesa da 30 de formate si itag 251 opus; fara niciun
+# runtime, "n challenge solving failed" si formatele opus dispar.
+#
+# Deci amandoua, nu unul: daca instalarea de deno se rupe la un build sau
+# solver-ul lui iese din sincron cu YouTube, extractia continua pe node in loc sa
+# piarda tacit jumatate din formate.
+JS_RUNTIMES = {'deno': {}, 'node': {}}
+
 YDL_OPTS_SEARCH = {
     'noplaylist': True,
     'quiet': False,
@@ -198,6 +210,7 @@ YDL_OPTS_SEARCH = {
     # direct la extractorul de cautare al YouTube, deci nu mai exista nicio etapa
     # de procesare pe care `extract_flat` sa o poata sari.
     'source_address': '0.0.0.0',
+    'js_runtimes': JS_RUNTIMES,
     'socket_timeout': 10,
     'skip_download': True,
     'format': 'best',
@@ -274,6 +287,7 @@ YDL_OPTS_DOWNLOAD = {
     # un apel de logging formatat degeaba, de zeci de ori pe piesa.
     'noprogress': True,
     'source_address': '0.0.0.0',
+    'js_runtimes': JS_RUNTIMES,
     'retries': 3,
     'socket_timeout': 15,
     'extractor_args': _YT_EXTRACTOR_ARGS,
@@ -735,6 +749,25 @@ def count_real_formats(formats_list: list) -> int:
 def has_real_formats(formats_list: list) -> bool:
     """Verifica daca lista contine cel putin un format redabil."""
     return count_real_formats(formats_list) > 0
+
+
+def has_opus_audio(formats_list: list) -> bool:
+    """Exista un format audio-only in opus?
+
+    Conteaza pentru CALITATE, nu pentru functionare: opus e singurul care trece
+    prin `-c:a copy`, adica exact octetii de la YouTube. Orice altceva (AAC din
+    itag 140, sau audio-ul unui format muxat) inseamna o reencodare.
+
+    Masurat: contul din cookies primeste "the SABR-only streaming experiment", care
+    Șterge formatele opus si lasa doar AAC; aceeasi piesa cerută ca guest are itag
+    251 opus la ~139 kbps.
+    """
+    for fmt in formats_list or []:
+        if (fmt.get('vcodec') in ('none', None)
+                and str(fmt.get('acodec') or '').startswith('opus')
+                and fmt.get('url')):
+            return True
+    return False
 
 
 # Doar -vn. Verificat in discord.py 2.7.1 instalat: FFmpegOpusAudio emite deja
