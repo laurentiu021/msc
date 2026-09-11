@@ -680,6 +680,26 @@ def test_every_numeric_env_read_goes_through_the_helper():
         + '\n'.join(offenders))
 
 
+# --- rabdarea de reconectare vs. timeout-ul de conectare ----------------------
+
+def test_the_reconnect_grace_outlasts_a_fresh_handshake():
+    """Reconectarea trece prin exact acelasi handshake ca o conectare noua.
+
+    Masurat in producție pe 2026-09-11: un blip la 19:20:51 UTC a avut nevoie de
+    16.6 secunde doar pentru "Voice handshake complete" — o reasignare de server de
+    voce — iar verificarea de sesiune a picat la 3 secunde dupa ce conexiunea
+    revenise. Cu rabdarea sub `VOICE_CONNECT_TIMEOUT`, un handshake cu cateva
+    secunde mai lent Șterge o sesiune VIE: coada golita, 24/7 stins, bot tacut.
+    """
+    import bot as bot_mod
+    from music import commands as commands_mod
+
+    assert bot_mod.VOICE_RECONNECT_GRACE_SEC > commands_mod.VOICE_CONNECT_TIMEOUT, (
+        f'rabdarea de reconectare ({bot_mod.VOICE_RECONNECT_GRACE_SEC}s) e sub '
+        f'timeout-ul de conectare ({commands_mod.VOICE_CONNECT_TIMEOUT}s): un '
+        f'handshake lent ar Șterge o sesiune care s-a intors')
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

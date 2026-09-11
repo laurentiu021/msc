@@ -288,7 +288,22 @@ EMPTY_CHANNEL_GRACE_SEC = 20
 # Cat aȘteptam confirmarea ca sesiunea de voce s-a incheiat CHIAR. Vezi
 # comentariul din `on_voice_state_update`: un blip al websocket-ului de voce
 # produce exact acelasi eveniment ca o deconectare adevarata.
-VOICE_RECONNECT_GRACE_SEC = 20
+#
+# Mai MARE decat `VOICE_CONNECT_TIMEOUT` (25s), si nu arbitrar: reconectarea trece
+# prin exact acelasi handshake ca o conectare noua, deci nu are voie sa aiba mai
+# putin timp sa se dovedeasca. Cu 20s era sub el, iar marginea s-a vazut in
+# producție pe 2026-09-11: un blip la 19:20:51 UTC a avut nevoie de 16.6 secunde
+# doar pentru "Voice handshake complete" (reasignare de server de voce), si
+# verificarea a picat la 3 secunde dupa ce conexiunea revenise. Un handshake cu
+# 4 secunde mai lent ar fi Șters o sesiune vie: coada golita, 24/7 stins, botul
+# tacut pana observa cineva.
+#
+# Costul unei ferestre mai lungi e mic si masurabil: pe o deconectare REALA starea
+# rămâne nefolosita cateva zeci de secunde in plus. Caile deliberate (`!stop`,
+# butonul Stop, `!247` off, canal golit) isi curata singure starea inainte de a
+# pleca, iar `process_play` si `_play_next_async` ies curat cand clientul de voce
+# nu mai e — deci nimeni nu vede diferenta.
+VOICE_RECONNECT_GRACE_SEC = 45
 
 
 async def _end_voice_session(guild, generation):
