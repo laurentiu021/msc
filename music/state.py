@@ -44,6 +44,14 @@ class GuildState:
         # prefetch nu scurge nimic.
         self.prefetch_task = None
         self._lock = asyncio.Lock()
+        # Umplerea cozii de autoplay, serializata per guild. Tick-ul de
+        # inactivitate cheama prefill-ul fara sa marcheze `is_loading` (decizia lui
+        # doar CITESTE steagul), deci un buton Autoplay apasat in fereastra de
+        # cateva secunde a unui prefill trecea de propria verificare si pornea un al
+        # doilea: amandoua calculau `needed` din aceeasi coada goala, deci coada
+        # ajungea la dublul țintei si plateam de doua ori extractiile si cota de
+        # API — pe un IP care oricum ne limiteaza.
+        self._prefill_lock = asyncio.Lock()
         self.current_file = None
         self.always_on = False
         self._consecutive_errors = 0

@@ -41,14 +41,27 @@ def artist_key(title, channel='') -> str:
 
 async def prefill_autoplay_queue(state: GuildState, bot_loop,
                                  target: int = AUTOPLAY_QUEUE_TARGET):
-    """Populeaza coada pana la target piese.
-    
+    """Populeaza coada pana la target piese, si niciodata de doua ori in paralel.
+
     Strategii in ordine:
     1. YouTube API related videos (1 request = 100 units, dar stabil)
     2. yt-dlp YouTube Mix (RD playlist, gratis dar instabil)
     3. YouTube API search fallback (bazat pe titlu)
     4. yt-dlp search fallback (ultima sansa)
+
+    Serializarea sta AICI, nu in apelanti. Cei cinci se pazesc fiecare cum poate —
+    butonul si `!247` prin `is_loading`, redarea prin token-ul de incarcare — dar
+    tick-ul de inactivitate doar CITESTE steagul fara sa il ia, deci un buton apasat
+    in fereastra de cateva secunde a unui prefill trecea de propria verificare.
+    Amandoua calculau atunci `needed` din aceeasi coada goala: coada ajungea la
+    dublul țintei, iar extractiile si cota de API se plateau de doua ori. Al doilea
+    apel aȘteapta acum si recalculeaza — cu coada plina, nu mai cheltuie nimic.
     """
+    async with state._prefill_lock:
+        return await _prefill(state, bot_loop, target)
+
+
+async def _prefill(state: GuildState, bot_loop, target: int):
     needed = target - len(state.queue)
     if needed <= 0:
         return

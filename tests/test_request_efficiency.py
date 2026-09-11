@@ -532,6 +532,76 @@ def test_refill_threshold_is_below_the_target():
         f'un refill la fiecare piesa')
 
 
+# --- doua prefill-uri in paralel -----------------------------------------------
+
+def test_two_prefills_at_once_do_not_double_fill_or_double_pay():
+    """Tick-ul de inactivitate cheama prefill-ul fara sa ia `is_loading`.
+
+    Decizia lui doar CITESTE steagul, deci un buton Autoplay apasat in fereastra de
+    cateva secunde a unui prefill trecea de propria verificare si pornea un al doilea.
+    Amandoua calculau `needed` din aceeasi coada goala: coada ajungea la dublul
+    țintei, iar extractiile si cota de API se plateau de doua ori — pe un IP care
+    oricum ne limiteaza.
+    """
+    st = GuildState()
+    st.last_url = 'https://www.youtube.com/watch?v=seed00'
+    st.last_title = 'Artist - Piesa'
+    strategies = []
+
+    async def fake_mix(state, loop, origin_id, skip_ids, needed, artist_counts=None):
+        strategies.append(needed)
+        await asyncio.sleep(0.05)          # o cerere de retea dureaza
+        added = 0
+        for n in range(needed):
+            if autoplay._add_to_queue(state, f'vid{len(state.queue)}{n}',
+                                      f'Cineva{n} - Piesa{n}', skip_ids, artist_counts):
+                added += 1
+        return added
+
+    saved = autoplay._try_ytdlp_mix
+    autoplay._try_ytdlp_mix = fake_mix
+
+    async def both():
+        await asyncio.gather(
+            autoplay.prefill_autoplay_queue(st, None, target=6),
+            autoplay.prefill_autoplay_queue(st, None, target=6))
+
+    try:
+        asyncio.run(both())
+    finally:
+        autoplay._try_ytdlp_mix = saved
+
+    assert len(st.queue) == 6, f'coada a depasit ținta: {len(st.queue)}'
+    assert len(strategies) == 1, (
+        f'am plătit strategiile de {len(strategies)} ori pentru aceeasi coada')
+
+
+def test_a_second_prefill_after_the_first_still_tops_up():
+    """Serializarea nu are voie sa devina "unul singur, si restul degeaba"."""
+    st = GuildState()
+    st.last_url = 'https://www.youtube.com/watch?v=seed00'
+    st.last_title = 'Artist - Piesa'
+
+    async def fake_mix(state, loop, origin_id, skip_ids, needed, artist_counts=None):
+        added = 0
+        for n in range(needed):
+            if autoplay._add_to_queue(state, f'v{len(state.queue)}x{n}',
+                                      f'Altul{n} - Piesa{n}', skip_ids, artist_counts):
+                added += 1
+        return added
+
+    saved = autoplay._try_ytdlp_mix
+    autoplay._try_ytdlp_mix = fake_mix
+    try:
+        asyncio.run(autoplay.prefill_autoplay_queue(st, None, target=3))
+        assert len(st.queue) == 3, st.queue
+        st.queue.pop(0)
+        asyncio.run(autoplay.prefill_autoplay_queue(st, None, target=3))
+    finally:
+        autoplay._try_ytdlp_mix = saved
+    assert len(st.queue) == 3, f'nu a completat coada scazuta: {len(st.queue)}'
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.
