@@ -443,6 +443,74 @@ def test_the_player_no_longer_holds_a_second_copy_of_the_rules():
         assert moved not in src, f'player.py mai are o copie a {moved!r}'
 
 
+def test_a_human_request_is_not_filtered_against_the_previous_track():
+    """Bug-ul prins de emulator: nu puteai pune aceeasi piesa a doua oara.
+
+    `is_clean` respinge orice titlu care conține primele 15 caractere ale piesei
+    anterioare — regula gandita pentru autoplay, ca radioul sa nu re-propuna ce a
+    dat deja. `process_play` o aplica insa peste ORICE cautare, deci un om care
+    cerea a doua data aceeasi piesa (sau o alta piesa a aceluiasi artist, fiindca
+    "Luis Gabriel - " se potriveste cu toate ale lui) primea "toate rezultatele au
+    fost filtrate".
+    """
+    import ast
+    import inspect
+
+    from music import player
+
+    src = inspect.getsource(player.process_play)
+    for node in ast.walk(ast.parse(src.strip())):
+        if not isinstance(node, ast.Call):
+            continue
+        if ast.unparse(node.func) != 'search_to_url':
+            continue
+        avoid = [kw.value for kw in node.keywords if kw.arg == 'avoid_title']
+        assert avoid, 'search_to_url nu mai primeste avoid_title deloc'
+        expr = ast.unparse(avoid[0])
+        assert 'is_radio' in expr, (
+            f'avoid_title se aplica si cererilor explicite: {expr}')
+        return
+    raise AssertionError('process_play nu mai cheama search_to_url')
+
+
+def test_the_rejection_message_names_the_real_filter():
+    """Mesajul fix "live, prea scurte sau prea lungi" minea in majoritatea cazurilor."""
+    from music.utils import reject_reason
+
+    assert reject_reason('Piesa', 5, '') == 'prea scurta'
+    assert reject_reason('Piesa', 99999, '') == 'prea lunga'
+    assert reject_reason('', 100, '') == 'fara titlu'
+    assert reject_reason('Luis Gabriel - Piesa 2', 100,
+                         'Luis Gabriel - Piesa 1') == (
+        'prea asemanatoare cu piesa anterioara')
+    assert reject_reason('Luis Gabriel - Piesa 2', 100, '') == ''
+
+
+def test_the_rejection_message_reaches_the_user_with_the_reason():
+    """Explicația trebuie sa ajunga in textul refuzului, nu doar in loguri."""
+    import asyncio
+
+    from music import resolve as resolve_mod
+
+    async def fake_extract(opts, query, download=False, loop=None, stage=''):
+        return {'entries': [
+            {'id': 'a', 'title': 'Artistul - Aceeasi Piesa Lunga', 'duration': 200,
+             'live_status': None},
+            {'id': 'b', 'title': 'Ceva scurt', 'duration': 5, 'live_status': None},
+        ]}
+
+    saved = resolve_mod.ytdlp.extract
+    resolve_mod.ytdlp.extract = fake_extract
+    try:
+        url, reject = asyncio.run(resolve_mod.search_to_url(
+            'artistul', avoid_title='Artistul - Aceeasi Piesa Lunga'))
+    finally:
+        resolve_mod.ytdlp.extract = saved
+    assert url is None, url
+    assert 'prea asemanatoare' in reject, reject
+    assert 'prea scurta' in reject, reject
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

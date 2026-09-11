@@ -472,6 +472,21 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         state = get_state(ctx.guild.id)
         state.always_on = not state.always_on
         if state.always_on:
+            # 24/7 inseamna "stai in voce si cânta". Comanda nu se conecta
+            # NICIODATA: aprindea autoplay, aducea coada, si `resume_if_idle`
+            # raspundea "deconectat" — deci botul rămânea in afara canalului, cu
+            # 24/7 pornit si coada plina, si nimic nu il mai aducea inauntru.
+            #
+            # La eșec steagul se stinge: un 24/7 "pornit" fara voce e chiar starea
+            # de mai sus, doar cu un mesaj de succes peste ea.
+            if not ctx.voice_client:
+                if not ctx.author.voice:
+                    state.always_on = False
+                    return await ctx.send("Intra pe voce ca sa pornesc 24/7.",
+                                          delete_after=10)
+                if await _ensure_voice(ctx) is None:
+                    state.always_on = False
+                    return
             cancel_timeout(ctx)
             set_autoplay(state, True, by_user=True); state.loop_mode = 0
             state.show_queue = True

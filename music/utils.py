@@ -409,21 +409,33 @@ def playback_remaining(now: float, start_time: float, duration: float,
     return min(elapsed, duration), max(0.0, duration - elapsed)
 
 
-def is_clean(title, duration, last_title: str) -> bool:
-    if duration and (duration > MAX_TRACK_SECONDS or duration < MIN_TRACK_SECONDS):
-        return False
+def reject_reason(title, duration, last_title: str) -> str:
+    """De ce a fost respins un rezultat. Sir gol = a trecut.
+
+    Un singur loc pentru regula, si pentru explicația ei: mesajul de refuz spunea
+    fix "live, prea scurte sau prea lungi" oricare ar fi fost cauza, iar cauza era
+    de obicei cu totul alta.
+    """
+    if duration and duration > MAX_TRACK_SECONDS:
+        return 'prea lunga'
+    if duration and duration < MIN_TRACK_SECONDS:
+        return 'prea scurta'
     if not title:
         # Fara titlu nu putem filtra nimic; il tratam ca nepotrivit ca sa nu
         # ajunga in coada un element pe care apoi nu-l putem nici afisa.
-        return False
+        return 'fara titlu'
     t = str(title).lower()
     if any(word in t for word in BLACKLIST):
-        return False
+        return 'cuvant din lista de excludere'
     if last_title:
         lt = last_title.lower()
         if lt[:15] in t and len(lt) > 15:
-            return False
-    return True
+            return 'prea asemanatoare cu piesa anterioara'
+    return ''
+
+
+def is_clean(title, duration, last_title: str) -> bool:
+    return not reject_reason(title, duration, last_title)
 
 
 def format_time(seconds: int) -> str:

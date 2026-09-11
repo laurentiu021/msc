@@ -289,11 +289,16 @@ def test_an_edit_transport_error_does_not_escape_either():
         assert ctx.events == [], ctx.events
 
 
-def test_a_vanished_panel_is_forgotten_so_the_next_update_re_sends_it():
+def test_a_vanished_panel_is_re_sent_immediately():
     """Botul producea starea asta singur: mesajul de plecare (delete_after=15)
     era pastrat ca panou, iar 15 secunde mai tarziu fiecare edit da 404. Inainte
     era inghitit ca orice eroare HTTP si `current_msg` rămânea plin, deci nici
-    auto-vindecarea (care se uita doar la None) nu se declanșa."""
+    auto-vindecarea (care se uita doar la None) nu se declanșa.
+
+    Uitarea singura nu e de-ajuns: intre 404 si refresh-ul urmator (schimbarea
+    piesei, adica minute) canalul rămânea fara panou si fara butoane. Vazut in
+    emulator, cu un panou sters de un moderator.
+    """
     import discord
 
     st = _fresh_state()
@@ -308,15 +313,15 @@ def test_a_vanished_panel_is_forgotten_so_the_next_update_re_sends_it():
         async def delete(self):
             return None
 
-    st.current_msg = _Gone()
+    gone = _Gone()
+    st.current_msg = gone
     asyncio.run(ui.update_player_ui(ctx, send_new=False))
-    assert st.current_msg is None, (
-        'panoul dispărut a rămas inregistrat: fiecare refresh urmator e un '
-        'no-op tacut')
-
-    # Si dovada consecinței: urmatoarea actualizare chiar retrimite panoul.
-    asyncio.run(ui.update_player_ui(ctx, send_new=False))
-    assert 'send' in ctx.events, ctx.events
+    assert 'send' in ctx.events, (
+        f'panoul dispărut nu a fost retrimis pe loc: {ctx.events}')
+    assert st.current_msg is not None and st.current_msg is not gone, (
+        'panoul retrimis nu a fost reținut ca panoul curent')
+    assert st.current_view is not None, (
+        'panoul nou nu are view: butoanele nu ar fi ascultate')
 
 
 def test_the_goodbye_message_is_not_kept_as_a_panel():

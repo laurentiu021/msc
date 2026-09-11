@@ -27,7 +27,8 @@ from music.config import (HLS_MAX_BYTES, MAX_DOWNLOAD_BYTES, MAX_TRACK_SECONDS,
                           make_download_opts, make_search_opts,
                           search_query, yt_client_args, WEB_CLIENTS)
 from music.errors import YtdlpTimeout, diagnose_error
-from music.utils import AUDIO_EXTS, cached_download, is_clean, item_title
+from music.utils import (AUDIO_EXTS, cached_download, is_clean, item_title,
+                         reject_reason)
 
 # Lanturile de clienti. Cerem ambii clienti in ACEEASI cerere: yt-dlp cumuleaza
 # formatele, deci pool-ul e mult mai mare pe acelasi numar de cereri. Masurat in
@@ -203,6 +204,7 @@ async def search_to_url(query: str, *, avoid_title: str = '',
     if not entries:
         return None, None            # nimic gasit: eroare, nu refuz
 
+    reasons = []
     for entry in entries:
         if is_clean(entry.get('title'), entry.get('duration'), avoid_title):
             log.info(f"Ales din {len(entries)} rezultate: {item_title(entry, 60)}")
@@ -210,13 +212,20 @@ async def search_to_url(query: str, *, avoid_title: str = '',
             if url and not str(url).startswith('http'):
                 url = f"https://www.youtube.com/watch?v={url}"
             return url, None
-        log.info(f"Sarit (filtru): {item_title(entry, 50)} "
+        why = reject_reason(entry.get('title'), entry.get('duration'), avoid_title)
+        reasons.append(why)
+        log.info(f"Sarit ({why}): {item_title(entry, 50)} "
                  f"durata={entry.get('duration')} live={entry.get('live_status')}")
 
     # Niciunul nu trece filtrul. Inainte se lua orbeste entries[0], deci filtrul
     # nu putea respinge nimic si un live de 3 ore ajungea in redare.
+    #
+    # Si motivul e cel ADEVARAT: mesajul fix "live, prea scurte sau prea lungi"
+    # trimitea pe drumul greșit, fiindca de cele mai multe ori cauza era cu totul
+    # alta — filtrul de "prea asemanator cu piesa anterioara".
+    unique = sorted(set(reasons))
     return None, (f"toate cele {len(entries)} rezultate au fost filtrate "
-                  f"(live, prea scurte sau prea lungi)")
+                  f"({', '.join(unique)})")
 
 
 async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple | None,

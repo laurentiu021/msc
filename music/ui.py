@@ -213,9 +213,14 @@ async def update_player_ui(ctx, send_new=False):
             # refresh urmator era un no-op tacut. Botul producea exact starea asta
             # singur: mesajul de plecare, trimis cu delete_after=15, era pastrat
             # ca panou si dispărea 15 secunde mai tarziu.
-            log.info("Panoul nu mai exista pe Discord; il uit ca sa fie retrimis")
+            log.info("Panoul nu mai exista pe Discord; il retrimit acum")
             _stop_view(state)
             state.current_msg = None
             state.current_view = None
+            # ACUM, nu la refresh-ul urmator. Uitarea singura lasa canalul fara
+            # panou pana la schimbarea piesei — adica minute intregi in care
+            # butoanele pur si simplu nu exista. O singura recursie: ramura de
+            # trimitere are propriul gard si nu se mai intoarce aici.
+            return await update_player_ui(ctx, send_new=True)
         except DISCORD_ERRORS as e:
             log.debug(f"Nu am putut actualiza panoul: {e}")

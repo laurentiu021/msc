@@ -176,6 +176,50 @@ def test_playback_starts_a_prefetch():
         'redarea nu mai porneste nicio descarcare in avans')
 
 
+def test_a_queue_filled_after_playback_still_gets_prefetched():
+    """Fluxul normal: pornesti o piesa (coada goala), apoi aprinzi Autoplay.
+
+    Prefetch-ul pornea DOAR din `process_play`, unde coada e aproape mereu goala,
+    deci in fluxul asta nu se intampla nimic si primul skip platea integral
+    extractia plus descarcarea. Masurat in emulator: 30 de secunde cu coada plina
+    si cache-ul gol. `resume_if_idle` e locul, fiindca pe acolo trece fiecare
+    operatie care schimba coada fara sa porneasca nimic.
+    """
+    import ast
+    import inspect
+
+    src = inspect.getsource(player.resume_if_idle)
+    tree = ast.parse(src.strip())
+    called = {ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    assert 'schedule_prefetch' in called, (
+        'coada schimbata fara redare nu mai declanseaza nicio descarcare in avans')
+
+    # Si INAINTE de ieșirea "canta deja": acela e chiar cazul obișnuit.
+    body = tree.body[0].body
+    order = []
+    for node in body:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) and ast.unparse(sub.func) == 'schedule_prefetch':
+                order.append('prefetch')
+        if isinstance(node, ast.If) and 'is_playing' in ast.unparse(node.test):
+            order.append('canta deja')
+    assert order[:1] == ['prefetch'], (
+        f'prefetch-ul e programat dupa ieșirea "canta deja", adica niciodata in '
+        f'fluxul redare-apoi-autoplay: {order}')
+
+
+def test_a_refill_after_a_drained_queue_gets_prefetched():
+    """Coada golita complet: prefetch-ul de la pornire n-a avut ce sa ia."""
+    import ast
+    import inspect
+
+    src = inspect.getsource(player._play_next_async)
+    called = {ast.unparse(n.func) for n in ast.walk(ast.parse(src.strip()))
+              if isinstance(n, ast.Call)}
+    assert 'schedule_prefetch' in called, (
+        'dupa refill nu se incalzește nimic: urmatorul skip plateste tot')
+
+
 def test_the_refill_threshold_keeps_a_real_palette():
     """Lista de sub panou ESTE coada, deci pragul decide din cate piese poți
     alege. La 3, o singura alegere din dropdown te lasa fara opțiuni."""

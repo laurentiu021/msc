@@ -295,6 +295,9 @@ async def _play_next_async(ctx, token: int | None = None):
                 try:
                     await prefill_autoplay_queue(state, _loop)
                     log.info(f"Refill dupa skip: coada={len(state.queue)}")
+                    # Coada era goala cand a pornit piesa asta, deci prefetch-ul
+                    # de atunci n-a avut ce sa ia. Acum are.
+                    schedule_prefetch(state)
                     await update_player_ui(ctx)
                 except Exception as e:
                     log.warning(f"Prefill dupa skip esuat: {e}", exc_info=True)
@@ -329,9 +332,16 @@ def resume_if_idle(ctx) -> str:
     vc = getattr(ctx, 'voice_client', None)
     if not vc or not vc.is_connected():
         return 'deconectat'
+    state = get_state(ctx.guild.id)
+    # Coada s-a schimbat, deci merita incalzita — INAINTE de orice ieșire, si mai
+    # ales inainte de "canta deja", care e chiar cazul obișnuit: apeși Autoplay
+    # peste o piesa care cânta. Prefetch-ul pornea doar din `process_play`, unde
+    # coada e aproape mereu goala, deci in fluxul normal (redau, apoi pornesc
+    # autoplay) primul skip plătea integral extracția si descarcarea. Masurat in
+    # emulator: 30 de secunde cu coada plina si cache-ul gol.
+    schedule_prefetch(state)
     if vc.is_playing() or vc.is_paused():
         return 'canta deja'
-    state = get_state(ctx.guild.id)
     if state.is_loading:
         # Chiar exista o incarcare in curs: ea va scurge coada, deci a porni si
         # noi una ar insemna doua rezolvari in paralel pe acelasi guild.
@@ -455,8 +465,16 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         if not reused:
             # 1. Text -> URL. Cautarea e FLAT: doar metadata de lista, apoi o
             #    singura extractie completa a videoclipului ales.
+            # `avoid_title` DOAR pentru radio. Regula lui `is_clean` respinge
+            # orice titlu care conține primele 15 caractere ale piesei anterioare
+            # — ceea ce e exact ce vrei de la autoplay, si exact ce nu vrei de la
+            # un om. Aplicata peste o cerere explicita, insemna: nu poți pune
+            # aceeasi piesa a doua oara, si nu poți cere o a doua piesa a
+            # aceluiasi artist ("Luis Gabriel - ..." se potrivește cu toate ale
+            # lui). Iar refuzul minea, spunand "live, prea scurte sau prea lungi".
             target_url, reject = await search_to_url(
-                query, avoid_title=state.last_title, loop=_loop)
+                query, avoid_title=state.last_title if is_radio else '',
+                loop=_loop)
             if reject:
                 raise TrackRejected(reject)
             if not target_url:

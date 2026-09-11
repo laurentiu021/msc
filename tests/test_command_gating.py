@@ -548,6 +548,62 @@ def test_the_connect_budget_is_worth_waiting_for():
         f'conectarea nu foloseste plafonul declarat: {channel.connect_calls}')
 
 
+def test_247_actually_joins_the_voice_channel():
+    """Comanda nu se conecta NICIODATA.
+
+    Aprindea autoplay, aducea coada, si `resume_if_idle` raspundea "deconectat" —
+    deci botul rămânea in afara canalului, cu 24/7 pornit si coada plina, si nimic
+    nu il mai aducea inauntru. Raportat din producție.
+    """
+    st = _fresh_state()
+    st.last_url = 'https://www.youtube.com/watch?v=x'
+    connected = _FakeVoiceClient()
+    channel = _FakeVoiceChannel(connected)
+    ctx = _connect_ctx(channel)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['247'](ctx))
+    assert channel.connect_calls, '24/7 nu a incercat sa intre in voce'
+    assert st.always_on is True, st.always_on
+    assert st.autoplay is True, '24/7 nu a aprins autoplay'
+
+
+def test_247_that_cannot_join_does_not_claim_to_be_on():
+    """Un 24/7 "pornit" fara voce e exact starea rupta, doar cu un mesaj fals peste."""
+    st = _fresh_state()
+    channel = _FakeVoiceChannel(asyncio.TimeoutError(), asyncio.TimeoutError())
+    ctx = _connect_ctx(channel)
+    saved = _no_retry_delay()
+    try:
+        with _Wiring() as w:
+            asyncio.run(w.bot.registry['247'](ctx))
+    finally:
+        commands_mod.VOICE_RETRY_DELAY_SEC = saved
+    assert st.always_on is False, (
+        '24/7 a rămas pornit desi botul nu a putut intra in voce')
+
+
+def test_247_without_the_author_in_voice_says_so():
+    """Nu exista niciun canal in care sa stea, deci steagul nu are voie sa se aprinda."""
+    st = _fresh_state()
+    ctx = _connect_ctx(None)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['247'](ctx))
+    assert st.always_on is False, st.always_on
+    assert any('voce' in str(m) for m in ctx.sent), ctx.sent
+
+
+def test_247_already_in_voice_does_not_reconnect():
+    """Botul e deja in canal (sesiunea altcuiva): o reconectare ar rupe redarea."""
+    st = _fresh_state()
+    st.last_url = 'https://www.youtube.com/watch?v=x'
+    channel = _FakeVoiceChannel()
+    ctx = _FakeCtx(_FakeVoiceClient(playing=True), channel=channel)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['247'](ctx))
+    assert channel.connect_calls == [], 's-a reconectat peste o sesiune activa'
+    assert st.always_on is True
+
+
 def test_the_command_tree_is_no_longer_wiped_before_syncing():
     """Golirea exista cand nu aveam nicio comanda slash.
 
