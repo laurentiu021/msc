@@ -367,6 +367,33 @@ def test_seek_treats_paused_as_playing():
     raise AssertionError('comanda seek nu mai exista')
 
 
+# --- cachedir=True omora toata extractia -------------------------------------
+
+def test_the_ytdlp_cache_dir_is_never_a_bool():
+    """`YTDLP_CACHE_DIR or True` parea "daca nu avem cale, lasa cache-ul pornit".
+
+    yt-dlp nu are asa optiune: `Cache.enabled` verifica doar `is not False`, deci
+    True trece, iar `_get_root_dir` cheama `expand_path(True)`, care ridica
+    AttributeError si omoara extractia INTREAGA — orice cautare, orice descarcare.
+    Se vede doar in afara volumului (local, CI, orice mediu fara /data), fiindca
+    acolo calea e None; in producție e mereu un string, deci bug-ul era invizibil
+    exact unde ne uitam.
+    """
+    import yt_dlp
+
+    from music.config import YDL_OPTS_DOWNLOAD, YDL_OPTS_SEARCH
+
+    for opts, name in ((YDL_OPTS_SEARCH, 'cautare'), (YDL_OPTS_DOWNLOAD, 'descarcare')):
+        value = opts.get('cachedir')
+        assert not isinstance(value, bool), (
+            f'opts-urile de {name} trimit cachedir={value!r}: expand_path cade pe bool')
+        # Comportamental, nu doar de tip: exact apelul care cadea.
+        with yt_dlp.YoutubeDL(dict(opts, quiet=True, no_warnings=True,
+                                  logger=None)) as ydl:
+            root = ydl.cache._get_root_dir()
+            assert isinstance(root, str) and root, (name, root)
+
+
 # --- gardul de canal, acum si pe comenzi -------------------------------------
 
 def test_the_control_rule_lives_in_exactly_one_place():

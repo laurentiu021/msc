@@ -57,6 +57,13 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # Cache-ul propriu al yt-dlp (semnaturi, provocari EJS). Fara cachedir explicit
 # ajunge in ~/.cache/yt-dlp, efemer in container, deci prima piesa de dupa fiecare
 # deploy platea din nou rezolvarea semnaturii.
+#
+# `None` inseamna exact "foloseste implicitul lui yt-dlp": `Cache._get_root_dir`
+# trateaza None si cheia lipsa identic. Ce NU are voie sa ajunga aici e un bool:
+# `cachedir=True` trece de `enabled` (care verifica doar `is not False`), apoi
+# `expand_path(True)` ridica AttributeError si omoara TOATA extractia. Se vede
+# doar in afara volumului — local si pe orice mediu fara /data — deci nu apare in
+# producție, unde calea e mereu un string.
 YTDLP_CACHE_DIR = os.path.join(COOKIE_DIR, 'ytdlp-cache') if _ON_VOLUME else None
 
 # Cat audio pastram inainte sa stergem cele mai vechi fisiere.
@@ -217,7 +224,7 @@ YDL_OPTS_SEARCH = {
     'ignore_no_formats_error': True,
     'extractor_args': _YT_EXTRACTOR_ARGS,
     'logger': YDL_LOGGER,
-    'cachedir': YTDLP_CACHE_DIR or True,
+    'cachedir': YTDLP_CACHE_DIR,
 }
 
 MAX_TRACK_SECONDS = 660
@@ -292,7 +299,7 @@ YDL_OPTS_DOWNLOAD = {
     'socket_timeout': 15,
     'extractor_args': _YT_EXTRACTOR_ARGS,
     'logger': YDL_LOGGER,
-    'cachedir': YTDLP_CACHE_DIR or True,
+    'cachedir': YTDLP_CACHE_DIR,
 }
 
 if _proxy:
