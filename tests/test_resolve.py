@@ -691,6 +691,154 @@ def test_autoplay_skips_a_shorts_link_it_already_played():
     assert any('nou456' in q for q in queued), queued
 
 
+# --- intrerupatorul de 429 pe calea de guest ----------------------------------
+
+AAC_ONLY = [{'acodec': 'mp4a.40.2', 'url': 'https://x/a', 'protocol': 'https'}]
+
+
+def _with_cookies():
+    """Face `cookies_available()` sa raspunda True, si intoarce restauratorul."""
+    saved = config._cookies_path
+    config._cookies_path = 'cookies-de-test.txt'
+    return saved
+
+
+def _aac_then(second):
+    """Cookies dau doar AAC; a doua veriga (guest) intoarce ce spune testul."""
+    def extract(stage, opts):
+        if 'cookiefile' in opts:
+            return {'id': 'vid123', 'title': 'T', 'duration': 200,
+                    'webpage_url': VIDEO, 'formats': AAC_ONLY}
+        return second
+    return extract
+
+
+def test_a_burned_guest_is_not_asked_again_just_for_quality():
+    """Masurat in producție: fiecare cerere fara cookies primea 429.
+
+    Lanțul continua totusi spre guest ca sa CAUTE opus, iar apoi descarcarea mai
+    incerca o data fara cookies — trei cereri sortite eșecului si 5-15 secunde de
+    aȘteptare in fața utilizatorului la fiecare piesa neaflata in cache, pe o
+    limitare pe care o adanceam noi singuri.
+    """
+    saved = _with_cookies()
+    resolve.note_guest_rate_limit('HTTP Error 429: Too Many Requests')
+    try:
+        with _Ytdlp(extract=_aac_then(RuntimeError('nu trebuie chemat')),
+                    download=lambda stage, opts: ({'id': 'vid123'}, None)) as yt:
+            result = _run(resolve.resolve_from_url(VIDEO))
+    finally:
+        config._cookies_path = saved
+        resolve.clear_guest_rate_limit()
+
+    extracts = [opts for stage, opts in yt.calls if stage.startswith('extract_')]
+    assert len(extracts) == 1, f'a mai intrebat guest degeaba: {yt.stages}'
+    assert result.used_cookies is True
+    assert result.info['formats'] == AAC_ONLY
+
+
+def test_when_guest_is_healthy_quality_still_costs_one_extra_extraction():
+    """Ocolul pentru calitate rămâne: diferenta opus/AAC se aude."""
+    saved = _with_cookies()
+    resolve.clear_guest_rate_limit()
+    try:
+        with _Ytdlp(extract=_aac_then({'id': 'vid123', 'title': 'T', 'duration': 200,
+                                       'webpage_url': VIDEO, 'formats': PLAYABLE}),
+                    download=lambda stage, opts: ({'id': 'vid123'}, None)) as yt:
+            result = _run(resolve.resolve_from_url(VIDEO))
+    finally:
+        config._cookies_path = saved
+
+    extracts = [opts for stage, opts in yt.calls if stage.startswith('extract_')]
+    assert len(extracts) == 2, f'nu a mai incercat pentru opus: {yt.stages}'
+    assert result.used_cookies is False, 'nu a preferat veriga cu opus'
+
+
+def test_guest_is_still_the_last_hope_when_cookies_give_nothing():
+    """Intrerupatorul opreste doar ocolul pentru CALITATE. Cand cookie-urile nu dau
+    nimic redabil, guest rămâne singura sansa si trebuie incercat oricum."""
+    saved = _with_cookies()
+    resolve.note_guest_rate_limit('HTTP Error 429: Too Many Requests')
+    try:
+        def extract(stage, opts):
+            if 'cookiefile' in opts:
+                return {'id': 'vid123', 'title': 'T', 'duration': 200,
+                        'webpage_url': VIDEO, 'formats': []}
+            return {'id': 'vid123', 'title': 'T', 'duration': 200,
+                    'webpage_url': VIDEO, 'formats': PLAYABLE}
+
+        with _Ytdlp(extract=extract,
+                    download=lambda stage, opts: ({'id': 'vid123'}, None)) as yt:
+            result = _run(resolve.resolve_from_url(VIDEO))
+    finally:
+        config._cookies_path = saved
+        resolve.clear_guest_rate_limit()
+
+    extracts = [opts for stage, opts in yt.calls if stage.startswith('extract_')]
+    assert len(extracts) == 2, f'a renunțat la ultima sansa: {yt.stages}'
+    assert result.used_cookies is False
+
+
+def test_a_rate_limited_guest_extraction_arms_the_breaker():
+    """Un 429 nu ridica excepție: yt-dlp il raporteaza ca warning si intoarce zero
+    formate. Singurul canal prin care ajunge la noi e motivul reținut de logger."""
+    saved = _with_cookies()
+    resolve.clear_guest_rate_limit()
+    config._YdlLog.last_reason = ('[youtube] vid123: Unable to download webpage: '
+                                 'HTTP Error 429: Too Many Requests')
+    try:
+        with _Ytdlp(extract=_aac_then({'id': 'vid123', 'title': 'T', 'duration': 200,
+                                       'webpage_url': VIDEO, 'formats': []}),
+                    download=lambda stage, opts: ({'id': 'vid123'}, None)):
+            _run(resolve.resolve_from_url(VIDEO))
+        assert resolve.guest_rate_limited(), 'un 429 pe guest nu a aprins nimic'
+    finally:
+        config._cookies_path = saved
+        resolve.clear_guest_rate_limit()
+        config._YdlLog.last_reason = None
+
+
+def test_the_download_also_skips_a_burned_guest():
+    saved = _with_cookies()
+    resolve.note_guest_rate_limit('HTTP Error 429: Too Many Requests')
+    try:
+        def download(stage, opts):
+            return RuntimeError('Requested format is not available')
+
+        with _Ytdlp(download=download) as yt:
+            _run(resolve.resolve_from_url(VIDEO))
+    finally:
+        config._cookies_path = saved
+        resolve.clear_guest_rate_limit()
+
+    downloads = [opts for stage, opts in yt.calls if stage.startswith('download_')]
+    assert downloads, 'nu a incercat nicio descarcare'
+    guest = [o for o in downloads if 'cookiefile' not in o]
+    assert not guest, f'{len(guest)} descarcari ca guest pe un IP limitat'
+
+
+def test_the_breaker_expires_on_its_own():
+    """O limitare temporara nu are voie sa ne țina in modul degradat toata seara."""
+    resolve.clear_guest_rate_limit()
+    try:
+        assert resolve.note_guest_rate_limit('HTTP Error 429', now=1000.0)
+        assert resolve.guest_rate_limited(now=1000.0 + 60)
+        assert not resolve.guest_rate_limited(
+            now=1000.0 + resolve.GUEST_RATELIMIT_COOLDOWN_SEC + 1)
+    finally:
+        resolve.clear_guest_rate_limit()
+
+
+def test_only_a_real_rate_limit_arms_it():
+    """Un video sters sau un cookie expirat nu spune nimic despre IP, iar a opri
+    calea de guest pentru ele ar pierde alternativa exact cand e nevoie de ea."""
+    resolve.clear_guest_rate_limit()
+    for reason in ('This video is unavailable', 'Sign in to confirm you are not a bot',
+                   'Requested format is not available', '', None):
+        assert resolve.note_guest_rate_limit(reason) is False, reason
+        assert not resolve.guest_rate_limited()
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

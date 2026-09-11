@@ -17,6 +17,7 @@ decide daca asta e o eroare sau doar o piesa sarita.
 """
 import asyncio
 import os
+import time
 from dataclasses import dataclass, field
 
 from music import ytdlp
@@ -38,6 +39,53 @@ from music.utils import (AUDIO_EXTS, cached_download, is_clean, item_title,
 # singur format redabil e o marja prea subtire pentru redare.
 COOKIE_CHAIN = [(WEB_CLIENTS, True)]
 GUEST_CHAIN = [(WEB_CLIENTS, False)]
+
+# Cat timp nu mai intrebam ca guest dupa un 429. Masurat in producție, 2026-09-11:
+# de pe IP-ul Railway FIECARE cerere fara cookies primea "HTTP Error 429: Too Many
+# Requests". Costul nu era doar cererea pierduta — lanțul continua spre guest doar
+# ca sa CAUTE opus (diferenta e audibila), iar apoi descarcarea mai incerca o data
+# fara cookies. Trei cereri sortite eșecului, 5-15 secunde de aȘteptare in fața
+# utilizatorului la fiecare piesa neaflata in cache, si o limitare pe care o
+# adanceam noi singuri.
+#
+# 15 minute: destul cat sa nu batem in acelasi perete piesa dupa piesa, dar
+# suficient de scurt cat o limitare temporara sa nu ne țina in modul degradat toata
+# seara. Se stinge singur si la primul succes ca guest.
+GUEST_RATELIMIT_COOLDOWN_SEC = 900
+_guest_blocked_until = 0.0
+
+
+def guest_rate_limited(now: float | None = None) -> bool:
+    """E guest-ul limitat CHIAR ACUM?"""
+    return (now if now is not None else time.time()) < _guest_blocked_until
+
+
+def note_guest_rate_limit(reason: str | None, *, now: float | None = None) -> bool:
+    """Aprinde intrerupatorul daca motivul e chiar o limitare de rata.
+
+    Nu pe orice eșec: un video indisponibil sau un cookie expirat nu spune nimic
+    despre IP, iar a opri calea de guest pentru astea ar insemna sa pierdem singura
+    alternativa exact cand e nevoie de ea.
+    """
+    global _guest_blocked_until
+    if not reason:
+        return False
+    kind, _ = diagnose_error(reason)
+    if kind != 'ratelimit':
+        return False
+    _guest_blocked_until = (now if now is not None else time.time()) +         GUEST_RATELIMIT_COOLDOWN_SEC
+    log.info(f"Guest limitat de YouTube; nu mai incerc fara cookies "
+             f"{GUEST_RATELIMIT_COOLDOWN_SEC // 60} minute")
+    return True
+
+
+def clear_guest_rate_limit() -> None:
+    """Un succes ca guest inseamna ca IP-ul nu mai e limitat."""
+    global _guest_blocked_until
+    if _guest_blocked_until:
+        log.info("Guest merge din nou; intrerupatorul de 429 s-a stins")
+    _guest_blocked_until = 0.0
+
 
 # (selector de format, plafon de octeti), in ordinea incercarilor.
 #
@@ -244,6 +292,15 @@ async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple
         label = '+'.join(clients)
         if use_cookies and not cookies_available():
             continue
+        # Veriga de guest exista din doua motive diferite: ca ULTIMA sansa cand
+        # cookie-urile n-au dat nimic redabil, si ca ocol pentru CALITATE cand
+        # cookie-urile au dat doar AAC. Al doilea motiv nu merita nimic pe un IP
+        # limitat: raspunsul e 429 garantat, deci doar aȘteptare in fața
+        # utilizatorului. Ultima sansa rămâne, mereu.
+        if not use_cookies and without_opus is not None and guest_rate_limited():
+            log.info("Sar peste guest (limitat de YouTube): am deja un candidat "
+                     "redabil, doar fara opus")
+            continue
         search_opts = make_search_opts(
             with_cookies=use_cookies,
             extractor_args=yt_client_args(*clients),
@@ -259,6 +316,14 @@ async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple
             log.info(f"[{label}|cookies={use_cookies}] Video "
                      f"{candidate.get('id','?')}: {len(fmts)} formats "
                      f"({count_real_formats(fmts)} redabile)")
+            if not use_cookies:
+                # Un 429 nu ridica excepție: yt-dlp il raporteaza ca warning si
+                # intoarce zero formate. Singurul canal prin care ajunge la noi e
+                # motivul reținut de logger.
+                if has_real_formats(fmts):
+                    clear_guest_rate_limit()
+                else:
+                    note_guest_rate_limit(last_ydl_reason())
             selected = candidate
             if has_real_formats(fmts):
                 if has_opus_audio(fmts):
@@ -276,6 +341,8 @@ async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple
                 continue
         except Exception as e:
             raw_error = str(e)[:600]
+            if not use_cookies:
+                note_guest_rate_limit(raw_error)
             log.warning(f"Extractia a eșuat cu client={label}: {e}", exc_info=True)
     if without_opus is not None:
         candidate, clients, use_cookies = without_opus
@@ -364,6 +431,11 @@ async def _download(web_url: str, client: tuple | None, prefer_cookies: bool,
         for use_cookies in cookie_order:
             if use_cookies and not cookies_available():
                 continue
+            # Acelasi intrerupator ca la extractie: cand avem cookies si guest-ul e
+            # limitat, incercarea fara cookies e o aȘteptare cumparata degeaba.
+            if not use_cookies and cookies_available() and guest_rate_limited():
+                log.info("Sar peste descarcarea ca guest: limitat de YouTube")
+                continue
             try:
                 overrides = {'format': fmt, 'max_filesize': size_cap}
                 if client:
@@ -385,6 +457,8 @@ async def _download(web_url: str, client: tuple | None, prefer_cookies: bool,
                             break
                 if filename and os.path.exists(filename):
                     log.info(f"Format descarcat: {format_summary(dl_info)}")
+                    if not use_cookies:
+                        clear_guest_rate_limit()
                     # Succes: nu raportam nicio eroare, nici a extractiei, nici a
                     # incercarilor anterioare. Un text brut lasat aici ar fi ajuns
                     # in `state.last_raw_error` pe calea reusita si ar fi devenit
@@ -406,6 +480,8 @@ async def _download(web_url: str, client: tuple | None, prefer_cookies: bool,
                 return dl_info, None, dl_error, False
             except Exception as e:
                 dl_error = str(e)[:600]
+                if not use_cookies:
+                    note_guest_rate_limit(dl_error) or                         note_guest_rate_limit(last_ydl_reason())
                 if worth_another_format(dl_error):
                     format_worthy = True
                 log.warning(f"Download esuat (cookies={use_cookies}, "
