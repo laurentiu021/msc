@@ -172,6 +172,148 @@ def test_the_autoplay_button_starts_playing_after_its_prefill():
         'nimic: piesa rămâne in coada pentru totdeauna')
 
 
+def _press_with_player(name, state, *, playing=False, paused=False,
+                       history=None, values=None):
+    """Apasa un buton cu `resume_if_idle` si `play_next` observate."""
+    import music.player as player_mod
+
+    calls = {'resume': 0, 'stopped': False}
+
+    class _VC:
+        channel = None
+
+        def is_connected(self):
+            return True
+
+        def is_playing(self):
+            return playing
+
+        def is_paused(self):
+            return paused
+
+        def stop(self):
+            calls['stopped'] = True
+
+        async def disconnect(self, **kw):
+            return None
+
+    def fake_resume(ctx):
+        calls['resume'] += 1
+        return 'pornit'
+
+    saved = (player_mod.resume_if_idle, player_mod.cancel_timeout,
+             player_mod.start_timeout)
+    player_mod.resume_if_idle = fake_resume
+    player_mod.cancel_timeout = lambda *a, **k: None
+    player_mod.start_timeout = lambda *a, **k: None
+    if history is not None:
+        state.history = history
+    try:
+        ctx = _FakeCtx(_VC())
+        view = views.MusicControlView(ctx)
+        interaction = _FakeInteraction()
+        if values is not None:
+            interaction.data = {'values': values}
+            asyncio.run(view._jump_callback(interaction))
+        else:
+            asyncio.run(getattr(view, name).callback(interaction))
+        return calls
+    finally:
+        (player_mod.resume_if_idle, player_mod.cancel_timeout,
+         player_mod.start_timeout) = saved
+
+
+def test_skip_while_nothing_plays_still_advances_the_queue():
+    """Butonul doar confirma interactiunea si ieșea: coada rămânea pe loc.
+
+    Nu exista niciun `after_play` cand nimic nu iese pe voce, deci `vc.stop()`
+    singur nu putea avansa nimic.
+    """
+    st = _fresh_state()
+    st.queue = [{'query': 'https://www.youtube.com/watch?v=a', 'title': 'A'}]
+    calls = _press_with_player('skip_btn', st, playing=False, paused=False)
+    assert calls['resume'] == 1, 'skip pe idle nu a incercat sa porneasca coada'
+
+
+def test_skip_while_playing_stops_and_marks_the_skip():
+    st = _fresh_state()
+    st.queue = [{'query': 'x', 'title': 'X'}]
+    calls = _press_with_player('skip_btn', st, playing=True)
+    assert calls['stopped'], 'nu a oprit redarea curenta'
+    assert st.skip_request is True, (
+        'fara skip_request, loop-ul re-adauga exact piesa sarita')
+    assert calls['resume'] == 0, 'a pornit coada peste o redare activa'
+
+
+def test_back_while_paused_actually_goes_back():
+    """Singurul buton care verifica doar `is_playing()`: in pauza punea piesa
+    anterioara in coada si nu pornea nimic."""
+    st = _fresh_state()
+    history = [{'url': 'https://y/1', 'title': 'Veche'},
+               {'url': 'https://y/2', 'title': 'Curenta'}]
+    calls = _press_with_player('back_btn', st, playing=False, paused=True,
+                               history=history)
+    assert st.queue and st.queue[0]['query'] == 'https://y/1', st.queue
+    assert calls['stopped'], 'in pauza nu a oprit nimic, deci nu a avansat'
+    assert st.skip_request is True
+
+
+def test_back_refuses_a_history_entry_without_a_url():
+    """Altfel history e golit si in coada intra o cerere goala."""
+    st = _fresh_state()
+    history = [{'url': '', 'title': 'Fara URL'},
+               {'url': 'https://y/2', 'title': 'Curenta'}]
+    _press_with_player('back_btn', st, playing=True, history=history)
+    assert st.queue == [], f'a pus o cerere goala in coada: {st.queue}'
+
+
+def test_jumping_keeps_the_whole_queue():
+    """`queue[idx:]` arunca tot ce era inainte, deci lista din care alegi se
+    micșora la fiecare alegere — exact cand voiai sa alegi."""
+    st = _fresh_state()
+    st.queue = [{'query': f'q{i}', 'title': f'T{i}'} for i in range(5)]
+    calls = _press_with_player(None, st, playing=True, values=['q3'])
+    assert [it['query'] for it in st.queue] == ['q3', 'q4', 'q0', 'q1', 'q2'], (
+        f'coada nu a fost rotita: {[it["query"] for it in st.queue]}')
+    assert calls['stopped'] and st.skip_request is True
+
+
+def test_jumping_while_idle_starts_playing():
+    st = _fresh_state()
+    st.queue = [{'query': f'q{i}', 'title': f'T{i}'} for i in range(3)]
+    calls = _press_with_player(None, st, playing=False, values=['q2'])
+    assert calls['resume'] == 1, 'alegerea din lista nu a pornit nimic'
+    assert st.queue[0]['query'] == 'q2', st.queue
+
+
+def test_the_queue_dropdown_never_offers_duplicate_values():
+    """Discord refuza tot componentul cu 400 la valori duplicate, iar edit-ul
+    panoului eșua apoi tacut: panoul rămânea inghetat pe piesa veche."""
+    st = _fresh_state()
+    st.show_queue = True
+    st.queue = [{'query': 'acelasi', 'title': 'A'},
+                {'query': 'acelasi', 'title': 'A din nou'},
+                {'query': '', 'title': 'Fara query'},
+                {'query': 'altul', 'title': 'B'}]
+    view = views.MusicControlView(_FakeCtx(_FakeVoiceClient()))
+    selects = [c for c in view.children if isinstance(c, views.discord.ui.Select)]
+    assert len(selects) == 1, selects
+    values = [o.value for o in selects[0].options]
+    assert values == ['acelasi', 'altul'], values
+    assert all(v for v in values), 'o valoare goala e respinsa de Discord'
+
+
+def test_no_dropdown_at_all_when_every_entry_is_unusable():
+    """Un select cu zero opțiuni e si el respins cu 400."""
+    st = _fresh_state()
+    st.show_queue = True
+    st.queue = [{'query': '', 'title': 'X'}, {'title': 'Fara cheie'}]
+    view = views.MusicControlView(_FakeCtx(_FakeVoiceClient()))
+    assert not [c for c in view.children
+                if isinstance(c, views.discord.ui.Select)], (
+        'a construit un select fara nicio opțiune valida')
+
+
 def _defer_failure(exc):
     """Ruleaza `_safe_defer` peste o confirmare care eșueaza. Intoarce logurile."""
     import io

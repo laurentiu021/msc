@@ -3,8 +3,9 @@ import discord
 import asyncio
 import os
 import time
-from music.config import (FFMPEG_OPTS, cookies_available, promote_cookies,
-                          rollback_cookies, log)
+from music.config import (AUTOPLAY_REFILL_BELOW, FFMPEG_OPTS, PREFETCH_AHEAD,
+                          cookies_available, promote_cookies, rollback_cookies,
+                          log)
 from music.resolve import (cached_for, resolve_from_url, search_to_url,
                            video_id)
 from music.state import begin_loading, end_loading, get_state
@@ -175,6 +176,64 @@ def init(bot_ref, ui_func, start_to, cancel_to):
     cancel_timeout = cancel_to
 
 
+async def _prefetch_worker(state) -> None:
+    """Descarca in cache primele PREFETCH_AHEAD piese din coada.
+
+    Nu atinge NICIODATA starea de redare, si mai ales nu `is_loading`: steagul
+    acela e o promisiune ca o incarcare in curs va SCURGE coada, iar `!play` il
+    citește ca "pune in coada, se rezolva". Un prefetch nu scurge nimic, deci daca
+    l-ar aprinde, o piesa cerută in fereastra aceea ar rămâne in coada pentru
+    totdeauna.
+
+    Doar URL-uri cu id de videoclip: un text de cautare ar cere o extractie in
+    plus doar ca sa afle ce sa verifice in cache, iar cererea aceea e exact ce
+    prefetch-ul incearca sa economiseasca.
+    """
+    for item in list(state.queue)[:PREFETCH_AHEAD]:
+        query = (item or {}).get('query') or ''
+        vid, cached = cached_for(query)
+        if not vid or cached:
+            continue
+        log.info(f"Prefetch: {item_title(item, 40)}")
+        resolved = await resolve_from_url(query, loop=_loop)
+        if resolved.filename:
+            log.info(f"Prefetch gata: {vid}")
+            # Plafonul de cache se aplica si aici: altfel un prefetch ar putea
+            # umple volumul intre doua evacuari.
+            trim_cache()
+        else:
+            log.info(f"Prefetch fara rezultat pentru {vid}: "
+                     f"{_scrub(resolved.raw_error or 'necunoscut')[:120]}")
+
+
+def schedule_prefetch(state) -> str:
+    """Porneste prefetch-ul in fundal. Intoarce ce a decis, pentru loguri/teste."""
+    if PREFETCH_AHEAD <= 0:
+        return 'dezactivat'
+    if _loop is None:
+        return 'fara bucla'
+    task = getattr(state, 'prefetch_task', None)
+    if task is not None and not task.done():
+        # Unul e deja in zbor. A porni al doilea ar dubla cererile pe un IP care
+        # deja ne limiteaza, si ambele ar scrie in acelasi fisier din cache:
+        # `outtmpl` e `%(id)s.%(ext)s`, deci calea de pe disc E cheia de cache.
+        return 'deja in curs'
+    if not state.queue:
+        return 'coada goala'
+
+    async def guarded():
+        try:
+            await _prefetch_worker(state)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Un prefetch eșuat nu are voie sa atinga redarea care cânta acum.
+            log.warning(f"Prefetch esuat: {e}", exc_info=True)
+
+    state.prefetch_task = _loop.create_task(guarded())
+    return 'pornit'
+
+
 async def trigger_radio(ctx, token: int | None = None):
     state = get_state(ctx.guild.id)
     try:
@@ -231,7 +290,8 @@ async def _play_next_async(ctx, token: int | None = None):
         if next_item:
             log.info(f"play_next: {item_title(next_item, 40)}")
             await process_play(ctx, next_item['query'], is_radio=False)
-            if state.autoplay and len(state.queue) < 3 and state.last_url:
+            if (state.autoplay and state.last_url
+                    and len(state.queue) < AUTOPLAY_REFILL_BELOW):
                 try:
                     await prefill_autoplay_queue(state, _loop)
                     log.info(f"Refill dupa skip: coada={len(state.queue)}")
@@ -525,6 +585,11 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         state.last_play_ok = time.time()
         _log_play_result('ok', started_at, query, url=web_url, reused=reused,
                          duration=state.last_duration, cookies=jar_authenticated)
+
+        # Piesa urmatoare se descarca ACUM, cat timp asta cânta. Altfel fiecare
+        # skip plateste extractia plus descarcarea in fața utilizatorului: 5-30s
+        # de liniște. Pornit dupa `vc.play`, deci nu intarzie cu nimic redarea.
+        log.info(f"Prefetch: {schedule_prefetch(state)}")
 
         # History si insoțitorul se scriu DUPA ce redarea a pornit cu adevarat.
         # Cand erau mai sus, o deconectare intre pregatire si `vc.play` lasa in

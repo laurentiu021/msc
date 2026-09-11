@@ -61,16 +61,31 @@ class MusicControlView(discord.ui.View):
                 else:
                     child.label, child.style = "Pause", discord.ButtonStyle.primary
 
+        options = []
         if state.show_queue and state.queue:
-            options = []
+            # Valorile unui select trebuie sa fie UNICE si nevide. Aceeasi piesa
+            # apare in coada mai des decat pare (loop pe coada, autoplay care
+            # re-propune, acelasi link dat de doi oameni), iar Discord refuza
+            # atunci tot componentul cu 400 — deci edit-ul panoului eșua si
+            # `except DISCORD_ERRORS: log.debug(...)` il inghitea: panoul incepea
+            # sa arate piesa veche pentru totdeauna, fara nicio urma la INFO.
+            #
+            # Deduplicarea e si corecta semantic: `_jump_callback` sare oricum la
+            # PRIMA intrare cu valoarea aceea.
+            seen = set()
             for i, item in enumerate(state.queue[:25]):
+                # Valoarea e interogarea, nu poziția: coada se poate schimba intre
+                # randare si click (refill de autoplay, skip, remove) si un index
+                # pozitional ar sari la alta piesa.
+                value = str(item.get('query') or '')[:100]
+                if not value or value in seen:
+                    continue
+                seen.add(value)
                 options.append(discord.SelectOption(
                     label=f"{i+1}. {item_title(item, 95)}",
-                    # Valoarea e interogarea, nu poziția: coada se poate schimba
-                    # intre randare si click (refill de autoplay, skip, remove)
-                    # si un index pozitional ar sari la alta piesa.
-                    value=str(item.get('query', ''))[:100],
+                    value=value,
                 ))
+        if options:
             select = discord.ui.Select(
                 placeholder="Sari la o piesa...", options=options,
                 custom_id="jump_select", row=2,
@@ -88,15 +103,35 @@ class MusicControlView(discord.ui.View):
                 await interaction.response.send_message(
                     "Piesa nu mai e in coada.", ephemeral=True, delete_after=3)
                 return
-            state.queue = state.queue[idx:]
-            vc = self.ctx.voice_client
-            if vc and (vc.is_playing() or vc.is_paused()):
-                state.skip_request = True
-                vc.stop()
+            # ROTIRE, nu tăiere. `queue[idx:]` arunca tot ce era inaintea piesei
+            # alese, deci fiecare alegere micșora coada — iar lista de sub panou
+            # ESTE coada, deci exact gestul de "vreau sa aleg" iți lua opțiunile
+            # din care sa alegi. Acum piesele sărite trec la sfarșit.
+            state.queue = state.queue[idx:] + state.queue[:idx]
             await self._safe_defer(interaction)
+            await self._advance(state)
         except Exception as e:
             log.warning(f"Jump select error: {e}", exc_info=True)
             await self._safe_defer(interaction)
+
+    async def _advance(self, state) -> str:
+        """Trece la capul cozii, din orice stare a redarii.
+
+        `vc.stop()` singur nu ajunge: cand nimic nu iese pe voce (pauza deja
+        oprita, o rezolvare care s-a incheiat fara sa porneasca, coada care
+        aȘteapta) nu exista niciun `after_play` care sa avanseze, deci butonul
+        arata ca a functionat si nu se intampla nimic. `resume_if_idle` e exact
+        raspunsul, si spune si ce a decis.
+        """
+        import music.player as _p
+        vc = self.ctx.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            state.skip_request = True
+            vc.stop()
+            return 'oprit ca sa avanseze'
+        decision = _p.resume_if_idle(self.ctx)
+        log.info(f"Buton pe idle: {decision}")
+        return decision
 
     async def _safe_defer(self, interaction: discord.Interaction):
         """Confirma interactiunea. Un eșec de aici se VEDE.
@@ -133,16 +168,23 @@ class MusicControlView(discord.ui.View):
             # (utils.write_track_meta), deci un hit de cache nu depinde de history.
             state.history.pop()
             prev = state.history.pop()
+            if not prev.get('url'):
+                # O intrare fara URL ar deveni o cerere goala in coada, respinsa
+                # apoi ca "nu ai scris nimic" — dupa ce history a fost deja golit.
+                log.warning("Intrarea de history nu are URL; nu pot merge inapoi")
+                await self._safe_defer(interaction)
+                return
             state.queue.insert(0, {'query': prev['url'], 'title': prev['title']})
-            state.skip_request = True
-            if self.ctx.voice_client and self.ctx.voice_client.is_playing():
-                self.ctx.voice_client.stop()
             await self._safe_defer(interaction)
+            # `_advance`, nu doar `is_playing()`: butonul verifica DOAR redarea
+            # activa, deci apasat in PAUZA punea piesa anterioara in coada si nu
+            # pornea nimic — singurul buton al panoului care ignora pauza.
+            await self._advance(state)
         else:
             try:
                 await interaction.response.send_message("Nu exista o piesa anterioara.", ephemeral=True, delete_after=3)
-            except discord.HTTPException:
-                pass
+            except DISCORD_ERRORS as e:
+                log.warning(f"Nu am putut raspunde la Inapoi: {e}")
 
     @discord.ui.button(label="Pause", style=discord.ButtonStyle.primary, custom_id="playpause", row=0)
     async def pause_resume_btn(self, interaction: discord.Interaction, button):
@@ -162,11 +204,10 @@ class MusicControlView(discord.ui.View):
     @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, custom_id="skip", row=0)
     async def skip_btn(self, interaction: discord.Interaction, button):
         state = get_state(self.ctx.guild.id)
-        vc = self.ctx.voice_client
-        if vc and (vc.is_playing() or vc.is_paused()):
-            state.skip_request = True
-            vc.stop()
         await self._safe_defer(interaction)
+        # Cand nimic nu cânta, versiunea de dinainte doar confirma interactiunea si
+        # ieșea: butonul se aprindea si coada rămânea pe loc.
+        await self._advance(state)
 
     @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, custom_id="stop", row=0)
     async def stop_btn(self, interaction: discord.Interaction, button):
@@ -189,8 +230,8 @@ class MusicControlView(discord.ui.View):
         _p.trim_cache()
         if self.ctx.voice_client:
             await self.ctx.voice_client.disconnect()
-        await safe_delete(state.current_msg)
-        state.current_msg = None
+        from music.ui import forget_panel
+        await forget_panel(state)
 
     @discord.ui.button(label="Autoplay", style=discord.ButtonStyle.secondary, custom_id="autoplay", row=1)
     async def autoplay_btn(self, interaction: discord.Interaction, button):

@@ -1,7 +1,8 @@
 """Logica autoplay: YouTube Mix (preferat) + fallback-uri."""
 import re
-from music.config import (BLACKLIST, MAX_TRACK_SECONDS, MIN_TRACK_SECONDS,
-                          cookies_available, log, make_search_opts)
+from music.config import (AUTOPLAY_QUEUE_TARGET, BLACKLIST, MAX_TRACK_SECONDS,
+                          MIN_TRACK_SECONDS, cookies_available, log,
+                          make_search_opts)
 from music.state import GuildState
 from music.utils import clean_search_title
 from music import youtube_api as yt_api
@@ -46,7 +47,8 @@ def artist_key(title, channel='') -> str:
     return name
 
 
-async def prefill_autoplay_queue(state: GuildState, bot_loop, target: int = 12):
+async def prefill_autoplay_queue(state: GuildState, bot_loop,
+                                 target: int = AUTOPLAY_QUEUE_TARGET):
     """Populeaza coada pana la target piese.
     
     Strategii in ordine:

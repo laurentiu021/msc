@@ -36,6 +36,18 @@ def _stop_view(state):
         state.current_view = None
 
 
+async def forget_panel(state):
+    """Sterge panoul si uita-l complet. Pentru `!stop` si butonul Stop.
+
+    Amandoua stergeau mesajul si lasau `current_view` inregistrat in ViewStore-ul
+    lui discord.py, pentru un mesaj care nu mai exista. Scris o singura data, ca
+    cele doua cai sa nu mai poata divergea.
+    """
+    await safe_delete(state.current_msg)
+    state.current_msg = None
+    _stop_view(state)
+
+
 async def update_player_ui(ctx, send_new=False):
     state = get_state(ctx.guild.id)
     vc = ctx.voice_client

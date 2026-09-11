@@ -210,6 +210,25 @@ YDL_OPTS_SEARCH = {
 MAX_TRACK_SECONDS = 660
 MIN_TRACK_SECONDS = 30
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
+
+# Coada de autoplay: cat de plina o tinem, si sub cat o completam.
+#
+# Pragul conteaza pentru DROPDOWN, nu doar pentru continuitate: lista de sub panou
+# arata exact coada, deci un prag de 3 lasa utilizatorul cu trei opțiuni din care
+# sa aleaga. Si o alegere din dropdown scade coada, deci pragul mic se atingea
+# tocmai cand omul voia sa aleaga.
+AUTOPLAY_QUEUE_TARGET = env_num('AUTOPLAY_QUEUE_TARGET', 12, low=3, high=40)
+AUTOPLAY_REFILL_BELOW = env_num('AUTOPLAY_REFILL_BELOW', 6, low=1, high=20)
+
+# Cate piese din coada se descarca IN AVANS, cat timp cânta cea curenta.
+#
+# Fara asta, fiecare skip plateste extractia completa plus descarcarea: 5-30s in
+# care nu se aude nimic. Pe autoplay e regula, nu excepția, fiindca intrarile din
+# coada sunt doar URL-uri pe care nimeni nu le-a atins inca.
+#
+# 0 il dezactiveaza complet, fara deploy — plasa de siguranța daca YouTube incepe
+# sa numere cererile mai strict pe IP-ul containerului.
+PREFETCH_AHEAD = env_num('PREFETCH_AHEAD', 1, low=0, high=3)
 # Plafon separat pentru incercarea HLS. Chiar si cerand bestaudio, o redare HLS
 # poate fi muxata; 30MB acopera orice piesa rezonabila si opreste din start un
 # transfer de video pe un bot audio.

@@ -39,6 +39,10 @@ class GuildState:
         self.paused_at = 0.0
         self.timeout_task = None
         self.skip_request = False
+        # Descarcarea in avans a piesei urmatoare. Deliberat SEPARAT de
+        # `is_loading`: acela promite ca o incarcare va scurge coada, iar un
+        # prefetch nu scurge nimic.
+        self.prefetch_task = None
         self._lock = asyncio.Lock()
         self.current_file = None
         self.always_on = False

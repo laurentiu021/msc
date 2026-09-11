@@ -326,8 +326,10 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         player_mod.bump_play_generation(state)
         cancel_timeout(ctx)
         if ctx.voice_client: await ctx.voice_client.disconnect()
-        await safe_delete(state.current_msg)
-        state.current_msg = None
+        # Nu doar `safe_delete` + `current_msg = None`: view-ul rămânea inregistrat
+        # in ViewStore-ul lui discord.py pentru un mesaj sters.
+        from music.ui import forget_panel
+        await forget_panel(state)
 
     @bot.command()
     async def skip(ctx):
@@ -337,7 +339,13 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         if vc and (vc.is_playing() or vc.is_paused()):
             state.skip_request = True
             vc.stop()
-        else:
+            return
+        # Nimic nu iese pe voce, dar asta NU inseamna "nimic de facut": coada poate
+        # aȘtepta o pornire (o rezolvare incheiata fara redare, un `!clear` peste o
+        # pauza). Butonul Skip trece prin aceeasi decizie.
+        decision = player_mod.resume_if_idle(ctx)
+        log.info(f"!skip pe idle: {decision}")
+        if decision != 'pornit':
             await ctx.send("Nu se reda nimic.", delete_after=5)
 
     @bot.command()
