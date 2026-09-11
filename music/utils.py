@@ -114,6 +114,35 @@ async def make_opus_source(filename: str, channel, **ffmpeg_opts):
                                    **ffmpeg_opts)
 
 
+def video_id(url: str) -> str | None:
+    """ID-ul de videoclip dintr-un URL de YouTube, sau None.
+
+    Aici, in modulul pe care il importa toata lumea, fiindca de asta depind trei
+    lucruri diferite: cheia de cache (`outtmpl` e `%(id)s.%(ext)s`, deci numele
+    fisierului de pe disc ESTE ID-ul), `skip_ids` al autoplay-ului, si completarea
+    de statistici din Data API.
+
+    Existau TREI variante scrise de mana, cu capabilitati diferite: cea din resolve
+    stia cinci forme de link, cea din autoplay doua, iar cea din player doar `v=`.
+    Consecinta nu era teoretica: un link de `/shorts/` intra in history fara sa
+    ajunga in `skip_ids`, deci radioul putea relua exact piesa abia ascultata, iar
+    un seed de shorts oprea autoplay-ul cu "can't extract ID".
+    """
+    text = str(url or '')
+    if 'v=' in text:
+        return text.split('v=')[-1].split('&')[0] or None
+    # `/shorts/`, `/live/` si `/embed/` sunt forme normale de link YouTube si nu au
+    # `v=`. Fara ele, `cached_for` intorcea None pentru orice astfel de link, deci
+    # fiecare redare plătea din nou extracția si transferul.
+    for marker in ('youtu.be/', '/shorts/', '/live/', '/embed/'):
+        if marker in text:
+            tail = text.split(marker)[-1]
+            for sep in ('?', '&', '#', '/'):
+                tail = tail.split(sep)[0]
+            return tail or None
+    return None
+
+
 def clean_search_title(title) -> str:
     """Curata un titlu pentru cautare.
 

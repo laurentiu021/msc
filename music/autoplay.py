@@ -4,21 +4,13 @@ from music.config import (AUTOPLAY_QUEUE_TARGET, BLACKLIST, MAX_TRACK_SECONDS,
                           MIN_TRACK_SECONDS, cookies_available, log,
                           make_search_opts)
 from music.state import GuildState
-from music.utils import clean_search_title
+from music.utils import clean_search_title, video_id
 from music import youtube_api as yt_api
 from music import ytdlp
 
 
 # Cat de multe piese de la acelasi artist sunt permise in coada/history
 MAX_SAME_ARTIST = 2
-
-
-def _extract_video_id(url: str) -> str | None:
-    if 'v=' in url:
-        return url.split('v=')[-1].split('&')[0]
-    if 'youtu.be/' in url:
-        return url.split('youtu.be/')[-1].split('?')[0]
-    return None
 
 
 def _artist_from_title(title) -> str:
@@ -69,7 +61,7 @@ async def prefill_autoplay_queue(state: GuildState, bot_loop,
         log.warning("Autoplay: no origin URL")
         return
 
-    origin_id = _extract_video_id(origin_url)
+    origin_id = video_id(origin_url)
     if not origin_id:
         log.warning(f"Autoplay: can't extract ID from {origin_url}")
         return
@@ -77,14 +69,14 @@ async def prefill_autoplay_queue(state: GuildState, bot_loop,
     skip_ids = set()
     artist_counts: dict[str, int] = {}
     for h in state.history:
-        vid = _extract_video_id(h.get('url') or '')
+        vid = video_id(h.get('url') or '')
         if vid:
             skip_ids.add(vid)
         key = artist_key(h.get('title'), h.get('channel', ''))
         if key:
             artist_counts[key] = artist_counts.get(key, 0) + 1
     for item in state.queue:
-        vid = _extract_video_id(item.get('query', ''))
+        vid = video_id(item.get('query', ''))
         if vid:
             skip_ids.add(vid)
         key = artist_key(item.get('title'), item.get('channel', ''))

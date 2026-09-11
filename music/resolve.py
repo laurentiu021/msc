@@ -29,6 +29,7 @@ from music.config import (HLS_MAX_BYTES, MAX_DOWNLOAD_BYTES, MAX_TRACK_SECONDS,
                           search_query, yt_client_args, WEB_CLIENTS)
 from music.errors import YtdlpTimeout, diagnose_error
 from music.utils import (AUDIO_EXTS, cached_download, is_clean, item_title,
+                         video_id,
                          reject_reason)
 
 # Lanturile de clienti. Cerem ambii clienti in ACEEASI cerere: yt-dlp cumuleaza
@@ -169,28 +170,6 @@ def worth_another_format(raw_error: str | None) -> bool:
         log.info(f"Nu mai incerc alt format: cauza e '{error_type}', "
                  f"nu selectorul de format")
     return worth
-
-
-def video_id(url: str) -> str | None:
-    """ID-ul de videoclip dintr-un URL de YouTube, sau None.
-
-    Cheia de cache: `outtmpl` e deja `%(id)s.%(ext)s`, deci numele fisierului de
-    pe disc ESTE ID-ul.
-    """
-    text = str(url or '')
-    if 'v=' in text:
-        return text.split('v=')[-1].split('&')[0] or None
-    # `/shorts/`, `/live/` si `/embed/` sunt forme normale de link YouTube si nu au
-    # `v=`. Fara ele, `cached_for` intorcea None pentru orice astfel de link, deci
-    # fiecare redare plătea din nou extracția si transferul, prefetch-ul le sărea
-    # complet, iar `_history_entry` nu le gasea niciodata.
-    for marker in ('youtu.be/', '/shorts/', '/live/', '/embed/'):
-        if marker in text:
-            tail = text.split(marker)[-1]
-            for sep in ('?', '&', '#', '/'):
-                tail = tail.split(sep)[0]
-            return tail or None
-    return None
 
 
 async def search_to_url(query: str, *, avoid_title: str = '',

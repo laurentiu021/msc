@@ -765,7 +765,7 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         missing_stats = not (state.last_views or state.last_likes)
         if missing_stats and yt_api.is_available():
             try:
-                vid_id = web_url.split('v=')[-1].split('&')[0] if 'v=' in web_url else None
+                vid_id = video_id(web_url)
                 if vid_id:
                     details = await _loop.run_in_executor(
                         None, lambda: yt_api.get_video_details([vid_id])

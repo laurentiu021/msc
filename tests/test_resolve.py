@@ -619,6 +619,78 @@ def test_aac_everywhere_is_still_played():
     assert clients is not None, 'a pierdut clientul care a functionat'
 
 
+# --- o singura definitie a extragerii de id ------------------------------------
+
+def test_only_one_module_extracts_a_video_id():
+    """Erau trei variante scrise de mana, cu capabilitati diferite.
+
+    resolve stia cinci forme de link, autoplay doua, player doar `v=`. Consecinta
+    concreta: un link de `/shorts/` intra in history fara sa ajunga in `skip_ids`,
+    deci radioul putea relua exact piesa abia ascultata, iar un seed de shorts oprea
+    autoplay-ul cu "can't extract ID". Verificarea e mecanica pentru ca disciplina nu
+    se ține minte: a patra copie ar aparea la fel de firesc ca primele trei.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent / 'music'
+    offenders = []
+    for path in sorted(root.glob('*.py')):
+        if path.name == 'utils.py':          # singurul loc permis
+            continue
+        text = path.read_text(encoding='utf-8')
+        for needle in ("split('v=')", 'split("v=")', "split('youtu.be/')"):
+            if needle in text:
+                offenders.append(f'{path.name}: {needle}')
+    assert not offenders, f'extragere de id scrisa de mana in: {offenders}'
+
+
+def test_every_module_gets_the_same_answer():
+    """Aliasurile trebuie sa fie chiar acelasi obiect, nu copii care pot divergea."""
+    from music import autoplay, player, resolve as resolve_mod, utils
+
+    assert utils.video_id is resolve_mod.video_id
+    assert utils.video_id is autoplay.video_id
+    assert utils.video_id is player.video_id
+
+
+def test_autoplay_skips_a_shorts_link_it_already_played():
+    """history-ul alimenteaza `skip_ids`; daca id-ul nu se extrage, piesa revine.
+
+    Comportamental, nu pe forma codului: pun in history un link de `/shorts/` si cer
+    prefill-ului sa nu il mai adauge. Cu vechiul extractor din autoplay, `skip_ids`
+    rămânea gol si piesa intra din nou in coada.
+    """
+    from music import autoplay
+    from music.state import GuildState
+
+    st = GuildState()
+    st.last_url = 'https://www.youtube.com/watch?v=seed00'
+    st.last_title = 'Artist - Piesa'
+    st.history.append({'url': 'https://www.youtube.com/shorts/deja123',
+                       'title': 'Altcineva - Deja Ascultata', 'channel': ''})
+
+    async def fake_mix(state, loop, origin_id, skip_ids, needed, artist_counts=None):
+        # Exact ce face un Mix real: intoarce si piese deja ascultate.
+        added = 0
+        for vid, title in (('deja123', 'Altcineva - Deja Ascultata'),
+                           ('nou456', 'Cineva - Noua')):
+            if autoplay._add_to_queue(state, vid, title, skip_ids, artist_counts):
+                added += 1
+        return added
+
+    saved = autoplay._try_ytdlp_mix
+    autoplay._try_ytdlp_mix = fake_mix
+    try:
+        _run(autoplay.prefill_autoplay_queue(st, None, target=2))
+    finally:
+        autoplay._try_ytdlp_mix = saved
+
+    queued = [item['query'] for item in st.queue]
+    assert not any('deja123' in q for q in queued), (
+        f'a readaugat o piesa din history: {queued}')
+    assert any('nou456' in q for q in queued), queued
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.
