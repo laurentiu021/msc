@@ -189,3 +189,90 @@ class FakeYouTube:
         if not os.path.exists(target):
             shutil.copyfile(self.fixture, target)
         return dict(track), target
+
+
+class RealYouTube:
+    """YouTube ADEVARAT. Aceeasi interfata ca FakeYouTube, dar fara sa mimeze nimic.
+
+    Nu inlocuiește `music.ytdlp`: il inveleste, ca sa treaca prin exact acelasi
+    throttle, acelasi executor si acelasi lant de clienti ca in producție. Doua
+    ajustari, ambele strict locale:
+
+    - `js_runtimes={'node': {}}`: yt-dlp activeaza implicit doar Deno pentru
+      challenge-ul `n`, iar aici e Node. Fara asta, formatele opus lipsesc si
+      masuratoarea de calitate nu inseamna nimic.
+    - fara `source_address='0.0.0.0'`: pe Windows legarea aceea face ca
+      conexiunea la googlevideo sa expire. Pe Linux, adica in producție, e
+      corecta si rămâne acolo.
+    """
+
+    def __init__(self, download_dir, *, socket_timeout=60):
+        self.download_dir = download_dir
+        self.socket_timeout = socket_timeout
+        self.calls = []
+        self.timeline = None
+        self.inflight = 0
+        self.max_inflight = 0
+        # Compatibilitate cu scenariile scrise pentru YouTube-ul fals.
+        self.search_sec = self.extract_sec = self.download_sec = 0.0
+        self.fail_ids = set()
+        self.timeout_ids = set()
+        self.unavailable_ids = set()
+        self.fixture = None
+
+    def _fix(self, opts):
+        opts = dict(opts)
+        opts.pop('source_address', None)
+        opts['js_runtimes'] = {'node': {}}
+        opts['socket_timeout'] = max(opts.get('socket_timeout') or 0,
+                                     self.socket_timeout)
+        return opts
+
+    def install(self):
+        from music import ytdlp
+        self._saved = (ytdlp.extract, ytdlp.extract_and_prepare_filename)
+        real_extract, real_download = self._saved
+
+        # Semnaturile se preiau prin passthrough, nu se re-declara: `extract` are
+        # si `want_filename`, iar o copie scrisa de mana l-a pierdut si fiecare
+        # descarcare a picat cu TypeError — un eșec al uneltei care arata exact ca
+        # un bug al botului.
+        async def extract(opts, query, **kwargs):
+            stage = kwargs.get('stage') or 'extract'
+            return await self._timed(stage, query,
+                                     real_extract(self._fix(opts), query, **kwargs))
+
+        async def extract_and_prepare_filename(opts, query, **kwargs):
+            stage = kwargs.get('stage') or 'download'
+            return await self._timed(stage, query,
+                                     real_download(self._fix(opts), query, **kwargs))
+
+        ytdlp.extract = extract
+        ytdlp.extract_and_prepare_filename = extract_and_prepare_filename
+        self.fixture = audio_fixture(self.download_dir)
+        return self
+
+    def restore(self):
+        from music import ytdlp
+        ytdlp.extract, ytdlp.extract_and_prepare_filename = self._saved
+
+    async def _timed(self, stage, query, awaitable):
+        started = time.monotonic()
+        self.calls.append((stage, str(query)[:60], started))
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            out = await awaitable
+        except Exception as e:
+            if self.timeline is not None:
+                self.timeline.add(f'yt.{stage}',
+                                  f'{str(query)[:40]} EȘEC dupa '
+                                  f'{time.monotonic()-started:.1f}s: '
+                                  f'{type(e).__name__}')
+            raise
+        finally:
+            self.inflight -= 1
+        if self.timeline is not None:
+            self.timeline.add(f'yt.{stage}',
+                              f'{str(query)[:45]} in {time.monotonic()-started:.1f}s')
+        return out

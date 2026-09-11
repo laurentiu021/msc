@@ -37,6 +37,12 @@ os.environ['COOKIE_DIR'] = _SANDBOX
 import fakescord as fs
 import fakeyoutube as fy
 
+# YouTube ADEVARAT in loc de cel fals. Cere serverul de PO token pornit local:
+#   node <pot-provider>/server/build/main.js --port 4416
+REAL_YOUTUBE = False
+# Interogari reale, cu titluri care exista si nu se schimba peste noapte.
+REAL_QUERIES = ['Los Del Rio Macarena', 'Luis Gabriel Toate diamantele']
+
 
 class Harness:
     """Un guild, un bot real, un YouTube fals. Un scenariu = o instanța."""
@@ -45,6 +51,11 @@ class Harness:
         self.server = fs.Fakescord(**server)
         self.checks = []
         self.yt = None
+        # Cate `process_play` au fost simultan in zbor. Invariantul cozii e ACESTA,
+        # nu numarul de cereri catre YouTube: un prefetch care descarca piesa
+        # urmatoare in paralel cu redarea e exact ce trebuie sa faca.
+        self.resolves_live = 0
+        self.max_resolves = 0
 
     async def __aenter__(self):
         import bot as bot_mod
@@ -71,7 +82,8 @@ class Harness:
                 # ca hit de cache.
                 pass
 
-        self.yt = fy.FakeYouTube(config.DOWNLOAD_DIR).install()
+        self.yt = (fy.RealYouTube(config.DOWNLOAD_DIR) if REAL_YOUTUBE
+                   else fy.FakeYouTube(config.DOWNLOAD_DIR)).install()
         self.yt.timeline = self.server.timeline
         fy.seed()
 
@@ -82,8 +94,11 @@ class Harness:
 
         async def traced(ctx, query, is_radio=False, **kwargs):
             n = next(seq)
+            self.resolves_live += 1
+            self.max_resolves = max(self.max_resolves, self.resolves_live)
             self.server.timeline.add('resolve.start',
-                                     f'#{n} {str(query)[:50]} radio={is_radio}')
+                                     f'#{n} {str(query)[:50]} radio={is_radio} '
+                                     f'(in curs: {self.resolves_live})')
             try:
                 out = await self._saved_process(ctx, query, is_radio=is_radio,
                                                **kwargs)
@@ -93,6 +108,8 @@ class Harness:
                 self.server.timeline.add('resolve.end',
                                          f'#{n} {type(e).__name__}')
                 raise
+            finally:
+                self.resolves_live -= 1
 
         player.process_play = traced
         # Comenzile au primit `process_play` prin injectie la import, deci
@@ -138,6 +155,12 @@ class Harness:
 
     def state(self):
         return self.state_mod.get_state(self.server.guild.id)
+
+    @staticmethod
+    def query(n=0):
+        """Ce cere utilizatorul: din catalogul fals, sau o piesa care exista real."""
+        return (REAL_QUERIES[n % len(REAL_QUERIES)] if REAL_YOUTUBE
+                else ('Luis Gabriel' if n == 0 else 'Delia'))
 
     async def run(self, name, **kwargs):
         """Ruleaza o comanda de prefix, exact callback-ul inregistrat pe bot."""
@@ -230,7 +253,7 @@ def scenario(name):
 async def sc_play(verbose):
     """Sesiunea de baza: !play, se conecteaza, cânta, panoul apare."""
     async with Harness() as h:
-        elapsed = await h.run('play', search='Luis Gabriel')
+        elapsed = await h.run('play', search=Harness.query(0))
         ok = await h.wait_playing()
         st = h.state()
         vc = h.server.guild.voice_client
@@ -254,7 +277,7 @@ async def sc_play(verbose):
 async def sc_cache(verbose):
     """A doua redare a aceleiasi piese trebuie sa fie gratuita."""
     async with Harness() as h:
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         await h.wait_playing()
         first_calls = len(h.yt.calls)
         await h.settle(0.3)
@@ -263,7 +286,7 @@ async def sc_cache(verbose):
         h.server.laur.join(h.server.voice)
 
         t0 = time.monotonic()
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         ok = await h.wait_playing()
         warm = time.monotonic() - t0
         downloads = [c for c in h.yt.calls[first_calls:]
@@ -279,7 +302,7 @@ async def sc_cache(verbose):
 async def sc_autoplay(verbose):
     """Butonul Autoplay, refill-ul, si skip-ul pe coada automata."""
     async with Harness() as h:
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         await h.wait_playing()
         await h.settle(0.3)
 
@@ -316,7 +339,7 @@ async def sc_prefetch(verbose):
     """Skip-ul trebuie sa fie mult mai rapid decat o descarcare la rece."""
     async with Harness() as h:
         h.yt.download_sec = 6.0
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         await h.wait_playing()
         await h.click('autoplay')
         st = h.state()
@@ -347,7 +370,7 @@ async def sc_prefetch(verbose):
 async def sc_buttons(verbose):
     """Fiecare buton, apasat pe rand, cu panoul reimprospatat intre ele."""
     async with Harness() as h:
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         await h.wait_playing()
         await h.settle(0.3)
         st = h.state()
@@ -376,7 +399,7 @@ async def sc_buttons(verbose):
 async def sc_jump(verbose):
     """Alegerea din dropdown nu are voie sa micȘoreze coada."""
     async with Harness() as h:
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         await h.wait_playing()
         await h.click('autoplay')
         st = h.state()
@@ -403,7 +426,7 @@ async def sc_jump(verbose):
 async def sc_247(verbose):
     """!247 trebuie sa intre in voce, nu doar sa aprinda un steag."""
     async with Harness() as h:
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         await h.wait_playing()
         await h.settle(0.3)
         await h.run('stop')
@@ -428,14 +451,14 @@ async def sc_concurrent(verbose):
     """Doua comenzi in acelasi instant. Nicio rezolvare dubla, niciun steag blocat."""
     async with Harness() as h:
         await asyncio.gather(
-            h.run('play', search='Luis Gabriel'),
-            h.run('play', search='Los Del Rio'),
+            h.run('play', search=Harness.query(0)),
+            h.run('play', search=Harness.query(1)),
         )
         await h.wait_playing()
         await h.settle(0.5)
         st = h.state()
-        h.check(h.yt.max_inflight <= 1,
-                f'{h.yt.max_inflight} cereri YouTube in paralel')
+        h.check(h.max_resolves <= 1,
+                f'{h.max_resolves} rezolvari de redare in paralel')
         h.check(st.is_loading is False, 'is_loading a rămas aprins')
         vc = h.server.guild.voice_client
         h.check(len(vc.plays) == 1,
@@ -451,7 +474,8 @@ async def sc_concurrent(verbose):
         # prea devreme, "in curs" arata identic cu "blocat".
         quiet = await h.settle(until=lambda: not st.is_loading, timeout=45)
         h.check(quiet, 'is_loading blocat dupa 3 skip-uri simultane')
-        print(f'       max {h.yt.max_inflight} cereri simultane, '
+        print(f'       max {h.max_resolves} rezolvari simultane '
+              f'({h.yt.max_inflight} cereri YouTube), '
               f'{len(vc.plays)} redari pornite')
         return h.report('concurrent: comenzi simultane', verbose)
 
@@ -461,7 +485,7 @@ async def sc_stop_mid(verbose):
     """!stop exact in fereastra dintre cerere si redare."""
     async with Harness() as h:
         h.yt.download_sec = 5.0
-        task = asyncio.create_task(h.run('play', search='Luis Gabriel'))
+        task = asyncio.create_task(h.run('play', search=Harness.query(0)))
         await asyncio.sleep(2.0)                 # in mijlocul descarcarii
         await h.run('stop')
         await task
@@ -484,7 +508,7 @@ async def sc_errors(verbose):
     async with Harness() as h:
         fy.seed()
         h.yt.fail_ids = {'vid000', 'vid001'}
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         await h.settle(1.5)
         st = h.state()
         told = [m for m in h.server.text.messages
@@ -493,7 +517,7 @@ async def sc_errors(verbose):
         h.check(st.is_loading is False, 'is_loading a rămas aprins dupa eroare')
 
         h.yt.fail_ids = set()
-        await h.run('play', search='Delia')
+        await h.run('play', search=Harness.query(1))
         ok = await h.wait_playing()
         h.check(ok, 'dupa o eroare, urmatoarea piesa nu mai porneste')
         print(f'       eroare raportata, urmatoarea piesa a pornit')
@@ -506,7 +530,7 @@ async def sc_slash(verbose):
     async with Harness() as h:
         h.yt.search_sec = 2.0
         h.yt.download_sec = 8.0
-        interaction = await h.slash('play', search='Luis Gabriel')
+        interaction = await h.slash('play', search=Harness.query(0))
         h.check(interaction.acked, '/play nu a confirmat interactiunea')
         if interaction.ack_latency is not None:
             h.check(interaction.ack_latency < fs.INTERACTION_DEADLINE_SEC,
@@ -523,7 +547,7 @@ async def sc_slash(verbose):
 async def sc_queue_ops(verbose):
     """!shuffle, !move, !remove, !clear pe o coada reala, cu indici la limita."""
     async with Harness() as h:
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         await h.wait_playing()
         await h.click('autoplay')
         st = h.state()
@@ -561,7 +585,7 @@ async def sc_long_queue(verbose):
             vid = f'lng{i:03d}'
             fy.CATALOG[vid] = fy.make_track(
                 vid, f'Artist Cu Nume Foarte Lung {i} - ' + 'Titlu Interminabil ' * 8)
-        await h.run('play', search='Artist')
+        await h.run('play', search=Harness.query(0))
         await h.wait_playing()
         st = h.state()
         st.queue = [{'query': t['webpage_url'], 'title': t['title']}
@@ -588,7 +612,7 @@ async def sc_permissions(verbose):
     """Fara Connect sau fara Speak, utilizatorul trebuie sa afle IMEDIAT."""
     async with Harness(connect_perm=False) as h:
         t0 = time.monotonic()
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         elapsed = time.monotonic() - t0
         h.check(elapsed < 1.0, f'a aȘteptat {elapsed:.1f}s ca sa spuna ca nu poate')
         h.check(h.server.voice.connect_calls == [],
@@ -604,7 +628,7 @@ async def sc_permissions(verbose):
 async def sc_voice_retry(verbose):
     """Un endpoint intarziat de Discord nu are voie sa piarda comanda."""
     async with Harness(connect_outcomes=[asyncio.TimeoutError()]) as h:
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         ok = await h.wait_playing(timeout=45)
         h.check(len(h.server.voice.connect_calls) == 2,
                 f'{len(h.server.voice.connect_calls)} incercari de conectare')
@@ -618,7 +642,7 @@ async def sc_voice_retry(verbose):
 async def sc_outsider(verbose):
     """Cine nu e in canal nu comanda redarea altcuiva."""
     async with Harness() as h:
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         await h.wait_playing()
         await h.settle(0.3)
         vc = h.server.guild.voice_client
@@ -638,7 +662,7 @@ async def sc_outsider(verbose):
 async def sc_panel_deleted(verbose):
     """Panoul sters de un moderator trebuie sa reapara, nu sa dispara pe veci."""
     async with Harness() as h:
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         await h.wait_playing()
         await h.settle(0.3)
         panel = h.server.panel()
@@ -661,7 +685,7 @@ async def sc_panel_deleted(verbose):
 async def sc_refresh_buttons(verbose):
     """Butoanele trebuie sa raspunda si dupa MULTE reimprospatari ale panoului."""
     async with Harness() as h:
-        await h.run('play', search='Luis Gabriel')
+        await h.run('play', search=Harness.query(0))
         await h.wait_playing()
         for i in range(10):
             await h.ui.update_player_ui(h.ctx)
@@ -677,18 +701,40 @@ async def sc_refresh_buttons(verbose):
         return h.report('refresh-buttons: componente vii dupa refresh', verbose)
 
 
+# Scenariile care manipuleaza catalogul fals (erori injectate, 40 de titluri
+# fabricate) nu au sens contra YouTube-ului adevarat.
+FAKE_ONLY = {'errors', 'long-queue'}
+
+
 async def main(argv):
+    global REAL_YOUTUBE
     verbose = '--verbose' in argv
+    REAL_YOUTUBE = '--real-youtube' in argv
     wanted = [a for a in argv[1:] if not a.startswith('--')]
     names = wanted or list(SCENARIOS)
+    if REAL_YOUTUBE:
+        import urllib.request
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:4416/ping', timeout=3) as r:
+                print('PO token server:', r.read().decode()[:60])
+        except OSError as e:
+            print(f'Serverul de PO token nu raspunde pe 4416 ({e}). '
+                  f'Fara el, YouTube sare clientii si formatele opus lipsesc.')
+            return 2
+        skipped = [n for n in names if n in FAKE_ONLY]
+        names = [n for n in names if n not in FAKE_ONLY]
+        if skipped:
+            print(f'Sarite in modul real (au nevoie de catalog controlat): '
+                  f'{", ".join(skipped)}')
     unknown = [n for n in names if n not in SCENARIOS]
     if unknown:
         print(f'Scenarii necunoscute: {unknown}')
         print(f'Disponibile: {", ".join(SCENARIOS)}')
         return 2
 
-    print(f'Emulator Discord + YouTube fals, bot REAL. '
-          f'{len(names)} scenarii.\nSandbox: {_SANDBOX}')
+    print(f'Emulator Discord, bot REAL, YouTube '
+          f'{"REAL" if REAL_YOUTUBE else "fals"}. {len(names)} scenarii.\n'
+          f'Sandbox: {_SANDBOX}')
     results = {}
     for name in names:
         try:

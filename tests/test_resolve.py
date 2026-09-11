@@ -511,6 +511,38 @@ def test_the_rejection_message_reaches_the_user_with_the_reason():
     assert 'prea scurta' in reject, reject
 
 
+def test_a_muxed_video_is_the_last_resort_not_the_first_fallback():
+    """`best` e un selector MUXAT: descarca video ca sa ia sunetul.
+
+    Vazut real, contra YouTube-ului adevarat: itag 18, 360p avc1 cu mp4a la
+    44.1kHz. Zeci de megaocteti de video pe un bot audio, plus o reencodare din
+    AAC in loc de `-c:a copy`. Iar HLS-ul audio-only, care era a doua incercare,
+    nici nu ajungea sa fie incercat: prima reusea cu video.
+    """
+    from music.resolve import DOWNLOAD_ATTEMPTS
+
+    selectors = [fmt for fmt, _cap in DOWNLOAD_ATTEMPTS]
+    assert 'best' not in selectors[0].split('/'), (
+        f'prima incercare cade pe un format muxat: {selectors[0]}')
+    audio_only = [i for i, s in enumerate(selectors) if 'bestaudio' in s]
+    muxed = [i for i, s in enumerate(selectors)
+             if s.split('/')[-1].strip() == 'best']
+    assert audio_only, selectors
+    assert muxed, 'nu mai exista nicio plasa de siguranța muxata'
+    assert min(muxed) > max(audio_only), (
+        f'video-ul muxat e incercat inaintea unei variante strict audio: '
+        f'{selectors}')
+
+
+def test_every_download_attempt_has_a_size_cap():
+    """Un selector fara plafon poate trage un fisier de orice marime."""
+    from music.config import MAX_DOWNLOAD_BYTES
+    from music.resolve import DOWNLOAD_ATTEMPTS
+
+    for fmt, cap in DOWNLOAD_ATTEMPTS:
+        assert isinstance(cap, int) and 0 < cap <= MAX_DOWNLOAD_BYTES, (fmt, cap)
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

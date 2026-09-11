@@ -52,10 +52,18 @@ GUEST_CHAIN = [(WEB_CLIENTS, False)]
 # trebuie sa fie strict audio: comentariul de aici obișnuia sa promita un plafon pe
 # care codul nu il aplica.
 DOWNLOAD_ATTEMPTS = [
-    ('bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
+    # Numai audio, si numai formate separate. `best` NU sta aici: e un selector de
+    # format MUXAT, deci cand niciunul dintre cele audio nu era disponibil, botul
+    # descarca un fisier VIDEO (vazut real: itag 18, 360p avc1 cu mp4a la 44.1kHz)
+    # doar ca sa-i ia sunetul — trafic de zeci de megaocteti si o reencodare din
+    # AAC in loc de un `-c:a copy`.
+    ('bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio',
      MAX_DOWNLOAD_BYTES),
     ('bestaudio[protocol^=m3u8]/bestaudio*[protocol^=m3u8]',
      HLS_MAX_BYTES),
+    # Ultima șansa, si abia dupa HLS-ul audio: mai bine un video muxat decat
+    # nimic, dar niciodata inaintea unei variante strict audio.
+    ('best', MAX_DOWNLOAD_BYTES),
 ]
 
 
