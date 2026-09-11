@@ -49,7 +49,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Deno pentru challenge-urile JS ale YouTube-ului. Node e activat ca REZERVA in
 # `config.JS_RUNTIMES`: yt-dlp porneste implicit doar cu deno, deci fara asta o
 # instalare de deno care se rupe ar face sa dispara tacit formatele opus.
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y
+#
+# `unzip` e cerut de instalatorul lui Deno ("either unzip or 7z is required") si
+# nu mai e nevoie de el dupa aceea, deci se pune si se scoate in ACELASI strat —
+# altfel ar rămâne in imaginea finala degeaba.
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y \
+    && apt-get purge -y --auto-remove unzip \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
