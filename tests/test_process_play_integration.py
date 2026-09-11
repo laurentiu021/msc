@@ -1079,6 +1079,105 @@ def test_a_download_that_used_the_jar_does_stamp_it_as_good():
             'reinnoit: rotatia scrisa de yt-dlp nu ajunge niciodata in ea')
 
 
+def test_a_resolve_orphaned_by_stop_does_not_relabel_the_live_track():
+    """`!stop`, butonul Stop si plecarea din voce sting `is_loading` fara sa
+    opreasca descarcarea in curs.
+
+    Rezolvarea orfana ajungea pana la scrierile de stare si isi scria piesa peste
+    cea care chiar cânta: panoul arata alt titlu si alta durata, iar `last_url`
+    greșit facea ca urmatoarea repornire de coada sa redea alt fisier.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        open(target, 'wb').write(b'audio')
+        st = _fresh_state()
+        st.last_title = 'Piesa care chiar cânta'
+        st.last_url = 'https://www.youtube.com/watch?v=viu'
+        vc = _FakeVoiceClient()
+        ctx = _FakeCtx(vc)
+
+        with _Harness(target) as h:
+            real_download = ytdlp_mod.extract_and_prepare_filename
+
+            async def download_then_lose_ownership(opts, query, loop=None, stage=''):
+                out = await real_download(opts, query, loop=loop, stage=stage)
+                # Exact ce se intampla in producție: `!stop` stinge steagul si o
+                # sesiune noua ia proprietatea, dar descarcarea deja pornita merge
+                # pana la capat si se intoarce aici.
+                state_mod.begin_loading(st)
+                return out
+
+            ytdlp_mod.extract_and_prepare_filename = download_then_lose_ownership
+            try:
+                asyncio.run(player.process_play(ctx, 'artistul piesa'))
+            finally:
+                ytdlp_mod.extract_and_prepare_filename = real_download
+
+        assert st.last_title == 'Piesa care chiar cânta', (
+            f'rezolvarea orfana a rescris piesa care cânta: {st.last_title}')
+        assert st.last_url.endswith('viu'), st.last_url
+        assert not vc.played, 'rezolvarea orfana a pornit redarea'
+
+
+def test_an_error_over_a_playing_track_does_not_eat_the_queue():
+    """`!nplay` care eșuează nu are voie sa taie piesa din aer.
+
+    Coada de eroare chema `play_next`, care scotea capul cozii, iar `process_play`
+    opreste apoi deliberat piesa curenta ca sa porneasca ce a scos — deci un
+    `!nplay` greșit tăia din aer piesa care mergea si mânca o intrare din coada.
+    """
+    st = _fresh_state()
+    st.queue = [{'query': 'https://y/1', 'title': 'A'}]
+    st.skip_request = True
+    vc = _FakeVoiceClient()
+    vc.playing = True
+    ctx = _FakeCtx(vc)
+
+    with _Harness('/nu/exista/nimic') as h:
+        asyncio.run(player.process_play(ctx, 'ceva ce nu se descarca'))
+
+    assert len(st.queue) == 1, f'a consumat capul cozii: {st.queue}'
+    assert h.play_next_calls == [], (
+        'a programat o avansare peste o piesa care inca se auzea')
+    assert st.skip_request is False, (
+        'steagul de skip promite o inlocuire care nu s-a intamplat: ar mânca '
+        'prima re-inserare de loop')
+
+
+def test_a_rejected_track_over_a_playing_one_does_not_eat_the_queue():
+    """Aceeasi clasa cu eroarea, dar pe calea de REFUZ (live, prea lung).
+
+    `!nplay <live>` peste o piesa care cânta: refuzul chema `play_next`, care
+    scotea capul cozii, iar `process_play` opreste apoi deliberat piesa curenta ca
+    sa porneasca ce a scos.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'lung1.opus')
+        open(target, 'wb').write(b'audio')
+        st = _fresh_state()
+        st.last_title = 'Piesa care chiar cânta'
+        st.queue = [{'query': 'https://y/1', 'title': 'A'}]
+        st.skip_request = True
+        vc = _FakeVoiceClient()
+        vc.playing = True
+        ctx = _FakeCtx(vc)
+
+        live = {'id': 'lung1', 'title': 'Set de doua ore', 'duration': 7200,
+                'live_status': 'is_live', 'is_live': True,
+                'webpage_url': 'https://www.youtube.com/watch?v=lung1',
+                'formats': [{'acodec': 'opus', 'url': 'http://x',
+                             'protocol': 'https'}]}
+        with _Harness(target, full_info=live) as h:
+            asyncio.run(player.process_play(
+                ctx, 'https://www.youtube.com/watch?v=lung1'))
+
+        assert len(st.queue) == 1, f'refuzul a consumat capul cozii: {st.queue}'
+        assert h.play_next_calls == [], (
+            'a programat o avansare peste o piesa care inca se auzea')
+        assert st.skip_request is False, 'steagul de skip a rămas aprins'
+        assert st.last_title == 'Piesa care chiar cânta', st.last_title
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

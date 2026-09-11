@@ -22,7 +22,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from music import commands as commands_mod, state as state_mod, views
-from music.state import GuildState, begin_loading
+from music.state import GuildState, begin_loading, end_loading
 
 GUILD_ID = 11
 
@@ -759,7 +759,13 @@ def test_play_next_owns_the_loading_flag_it_sets():
     from music.state import end_loading
 
     st = _fresh_state()
-    vechi = begin_loading(st)              # o incarcare mai veche ține steagul
+    # O incarcare mai veche a luat si a eliberat steagul: `load_token` a rămas la
+    # valoarea ei, deci un `end_loading` intarziat al ei poate inca sa se
+    # potriveasca. Steagul trebuie sa fie LIBER cand intra `play_next`, altfel
+    # garda contra rezolvarilor paralele il opreste din start — corect, dar atunci
+    # testul nu ar mai spune nimic despre proprietatea token-ului.
+    vechi = begin_loading(st)
+    end_loading(st, vechi)
     ctx = _FakeCtx(_FakeVoiceClient(playing=False))
 
     saved = player._loop
@@ -780,6 +786,42 @@ def test_play_next_owns_the_loading_flag_it_sets():
         player.asyncio.run_coroutine_threadsafe = saved_sched
         player._loop = saved
     assert scheduled, 'nu a programat nimic'
+
+
+def test_play_next_refuses_to_start_a_second_resolve():
+    """Un `!skip` sau sfarșitul unei piese in timpul unui `!nplay` pornea a doua
+    rezolvare in paralel: consuma capul cozii, tăia piesa din aer si scria in
+    history o piesa pe care nimeni nu a ascultat-o.
+
+    Garda trebuie sa fie INAINTE de `begin_loading` — acela aprinde steagul, deci
+    aceeasi verificare pusa mai jos ar vedea mereu True. Si nu are voie sa fure
+    token-ul: altfel `finally`-ul incarcarii vii nu ar mai stinge steagul niciodata.
+    """
+    from music import player
+
+    st = _fresh_state()
+    st.queue = [{'query': 'https://y/1', 'title': 'A'}]
+    in_flight = begin_loading(st)          # un `!nplay` rezolva chiar acum
+    ctx = _FakeCtx(_FakeVoiceClient(playing=True))
+
+    saved = player._loop
+    scheduled = []
+    player._loop = type('L', (), {})()
+    saved_sched = player.asyncio.run_coroutine_threadsafe
+    player.asyncio.run_coroutine_threadsafe = (
+        lambda coro, loop: scheduled.append(coro) or coro.close())
+    try:
+        player.play_next(ctx)
+    finally:
+        player.asyncio.run_coroutine_threadsafe = saved_sched
+        player._loop = saved
+
+    assert scheduled == [], 'a pornit o a doua rezolvare peste una in curs'
+    assert st.load_token == in_flight, (
+        'a furat token-ul incarcarii in curs: finally-ul ei nu va mai stinge '
+        'steagul niciodata')
+    assert st.is_loading is True, 'a stins steagul incarcarii in curs'
+    assert len(st.queue) == 1, f'a consumat capul cozii: {st.queue}'
 
 
 def test_play_next_never_leaves_the_flag_on_without_scheduling():

@@ -176,7 +176,22 @@ def init(bot_ref, ui_func, start_to, cancel_to):
     cancel_timeout = cancel_to
 
 
-async def _prefetch_worker(state) -> None:
+def _session_alive(ctx, state, generation):
+    """Predicat "sesiunea mai exista", pentru munca de fundal.
+
+    Acelasi test pe care il face si redarea: voce conectata si generatia neschimbata.
+    Acopera dintr-o singura data `!stop`, butonul Stop, handler-ul de deconectare si
+    oprirea containerului — toate trec prin deconectarea clientului de voce sau prin
+    `bump_play_generation`.
+    """
+    def alive() -> bool:
+        vc = getattr(ctx, 'voice_client', None)
+        return bool(vc and vc.is_connected()) and state.play_generation == generation
+
+    return alive
+
+
+async def _prefetch_worker(state, alive=None) -> None:
     """Descarca in cache primele PREFETCH_AHEAD piese din coada.
 
     Nu atinge NICIODATA starea de redare, si mai ales nu `is_loading`: steagul
@@ -188,16 +203,44 @@ async def _prefetch_worker(state) -> None:
     Doar URL-uri cu id de videoclip: un text de cautare ar cere o extractie in
     plus doar ca sa afle ce sa verifice in cache, iar cererea aceea e exact ce
     prefetch-ul incearca sa economiseasca.
+
+    `alive` spune dacă sesiunea mai exista. Fara el, un prefetch pornit inainte de
+    `!stop` continua sa țina singurul slot de cereri catre YouTube si sa descarce o
+    piesa pe care nimeni nu o mai aȘteapta — deci prima comanda de dupa stop
+    aȘtepta in spatele ei.
     """
+    def keep_going() -> bool:
+        return alive() if alive else True
+
     for item in list(state.queue)[:PREFETCH_AHEAD]:
+        if not keep_going():
+            log.info("Prefetch abandonat: sesiunea s-a incheiat")
+            return
         query = (item or {}).get('query') or ''
         vid, cached = cached_for(query)
         if not vid or cached:
             continue
         log.info(f"Prefetch: {item_title(item, 40)}")
-        resolved = await resolve_from_url(query, loop=_loop)
+        resolved = await resolve_from_url(query, loop=_loop,
+                                          should_continue=keep_going)
         if resolved.filename:
             log.info(f"Prefetch gata: {vid}")
+            # Insoțitorul de metadate, scris ACUM, din extractia deja plătita.
+            # Fara el, fisierul e audio pe care nimeni nu il poate descrie, iar
+            # poarta de zero-cereri din `process_play` cere si fisierul SI
+            # metadata (`read_track_meta(...) or _history_entry(...)`) — o piesa
+            # de autoplay nu a fost niciodata in history, deci prefetch-ul
+            # economisea doar transferul, nu si cele doua cereri prin poarta
+            # throttled. Adica aproape tot ce exista sa evite.
+            info, dl = resolved.info, resolved.download_info
+            write_track_meta(resolved.filename, {
+                'url': resolved.url,
+                'title': _meta(dl, info, keys=('title',)) or 'Necunoscut',
+                'channel': _meta(dl, info, keys=('channel', 'uploader')) or '',
+                'duration': _meta(dl, info, keys=('duration',)) or 0,
+                'thumbnail': _meta(dl, info, keys=('thumbnail',)),
+                'views': _meta(dl, info, keys=('view_count',)) or 0,
+                'likes': _meta(dl, info, keys=('like_count',)) or 0})
             # Plafonul de cache se aplica si aici: altfel un prefetch ar putea
             # umple volumul intre doua evacuari.
             trim_cache()
@@ -206,7 +249,7 @@ async def _prefetch_worker(state) -> None:
                      f"{_scrub(resolved.raw_error or 'necunoscut')[:120]}")
 
 
-def schedule_prefetch(state) -> str:
+def schedule_prefetch(state, alive=None) -> str:
     """Porneste prefetch-ul in fundal. Intoarce ce a decis, pentru loguri/teste."""
     if PREFETCH_AHEAD <= 0:
         return 'dezactivat'
@@ -223,7 +266,7 @@ def schedule_prefetch(state) -> str:
 
     async def guarded():
         try:
-            await _prefetch_worker(state)
+            await _prefetch_worker(state, alive)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -297,7 +340,9 @@ async def _play_next_async(ctx, token: int | None = None):
                     log.info(f"Refill dupa skip: coada={len(state.queue)}")
                     # Coada era goala cand a pornit piesa asta, deci prefetch-ul
                     # de atunci n-a avut ce sa ia. Acum are.
-                    schedule_prefetch(state)
+                    schedule_prefetch(
+                        state,
+                        _session_alive(ctx, state, state.play_generation))
                     await update_player_ui(ctx)
                 except Exception as e:
                     log.warning(f"Prefill dupa skip esuat: {e}", exc_info=True)
@@ -339,7 +384,7 @@ def resume_if_idle(ctx) -> str:
     # coada e aproape mereu goala, deci in fluxul normal (redau, apoi pornesc
     # autoplay) primul skip plătea integral extracția si descarcarea. Masurat in
     # emulator: 30 de secunde cu coada plina si cache-ul gol.
-    schedule_prefetch(state)
+    schedule_prefetch(state, _session_alive(ctx, state, state.play_generation))
     if vc.is_playing() or vc.is_paused():
         return 'canta deja'
     if state.is_loading:
@@ -373,6 +418,19 @@ def play_next(ctx):
     """
     global _loop
     state = get_state(ctx.guild.id)
+    # Aceeasi regula ca in `resume_if_idle`: o incarcare in curs VA scurge coada,
+    # deci a porni si noi una inseamna doua rezolvari in paralel pe acelasi guild.
+    # Fara garda, un `!skip` sau sfarșitul unei piese in timpul unui `!nplay`
+    # pornea a doua rezolvare, consuma capul cozii, tăia piesa din aer si scria in
+    # history o piesa pe care nimeni nu a ascultat-o.
+    #
+    # Garda sta INAINTE de `begin_loading`: acela aprinde steagul, deci aceeasi
+    # verificare pusa in `_play_next_async` ar vedea mereu True. Si ieșim fara
+    # token, ca sa nu il furam de la incarcarea in curs — altfel `finally`-ul ei nu
+    # ar mai stinge steagul niciodata.
+    if state.is_loading:
+        log.info("play_next: se incarca altceva, nu pornesc a doua rezolvare")
+        return
     token = begin_loading(state)
     if _loop is None:
         try:
@@ -387,6 +445,26 @@ def play_next(ctx):
         # Bucla inchisa (oprire in curs). Tot ce conteaza e sa nu lasam steagul.
         log.error(f"play_next nu a putut programa redarea: {e}")
         _release_loading(state, token)
+
+
+def _current_track_survived(ctx, state) -> bool:
+    """True cand piesa care se auzea e inca in aer, deci nu avem ce avansa.
+
+    `process_play` poate fi chemat PESTE o piesa care cânta — singura cale e
+    `!nplay`, care marcheaza `skip_request` si conteaza pe inlocuire. Cand
+    incercarea eșuează sau e refuzata, nu s-a inlocuit nimic: un `play_next` de
+    aici scoate capul cozii, iar `process_play` opreste apoi deliberat piesa
+    curenta ca sa porneasca ce a scos — deci o eroare la `!nplay` tăia din aer
+    piesa care mergea si mânca o intrare din coada.
+
+    Steagul de skip se stinge tot aici: altfel promite o inlocuire care nu s-a
+    intamplat si ar mânca prima re-inserare de loop.
+    """
+    vc = getattr(ctx, 'voice_client', None)
+    if not vc or not vc.is_connected() or not (vc.is_playing() or vc.is_paused()):
+        return False
+    state.skip_request = False
+    return True
 
 
 async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
@@ -543,6 +621,20 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         if not filename or not os.path.exists(filename):
             raise FileNotFoundError("Niciun format nu a reusit descarcarea")
 
+        # Verificarea sta DEASUPRA scrierilor de stare, si intreaba si de
+        # PROPRIETATE. `!stop`, butonul Stop si plecarea din voce sting `is_loading`
+        # fara sa opreasca descarcarea in curs, deci o rezolvare orfana ajungea
+        # aici si isi scria piesa peste cea care chiar cânta: panoul arata alt titlu
+        # si alta durata, iar `last_url` greșit facea ca urmatoarea repornire de
+        # coada sa redea alt fisier.
+        #
+        # `PlaybackInterrupted` e tipul potrivit: nu atinge contorul de erori, nu
+        # trece prin `diagnose_error`, iar `_discard_partial` curata oricum
+        # descarcarea orfanului. `end_loading` cu token-ul lui e deja un no-op, deci
+        # incarcarea vie isi pastreaza steagul.
+        if not vc.is_connected() or state.load_token != my_load_token:
+            raise PlaybackInterrupted("Sesiunea s-a incheiat in timpul descarcarii.")
+
         state.last_url = web_url
         state.last_title = _meta(dl_info, selected, keys=('title',)) or 'Necunoscut'
         state.last_duration = _meta(dl_info, selected, keys=('duration',)) or 0
@@ -552,8 +644,6 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
                                    keys=('channel', 'uploader')) or ''
         state.last_views = _meta(dl_info, selected, keys=('view_count',)) or 0
         state.last_likes = _meta(dl_info, selected, keys=('like_count',)) or 0
-        if not vc.is_connected():
-            raise PlaybackInterrupted("Voice deconectat in timpul descarcarii.")
         if vc.is_playing() or vc.is_paused():
             # Oprire deliberata. Invalidam callback-ul piesei vechi INAINTE de
             # stop, altfel el avanseaza coada si sterge fisierul pe care tocmai
@@ -607,7 +697,7 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         # Piesa urmatoare se descarca ACUM, cat timp asta cânta. Altfel fiecare
         # skip plateste extractia plus descarcarea in fața utilizatorului: 5-30s
         # de liniște. Pornit dupa `vc.play`, deci nu intarzie cu nimic redarea.
-        log.info(f"Prefetch: {schedule_prefetch(state)}")
+        log.info(f"Prefetch: {schedule_prefetch(state, _session_alive(ctx, state, state.play_generation))}")
 
         # History si insoțitorul se scriu DUPA ce redarea a pornit cu adevarat.
         # Cand erau mai sus, o deconectare intre pregatire si `vc.play` lasa in
@@ -758,6 +848,8 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
             log.info(f"Prea multe refuzuri la rand: pauza {REJECT_COOLDOWN_SEC}s "
                      f"si coada golita")
             start_timeout(ctx)
+        elif _current_track_survived(ctx, state):
+            log.info("Refuz peste o piesa care cânta: coada rămâne neatinsa")
         elif state.autoplay or state.queue:
             play_next(ctx)
         else:
@@ -795,7 +887,9 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
             log.warning(f"Nu am putut raporta eroarea utilizatorului: {e}")
 
     await asyncio.sleep(min(2 * state._consecutive_errors, 15))
-    if state.autoplay or state.queue:
+    if _current_track_survived(ctx, state):
+        log.info("Eroare peste o piesa care cânta: coada rămâne neatinsa")
+    elif state.autoplay or state.queue:
         play_next(ctx)
     else:
         start_timeout(ctx)

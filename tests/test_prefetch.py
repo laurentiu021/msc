@@ -27,9 +27,18 @@ GUILD_ID = 31
 
 
 class _Resolved:
-    def __init__(self, filename=None, raw_error=None):
+    def __init__(self, filename=None, raw_error=None, info=None,
+                 download_info=None, url=''):
         self.filename = filename
         self.raw_error = raw_error
+        # Prefetch-ul scrie insoțitorul de metadate din extractia deja plătita,
+        # deci `Resolved` trebuie sa poarte si informația, nu doar calea.
+        self.info = info if info is not None else {
+            'title': 'Artistul - Piesa', 'duration': 200,
+            'channel': 'Canalul', 'thumbnail': 'https://x/t.jpg',
+            'view_count': 10, 'like_count': 2}
+        self.download_info = download_info or {}
+        self.url = url or 'https://www.youtube.com/watch?v=aaa'
 
 
 def _fresh_state():
@@ -50,16 +59,21 @@ def _run_worker(state, *, cached=(), fails=()):
         asked.append(url)
         if url in fails:
             return _Resolved(raw_error='fara formate')
-        return _Resolved(filename='/cache/nou.opus')
+        return _Resolved(filename='/cache/nou.opus', url=url)
 
-    saved = (player.cached_for, player.resolve_from_url, player.trim_cache)
+    written = []
+    saved = (player.cached_for, player.resolve_from_url, player.trim_cache,
+             player.write_track_meta)
     player.cached_for = fake_cached_for
     player.resolve_from_url = fake_resolve
     player.trim_cache = lambda: None
+    player.write_track_meta = lambda path, meta: written.append((path, meta)) or True
+    _run_worker.written = written
     try:
         asyncio.run(player._prefetch_worker(state))
     finally:
-        player.cached_for, player.resolve_from_url, player.trim_cache = saved
+        (player.cached_for, player.resolve_from_url, player.trim_cache,
+         player.write_track_meta) = saved
     return asked
 
 
@@ -238,6 +252,134 @@ def test_the_refill_threshold_is_read_from_one_place():
     assert 3 not in numbers, (
         'pragul de refill e iar scris de mana in play_next, nu citit din config')
     assert 'AUTOPLAY_REFILL_BELOW' in src, src[:200]
+
+
+def test_a_prefetched_track_carries_its_metadata():
+    """Fara insoțitor, prefetch-ul economisea doar TRANSFERUL, nu si cererile.
+
+    Poarta de zero-cereri din `process_play` cere si fisierul SI metadata
+    (`read_track_meta(...) or _history_entry(...)`), iar o piesa de autoplay nu a
+    fost niciodata in history. Deci redarea plătea iar extracția plus apelul de
+    descarcare, prin poarta throttled — aproape tot ce prefetch-ul exista sa evite.
+    """
+    st = _fresh_state()
+    url = 'https://www.youtube.com/watch?v=aaa'
+    st.queue = [{'query': url, 'title': 'A'}]
+    _run_worker(st)
+    written = _run_worker.written
+    assert written, 'prefetch-ul a lasat audio fara nicio metadata'
+    path, meta = written[0]
+    assert path == '/cache/nou.opus', path
+    assert meta.get('title') == 'Artistul - Piesa', meta
+    assert meta.get('duration') == 200, meta
+    assert meta.get('url') == url, meta
+
+
+def test_a_prefetch_stops_when_the_session_ends():
+    """Un prefetch pornit inainte de `!stop` continua sa țina singurul slot de
+    cereri catre YouTube pentru o piesa pe care nimeni nu o mai aȘteapta — deci
+    prima comanda de dupa stop aȘtepta in spatele ei."""
+    st = _fresh_state()
+    st.queue = [{'query': 'https://www.youtube.com/watch?v=aaa', 'title': 'A'},
+                {'query': 'https://www.youtube.com/watch?v=bbb', 'title': 'B'}]
+    asked = []
+
+    async def fake_resolve(url, *, loop=None, should_continue=None):
+        asked.append(url)
+        assert should_continue is not None, (
+            'predicatul nu ajunge la resolve: descarcarea nu poate fi abandonata')
+        return _Resolved(filename='/cache/nou.opus', url=url)
+
+    saved = (player.cached_for, player.resolve_from_url, player.trim_cache,
+             player.write_track_meta)
+    player.cached_for = lambda url: (url.rsplit('=', 1)[-1], None)
+    player.resolve_from_url = fake_resolve
+    player.trim_cache = lambda: None
+    player.write_track_meta = lambda path, meta: True
+    try:
+        asyncio.run(player._prefetch_worker(st, alive=lambda: False))
+    finally:
+        (player.cached_for, player.resolve_from_url, player.trim_cache,
+         player.write_track_meta) = saved
+    assert asked == [], f'a descarcat pentru o sesiune incheiata: {asked}'
+
+
+def test_the_predicate_reaches_the_download_itself():
+    """Garda de la inceputul buclei nu ajunge: o descarcare durează pana la 240s.
+
+    `resolve_from_url` consulta `should_continue` INTRE etape exact ca sa poata fi
+    abandonata; fara sa il primeasca, un `!stop` in timpul transferului nu opreste
+    nimic si slotul de cereri rămâne ocupat pana la capat.
+    """
+    st = _fresh_state()
+    st.queue = [{'query': 'https://www.youtube.com/watch?v=aaa', 'title': 'A'}]
+    seen = {}
+
+    async def fake_resolve(url, *, loop=None, should_continue=None):
+        seen['predicate'] = should_continue
+        return _Resolved(filename='/cache/nou.opus', url=url)
+
+    saved = (player.cached_for, player.resolve_from_url, player.trim_cache,
+             player.write_track_meta)
+    player.cached_for = lambda url: (url.rsplit('=', 1)[-1], None)
+    player.resolve_from_url = fake_resolve
+    player.trim_cache = lambda: None
+    player.write_track_meta = lambda path, meta: True
+    alive = [True]
+    try:
+        asyncio.run(player._prefetch_worker(st, alive=lambda: alive[0]))
+    finally:
+        (player.cached_for, player.resolve_from_url, player.trim_cache,
+         player.write_track_meta) = saved
+
+    predicate = seen.get('predicate')
+    assert callable(predicate), (
+        'descarcarea nu primeste niciun predicat: un !stop in timpul '
+        'transferului nu o poate abandona')
+    assert predicate() is True
+    alive[0] = False
+    assert predicate() is False, (
+        'predicatul transmis nu urmareste sesiunea reala')
+
+
+def test_the_session_predicate_follows_voice_and_generation():
+    """Acelasi test pe care il face si redarea, ca sa nu poata divergea."""
+    st = _fresh_state()
+    st.play_generation = 7
+
+    class _VC:
+        def __init__(self, ok=True):
+            self.ok = ok
+
+        def is_connected(self):
+            return self.ok
+
+    ctx = type('C', (), {'voice_client': _VC()})()
+    alive = player._session_alive(ctx, st, 7)
+    assert alive() is True
+    st.play_generation = 8
+    assert alive() is False, 'o sesiune noua nu invalideaza prefetch-ul vechi'
+    st.play_generation = 7
+    ctx.voice_client = _VC(ok=False)
+    assert alive() is False, 'deconectarea nu opreste prefetch-ul'
+    ctx.voice_client = None
+    assert alive() is False
+
+
+def test_every_prefetch_site_passes_the_session_predicate():
+    """Un predicat pe care nu il transmite nimeni nu opreste nimic."""
+    import ast
+    import inspect
+
+    for fn in (player.process_play, player.resume_if_idle,
+               player._play_next_async):
+        src = inspect.getsource(fn)
+        for node in ast.walk(ast.parse(src.strip())):
+            if (isinstance(node, ast.Call)
+                    and ast.unparse(node.func) == 'schedule_prefetch'):
+                assert len(node.args) >= 2, (
+                    f'{fn.__name__} programeaza prefetch fara predicat de sesiune: '
+                    f'{ast.unparse(node)}')
 
 
 if __name__ == '__main__':
