@@ -246,7 +246,14 @@ class MusicControlView(discord.ui.View):
         await self._safe_defer(interaction)
         state = get_state(self.ctx.guild.id)
         set_autoplay(state, not state.autoplay, by_user=True)
+        import music.player as _p
         if state.autoplay:
+            # Timer-ul se anuleaza INAINTE de prefill, la fel ca in `!247`:
+            # prefill-ul e o operatie de secunde, iar tick-ul de inactivitate care
+            # cade in fereastra aceea deconecteaza botul exact la apasarea
+            # butonului care trebuia sa porneasca radioul. `resume_if_idle` de la
+            # final il re-armeaza cand e cazul.
+            _p.cancel_timeout(self.ctx)
             state.loop_mode = 0
             state.show_queue = True
             # `is_loading` conteaza: prefill-ul trage un Mix de pana la 50 de
@@ -267,7 +274,6 @@ class MusicControlView(discord.ui.View):
             # Prefill-ul a tinut `is_loading`, iar un `!play` intrat in fereastra
             # aceea a fost pus in coada crezand ca incarcarea in curs o va scurge,
             # deci tot aici e si locul in care o scurgem.
-            import music.player as _p
             log.info(f"Autoplay ON: {_p.resume_if_idle(self.ctx)}")
         else:
             state.show_queue = False

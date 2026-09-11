@@ -302,6 +302,14 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         if any(p in search for p in ['spotify.com/', 'deezer.com/']):
             resolved = await _resolve_platform_url(search)
             if resolved is None:
+                # Timer-ul a fost anulat mai sus si nu pornim NIMIC. `idle_timer` se
+                # re-armeaza doar din propriul `finally`, adica doar dintr-un tick
+                # care exista deja — deci 24/7 rămânea ON, botul in canal, coada
+                # goala si niciun tick programat: tacere pana la repornire. yt-dlp
+                # nu are extractor de Spotify/Deezer, deci asta e rezultatul
+                # obișnuit, nu unul exotic.
+                log.info(f"Link de platforma ilizibil: "
+                         f"{player_mod.resume_if_idle(ctx)}")
                 return await ctx.send(
                     "Nu pot citi linkul de Spotify/Deezer. Scrie artistul si titlul.",
                     delete_after=15)
@@ -416,6 +424,14 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         if any(p in search for p in ['spotify.com/', 'deezer.com/']):
             resolved = await _resolve_platform_url(search)
             if resolved is None:
+                # Timer-ul a fost anulat mai sus si nu pornim NIMIC. `idle_timer` se
+                # re-armeaza doar din propriul `finally`, adica doar dintr-un tick
+                # care exista deja — deci 24/7 rămânea ON, botul in canal, coada
+                # goala si niciun tick programat: tacere pana la repornire. yt-dlp
+                # nu are extractor de Spotify/Deezer, deci asta e rezultatul
+                # obișnuit, nu unul exotic.
+                log.info(f"Link de platforma ilizibil: "
+                         f"{player_mod.resume_if_idle(ctx)}")
                 return await ctx.send(
                     "Nu pot citi linkul de Spotify/Deezer. Scrie artistul si titlul.",
                     delete_after=15)

@@ -1178,6 +1178,89 @@ def test_a_rejected_track_over_a_playing_one_does_not_eat_the_queue():
         assert st.last_title == 'Piesa care chiar cânta', st.last_title
 
 
+def test_an_undecodable_file_is_deleted_not_replayed_through_pcm():
+    """`probe` inghite eșecul si intoarce `(None, None)`.
+
+    Un fisier fara flux audio ajungea la FFmpeg, care ieșea imediat cu 0 cadre, si
+    redarea era raportata ca REUSITA: niciun mesaj, contorul de erori neatins, iar
+    intrarea otravita rămânea in cache si era servita la fiecare reluare. Iar
+    fallback-ul PCM nu are voie sa o prinda: ar reda acelasi fisier si ar raporta
+    din nou succes.
+    """
+    from music.utils import UndecodableAudio
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, 'vid123.opus')
+        open(target, 'wb').write(b'nu e audio')
+        st = _fresh_state()
+        vc = _FakeVoiceClient()
+        ctx = _FakeCtx(vc)
+
+        with _Harness(target) as h:
+            async def refuse(filename, channel, **kwargs):
+                raise UndecodableAudio('fara flux audio')
+
+            player.make_opus_source = refuse
+            asyncio.run(player.process_play(ctx, 'artistul piesa'))
+
+        assert not vc.played, (
+            'a redat totusi fisierul: fallback-ul PCM l-a prins si l-a pornit')
+        assert target in h.cleaned, (
+            f'intrarea otravita a rămas in cache: {h.cleaned}')
+        assert st.current_file is None, st.current_file
+        assert st._consecutive_errors == 1, (
+            f'nu a fost numarata ca eroare: contorul e {st._consecutive_errors}, '
+            f'deci intrerupatorul de 5 erori nu se armeaza niciodata')
+        assert any('roare' in str(m) or 'utea' in str(m) for m in ctx.sent), (
+            f'utilizatorul nu a aflat nimic: {ctx.sent}')
+
+
+def test_a_poisoned_cache_entry_is_removed_on_the_cache_path_too():
+    """Cazul care conteaza de fapt: fisierul stricat e DEJA in cache.
+
+    Pe calea de cache `reused=True`, deci `_discard_partial` il lasa in mod
+    deliberat pe disc (o intrare de cache nu se arunca la o eroare de transport).
+    Un fisier care nu se decodeaza nu e insa o eroare de transport: rămas acolo, ar
+    fi servit la fiecare reluare, la infinit.
+    """
+    import music.utils as utils_mod
+
+    from music.utils import UndecodableAudio
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cached = os.path.join(tmp, 'vid123.opus')
+        with open(cached, 'wb') as fh:
+            fh.write(b'nu e audio')
+
+        st = _fresh_state()
+        st.history = [{'url': 'https://www.youtube.com/watch?v=vid123',
+                       'title': 'Artistul - Piesa', 'channel': 'Canalul'}]
+        vc = _FakeVoiceClient()
+        ctx = _FakeCtx(vc)
+
+        saved_dir = utils_mod.DOWNLOAD_DIR
+        utils_mod.DOWNLOAD_DIR = tmp
+        saved_trim = player.trim_cache
+        player.trim_cache = lambda: None
+        try:
+            with _Harness('/nu/se/foloseste') as h:
+                async def refuse(filename, channel, **kwargs):
+                    raise UndecodableAudio('fara flux audio')
+
+                player.make_opus_source = refuse
+                asyncio.run(player.process_play(
+                    ctx, 'https://www.youtube.com/watch?v=vid123'))
+        finally:
+            utils_mod.DOWNLOAD_DIR = saved_dir
+            player.trim_cache = saved_trim
+
+        assert not vc.played, 'a redat un fisier care nu se decodeaza'
+        assert cached in h.cleaned, (
+            f'intrarea otravita a rămas in cache si va fi servita la fiecare '
+            f'reluare: {h.cleaned}')
+        assert st.current_file is None, st.current_file
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

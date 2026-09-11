@@ -26,6 +26,14 @@ DISCORD_ERRORS = (discord.HTTPException, OSError, aiohttp.ClientError,
                   asyncio.TimeoutError)
 
 
+class UndecodableAudio(Exception):
+    """Fisierul nu are flux audio: nu e o pana de transport, e o intrare stricata.
+
+    Tip propriu ca fallback-ul PCM din `process_play` sa NU il prinda — acela ar
+    reda exact acelasi fisier stricat si ar raporta din nou succes.
+    """
+
+
 async def safe_delete(msg):
     if msg:
         try:
@@ -72,6 +80,14 @@ async def make_opus_source(filename: str, channel, **ffmpeg_opts):
     rămâne pe `-c:a copy`, adica zero reencodare.
     """
     codec, _ = await discord.FFmpegOpusAudio.probe(filename)
+    if codec is None:
+        # `probe` inghite eșecul sondei si intoarce `(None, None)` (discord.py
+        # player.py:646-659), deci un fisier fara flux audio — un `.part`
+        # redenumit, un HTML de eroare salvat ca audio, un transfer trunchiat —
+        # ajungea la FFmpeg, care ieșea imediat cu 0 cadre. Redarea era raportata
+        # ca REUSITA: zero cadre, niciun mesaj, contorul de erori neatins, iar
+        # fisierul otravit rămânea in cache si era servit la fiecare reluare.
+        raise UndecodableAudio(f"Fisierul nu conține audio: {os.path.basename(filename)}")
     bitrate = encode_bitrate_kbps(channel)
     copies = codec in ('opus', 'libopus', 'copy')
     log.info(f"Audio: codec={codec} -> {'copy' if copies else 'reencodare libopus'} "
@@ -288,6 +304,13 @@ def cached_download(video_id: str, directory: str | None = None) -> str | None:
     return None
 
 
+# Peste atat, un `.part` nu mai e o descarcare in curs: bugetul unei cereri e
+# DOWNLOAD_TIMEOUT_SEC=240, iar un transfer viu isi atinge fisierul la fiecare
+# bloc. Sub prag il protejam; peste, e gunoi lasat de un thread abandonat sau de
+# un transfer picat, iar `sweep_partials` nu mai ruleaza pana la repornire.
+STALE_PARTIAL_SEC = 900
+
+
 def trim_download_cache(keep, max_bytes: int | None = None,
                         directory: str | None = None) -> int:
     """Tine cache-ul audio sub plafon, stergand cele mai vechi. Returneaza cate.
@@ -301,6 +324,7 @@ def trim_download_cache(keep, max_bytes: int | None = None,
     protected = {os.path.abspath(p) for p in keep if p}
     entries = []
     total = 0
+    now = time.time()
     try:
         names = os.listdir(directory)
     except OSError:
@@ -322,8 +346,16 @@ def trim_download_cache(keep, max_bytes: int | None = None,
         # `try_rename` eșua si descarcarea aparea ca defectiune tehnica, bătând
         # contorul de erori consecutive. Marimea lor se numara in total — de-aia
         # trebuie evacuat altceva — dar nu sunt candidati.
+        # ...dar numai cat timp CHIAR sunt in curs. Marimea lor se numara in
+        # total, iar bucla de evacuare se opreste doar cand totalul scade sub
+        # plafon: un `.part` inghetat mai mare decat plafonul facea condiția de
+        # ieșire imposibila, deci fiecare trecere ștergea TOT ce nu era protejat
+        # — inclusiv piesa abia adusa de prefetch — si tot rămânea peste limita.
         if name.endswith(('.part', '.ytdl')):
-            continue
+            if now - mtime < STALE_PARTIAL_SEC:
+                continue
+            log.info(f"Evacuez un transfer abandonat: {name} "
+                     f"(neatins {int(now - mtime)}s)")
         if path not in protected:
             entries.append((mtime, size, path))
 
@@ -438,7 +470,21 @@ def is_clean(title, duration, last_title: str) -> bool:
     return not reject_reason(title, duration, last_title)
 
 
-def format_time(seconds: int) -> str:
+def format_time(seconds) -> str:
+    """mm:ss sau h:mm:ss. Accepta orice numar, nu doar int.
+
+    yt-dlp intoarce durata ca float pentru multe clipuri, iar `divmod` pe float da
+    float — deci `f"{m:02d}"` ridica ValueError ("Unknown format code 'd' for
+    object of type 'float'"). Excepția ieșea din stratul de UI si era prinsa de
+    `except Exception` din process_play, care o raporta ca "Eroare necunoscuta" pe
+    o piesa perfect redabila.
+    """
+    try:
+        seconds = int(float(seconds or 0))
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError vine de la `inf`: `int(float('inf'))` nu e o valoare, e o
+        # excepție. Un panou nu are voie sa cada pentru o durata absurda.
+        return "0:00"
     if seconds <= 0:
         return "0:00"
     m, s = divmod(seconds, 60)

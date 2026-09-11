@@ -340,8 +340,19 @@ def _count_cookie_entries(path: str) -> int:
 # toate, fisierul nu e "cookies rotite", e un fisier rupt.
 COOKIE_CRITICAL = ('__Secure-1PSID', '__Secure-3PSID', 'SAPISID', 'SID')
 
+# Identitatea de SESIUNE, separata de lista de mai sus. SAPISID nu e un
+# credential: e intrarea pentru header-ul `Authorization: SAPISIDHASH`, iar in
+# export-urile reale e cookie de `.google.com`, deci nu pleaca niciodata spre
+# youtube.com. Un jar rămas doar cu el trimite literal zero cookie-uri la YouTube,
+# dar trecea `cookies_valid` (un OR pe cele patru nume): era adoptat pe volum, si
+# apoi Ștampilat drept "ultima copie buna" peste singura care mai autentifica.
+COOKIE_SESSION = ('SID', '__Secure-1PSID', '__Secure-3PSID')
+
 _GOOD_SUFFIX = '.good'
 _rolled_back = False
+# Conținutul jar-ului comun in clipa fiecarei copieri, pentru compare-and-swap-ul
+# din `adopt_cookies`.
+_borrowed_source: dict[str, str] = {}
 
 
 def cookie_health(path: str) -> dict:
@@ -374,12 +385,45 @@ def cookie_health(path: str) -> dict:
     }
 
 
+def _session_names(path: str) -> set:
+    """Cookie-urile de sesiune valabile pentru youtube.com, din jar-ul dat.
+
+    Domeniul conteaza: un `SID` de `.google.com` nu pleaca niciodata spre YouTube.
+    """
+    found = set()
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                raw = line.strip()
+                if not raw:
+                    continue
+                if raw.startswith('#HttpOnly_'):
+                    raw = raw[len('#HttpOnly_'):]
+                elif raw.startswith('#'):
+                    continue
+                parts = raw.split('\t')
+                if len(parts) < 7:
+                    continue
+                domain = parts[0].lstrip('.').lower()
+                name = parts[5]
+                if name in COOKIE_SESSION and (
+                        domain == 'youtube.com' or domain.endswith('.youtube.com')):
+                    found.add(name)
+    except OSError as e:
+        log.debug(f"Nu am putut citi jar-ul {path}: {e}")
+    return found
+
+
 def cookies_valid(path: str) -> bool:
-    """Mai poate autentifica? Cel putin un cookie critic de sesiune."""
+    """Mai poate autentifica? Cere o identitate de SESIUNE pentru youtube.com.
+
+    Nu doar "vreun cookie critic": vezi `COOKIE_SESSION`. Un jar rămas cu SAPISID
+    si nimic altceva trecea un OR pe cele patru nume, dar nu trimite nimic la
+    YouTube — si era apoi adoptat pe volum si promovat peste ultima copie buna.
+    """
     if not os.path.exists(path):
         return False
-    health = cookie_health(path)
-    return bool(health['entries'] and health['present'])
+    return bool(_session_names(path))
 
 
 def _write_private(path: str, text: str) -> None:
@@ -447,6 +491,9 @@ def borrow_cookies(shared: str) -> str | None:
         log.debug(f"Nu am putut scrie copia de cookies: {e}")
         discard_cookies(temp)
         return None
+    # Ce conținea jar-ul comun in clipa copierii. Adoptarea e un compare-and-swap
+    # pe valoarea asta — vezi `adopt_cookies`.
+    _borrowed_source[temp] = text
     return temp
 
 
@@ -472,8 +519,20 @@ def adopt_cookies(temp: str, shared: str) -> bool:
             text = fh.read()
         with open(shared, encoding='utf-8', errors='replace') as fh:
             current = fh.read()
-        if text != current:
-            _write_private(shared, text)
+        if text == current:
+            return True
+        # COMPARE-AND-SWAP. Fara el, o cerere aflata in zbor peste un
+        # `rollback_cookies()` scria instantaneul ei de DINAINTE peste jar-ul
+        # restaurat — iar revenirea e o singura lovitura pe proces, deci deja
+        # consumata. De atunci fiecare cerere folosea cookie-uri moarte pana la
+        # repornirea containerului. Daca jar-ul comun s-a schimbat sub noi, rotatia
+        # noastra e veche si se arunca.
+        expected = _borrowed_source.get(temp)
+        if expected is not None and expected != current:
+            log.warning("Jar-ul comun s-a schimbat sub cererea asta (revenire sau "
+                        "alta adoptare); nu il suprascriu cu rotatia mea veche")
+            return False
+        _write_private(shared, text)
         return True
     except OSError as e:
         log.debug(f"Nu am putut adopta copia de cookies: {e}")
@@ -484,6 +543,7 @@ def discard_cookies(temp: str | None) -> None:
     """Arunca copia unei cereri. Sigura de chemat de doua ori."""
     if not temp:
         return
+    _borrowed_source.pop(temp, None)
     try:
         os.unlink(temp)
     except OSError:

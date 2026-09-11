@@ -9,7 +9,8 @@ from music.config import (AUTOPLAY_REFILL_BELOW, FFMPEG_OPTS, PREFETCH_AHEAD,
 from music.resolve import (cached_for, resolve_from_url, search_to_url,
                            video_id)
 from music.state import begin_loading, end_loading, get_state
-from music.utils import (DISCORD_ERRORS, cleanup_file, item_title,
+from music.utils import (DISCORD_ERRORS, UndecodableAudio, cleanup_file,
+                         item_title,
                          make_opus_source, read_track_meta,
                          trim_download_cache, write_track_meta)
 from music.autoplay import prefill_autoplay_queue
@@ -677,6 +678,16 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         try:
             source = await make_opus_source(filename, vc.channel, **FFMPEG_OPTS)
             vc.play(source, after=after_play)
+        except UndecodableAudio:
+            # NU pe fallback-ul PCM: acela ar reda acelasi fisier stricat si ar
+            # raporta iar succes. Intrarea otravita pleaca de pe disc, ca reluarea
+            # sa nu o mai serveasca, si eroarea urca la calea normala de eroare —
+            # cu mesaj pentru utilizator si cu contorul de erori bătut.
+            log.warning(f"Intrare de cache stricata, o Șterg: {filename}")
+            cleanup_file(filename, _loop)
+            if state.current_file == filename:
+                state.current_file = None
+            raise
         except Exception:
             log.warning("OpusAudio esuat, fallback PCM", exc_info=True)
             # Daca sursa s-a construit dar vc.play a crapat, procesul FFmpeg
