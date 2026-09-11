@@ -33,6 +33,10 @@ class _FakeVoiceClient:
     def __init__(self, playing=False, paused=False):
         self.playing = playing
         self.paused = paused
+        self.disconnects = []
+
+    async def disconnect(self, *, force=False):
+        self.disconnects.append(force)
 
     def is_connected(self):
         return True
@@ -44,11 +48,38 @@ class _FakeVoiceClient:
         return self.paused
 
 
+class _FakeVoiceChannel:
+    """Canalul de voce al autorului, cu permisiuni si conectare controlate."""
+
+    def __init__(self, *outcomes, connect_perm=True, speak_perm=True):
+        self.name = 'General'
+        self.bitrate = 64000
+        # Cate secunde a cerut fiecare incercare de conectare.
+        self.connect_calls = []
+        self._outcomes = list(outcomes)
+        self._perms = type('P', (), {'connect': connect_perm,
+                                     'speak': speak_perm})()
+
+    def permissions_for(self, member):
+        return self._perms
+
+    async def connect(self, *, timeout=None, **kwargs):
+        self.connect_calls.append(timeout)
+        outcome = self._outcomes.pop(0) if self._outcomes else None
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
 class _FakeCtx:
-    def __init__(self, vc, interaction=None, timeline=None):
+    def __init__(self, vc, interaction=None, timeline=None, channel=None):
         self.guild = type('G', (), {'id': GUILD_ID})()
+        # Botul ca membru (pentru permisiuni) si clientul de voce al guild-ului:
+        # `_drop_voice` curata prin el inaintea unei reincercari.
+        self.guild.me = object()
+        self.guild.voice_client = vc
         self.voice_client = vc
-        self.author = type('A', (), {'voice': type('V', (), {'channel': None})()})()
+        self.author = type('A', (), {'voice': type('V', (), {'channel': channel})()})()
         self.message = None
         self.bot = type('B', (), {'loop': None})()
         self.sent = []
@@ -412,6 +443,109 @@ def test_a_prefix_invocation_does_not_announce_itself():
     assert ctx.deferred == 0, 'a incercat sa confirme o interactiune inexistenta'
     assert not any('Caut' in str(m) for m in ctx.sent), (
         f'a adaugat un mesaj de confirmare inutil la !play: {ctx.sent}')
+
+
+def _connect_ctx(channel, stale=None):
+    """Un ctx fara client de voce, deci care TREBUIE sa se conecteze."""
+    ctx = _FakeCtx(None, channel=channel)
+    ctx.guild.voice_client = stale
+    return ctx
+
+
+def _no_retry_delay():
+    """Reincercarea nu are voie sa faca testul sa aștepte cu adevarat."""
+    saved = commands_mod.VOICE_RETRY_DELAY_SEC
+    commands_mod.VOICE_RETRY_DELAY_SEC = 0
+    return saved
+
+
+def test_a_missing_connect_permission_is_answered_instantly():
+    """Discord nu raspunde cu eroare la o cerere de voce refuzata: o ignora.
+
+    Deci lipsa permisiunii arata exact ca o pana de server de voce — amandoua ca
+    timeout. Verificarea locala le separa si nu mai face pe nimeni sa aștepte.
+    """
+    _fresh_state()
+    channel = _FakeVoiceChannel(connect_perm=False)
+    ctx = _connect_ctx(channel)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['play'](ctx, search='ceva'))
+    assert channel.connect_calls == [], (
+        'a incercat sa se conecteze fara permisiunea Connect')
+    assert any('permisiunea' in str(m) for m in ctx.sent), ctx.sent
+    assert w.plays == [], 'a mers mai departe cu rezolvarea desi nu poate intra'
+
+
+def test_a_missing_speak_permission_is_reported_before_connecting():
+    """Altfel intra, tace, si nimic nu apare in loguri."""
+    _fresh_state()
+    channel = _FakeVoiceChannel(speak_perm=False)
+    ctx = _connect_ctx(channel)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['play'](ctx, search='ceva'))
+    assert channel.connect_calls == [], channel.connect_calls
+    assert any('vorbesc' in str(m) for m in ctx.sent), ctx.sent
+    assert w.plays == []
+
+
+def test_a_voice_endpoint_that_arrives_late_is_retried():
+    """Bug-ul din producție: conectat, apoi deconectat imediat.
+
+    Discord trimite VOICE_SERVER_UPDATE cu `endpoint: null` cand reasigneaza
+    serverul de voce, si abia apoi pe cel real. O singura incercare renunța
+    exact acolo.
+    """
+    _fresh_state()
+    connected = _FakeVoiceClient()
+    channel = _FakeVoiceChannel(asyncio.TimeoutError(), connected)
+    stale = _FakeVoiceClient()
+    ctx = _connect_ctx(channel, stale=stale)
+    saved = _no_retry_delay()
+    try:
+        with _Wiring() as w:
+            asyncio.run(w.bot.registry['play'](ctx, search='ceva'))
+    finally:
+        commands_mod.VOICE_RETRY_DELAY_SEC = saved
+    assert len(channel.connect_calls) == 2, (
+        f'nu a reincercat dupa timeout: {channel.connect_calls}')
+    assert stale.disconnects == [True], (
+        'clientul pe jumatate deschis nu a fost inchis forțat: '
+        'a doua incercare ar fi refuzata din start cu ClientException')
+    assert w.plays == ['ceva'], (
+        f'reconectarea a reusit, dar redarea nu a mai pornit: {w.plays}')
+
+
+def test_every_attempt_failing_tells_the_user_what_happened():
+    _fresh_state()
+    channel = _FakeVoiceChannel(asyncio.TimeoutError(), asyncio.TimeoutError(),
+                                asyncio.TimeoutError())
+    ctx = _connect_ctx(channel)
+    saved = _no_retry_delay()
+    try:
+        with _Wiring() as w:
+            asyncio.run(w.bot.registry['play'](ctx, search='ceva'))
+    finally:
+        commands_mod.VOICE_RETRY_DELAY_SEC = saved
+    assert len(channel.connect_calls) == commands_mod.VOICE_CONNECT_ATTEMPTS, (
+        channel.connect_calls)
+    assert any('voce' in str(m) for m in ctx.sent), ctx.sent
+    assert w.plays == [], 'a rezolvat o piesa fara sa fie in voce'
+
+
+def test_the_connect_budget_is_worth_waiting_for():
+    """Plafoanele sunt datele fixului, deci nu au voie sa se intoarca in liniște."""
+    assert commands_mod.VOICE_CONNECT_ATTEMPTS >= 2, (
+        'o singura incercare = bug-ul din producție')
+    assert commands_mod.VOICE_CONNECT_TIMEOUT >= 20, (
+        f'{commands_mod.VOICE_CONNECT_TIMEOUT}s e prea putin pentru un endpoint '
+        f'intarziat; scurtimea de dinainte exista pentru cazul permisiunilor, '
+        f'care se rezolva acum local')
+    _fresh_state()
+    channel = _FakeVoiceChannel(_FakeVoiceClient())
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['play'](_connect_ctx(channel), search='ceva'))
+    assert channel.connect_calls == [commands_mod.VOICE_CONNECT_TIMEOUT], (
+        f'conectarea nu foloseste plafonul declarat: {channel.connect_calls}')
 
 
 def test_the_command_tree_is_no_longer_wiped_before_syncing():

@@ -30,6 +30,13 @@ ALLOWED_HOSTS = {
     'deezer.com', 'www.deezer.com', 'link.deezer.com',
 }
 
+# Conectarea la voce. Vezi `_ensure_voice` pentru de ce nu mai e 15s si de ce se
+# reincearca: Discord raspunde la o reasignare de server de voce cu un endpoint
+# nul, si abia dupa aceea cu cel real.
+VOICE_CONNECT_TIMEOUT = 25.0
+VOICE_CONNECT_ATTEMPTS = 2
+VOICE_RETRY_DELAY_SEC = 2.0
+
 
 def sanitize_query(raw: str) -> tuple[str | None, str | None]:
     """(interogare, motiv_respingere). Ce nu e URL devine o cautare pe YouTube."""
@@ -98,25 +105,79 @@ def autocomplete_choices(current: str) -> list:
 def setup_music_commands(bot, process_play, play_next, update_player_ui, start_timeout, cancel_timeout):
     """Inregistreaza toate comenzile muzicale pe bot."""
 
+    async def _drop_voice(ctx):
+        """Inchide orice client de voce pe jumatate deschis.
+
+        Obligatoriu inaintea unei reincercari: `channel.connect()` refuza din
+        start cu `ClientException` daca `guild.voice_client` mai e setat, deci fara
+        curatare a doua incercare nu ajunge niciodata la Discord.
+        """
+        vc = getattr(ctx.guild, 'voice_client', None)
+        if vc is None:
+            return
+        try:
+            await vc.disconnect(force=True)
+        except DISCORD_ERRORS as e:
+            log.debug(f"Curatarea clientului de voce a eșuat: {e}")
+
     async def _ensure_voice(ctx):
         """Conecteaza-te la canalul autorului. None daca nu se poate.
 
-        connect() nu avea niciun guard: fara permisiunea Connect utilizatorul
-        aștepta 30 de secunde fara niciun raspuns.
+        Doua lucruri arata IDENTIC din afara — amandoua ca timeout — pentru ca
+        Discord nu raspunde cu o eroare la o cerere de voce pe care o refuza:
+
+        1. Lipsa permisiunii Connect: cererea de pe gateway e pur si simplu
+           ignorata. De asta se verifica LOCAL, inainte, si raspunsul e instantaneu
+           in loc de o aștepare oarba.
+        2. O reasignare de server de voce: Discord trimite VOICE_SERVER_UPDATE cu
+           `endpoint: null` si abia apoi pe cel adevarat (verificat in
+           discord/voice_state.py:387 — de acolo vine "Awaiting endpoint..."). Cand
+           al doilea intarzie, o singura incercare de 15s arata pentru utilizator
+           exact ca "s-a conectat si a plecat imediat". S-a intamplat in producție.
+
+        Vechiul timeout de 15s exista ca sa nu se aștepte degeaba la cazul 1 — dar
+        cazul 1 se rezolva acum din verificarea de permisiuni, deci aici putem
+        aștepta cat merita cazul 2, si putem reincerca.
         """
         if ctx.voice_client:
             return ctx.voice_client
-        try:
-            return await ctx.author.voice.channel.connect(timeout=15.0)
-        except asyncio.TimeoutError:
-            await ctx.send("Nu am reusit sa intru in voce (timeout).", delete_after=10)
-        except discord.ClientException as e:
-            log.warning(f"Voice connect: {e}")
-            await ctx.send("Sunt deja conectat altundeva.", delete_after=10)
-        except discord.HTTPException as e:
-            log.warning(f"Voice connect HTTP: {e}")
-            await ctx.send("Nu am permisiunea sa intru in canalul tau de voce.",
-                           delete_after=10)
+        channel = getattr(ctx.author.voice, 'channel', None)
+        if channel is None:
+            await ctx.send("Intra pe voce!", delete_after=5)
+            return None
+
+        perms = channel.permissions_for(ctx.guild.me)
+        if not perms.connect:
+            await ctx.send(f"Nu am permisiunea sa intru in **{channel.name}**.",
+                           delete_after=15)
+            return None
+        if not perms.speak:
+            # Fara Speak s-ar conecta si ar tacea — adica exact reclamația
+            # "s-a conectat si nu se aude nimic", fara nicio urma in loguri.
+            await ctx.send(f"Pot intra in **{channel.name}**, dar nu am voie sa "
+                           f"vorbesc acolo.", delete_after=15)
+            return None
+
+        for attempt in range(1, VOICE_CONNECT_ATTEMPTS + 1):
+            try:
+                return await channel.connect(timeout=VOICE_CONNECT_TIMEOUT)
+            except asyncio.TimeoutError:
+                log.warning(f"Voice connect timeout (incercarea {attempt}/"
+                            f"{VOICE_CONNECT_ATTEMPTS}): Discord nu a trimis endpoint")
+                await _drop_voice(ctx)
+                if attempt < VOICE_CONNECT_ATTEMPTS:
+                    await asyncio.sleep(VOICE_RETRY_DELAY_SEC)
+            except discord.ClientException as e:
+                log.warning(f"Voice connect: {e}")
+                await ctx.send("Sunt deja conectat altundeva.", delete_after=10)
+                return None
+            except discord.HTTPException as e:
+                log.warning(f"Voice connect HTTP: {e}")
+                await ctx.send("Nu am reusit sa intru in canalul tau de voce.",
+                               delete_after=10)
+                return None
+        await ctx.send("Serverul de voce al Discord nu raspunde. Mai incearca.",
+                       delete_after=15)
         return None
 
     async def _resolve_platform_url(query: str):
