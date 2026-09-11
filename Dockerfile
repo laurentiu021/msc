@@ -14,7 +14,11 @@ ARG BGUTIL_VERSION=2.0.0
 # cu 0, si build-ul continua mai departe cu un repo de Node lipsa.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+# `ca-certificates` NU e in node:24-slim, iar fara el `git clone` prin HTTPS cade
+# cu "server certificate verification failed. CAfile: none". Imaginea python-slim
+# il avea deja, de asta nu se vedea inainte de separarea in doua etape.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --single-branch --depth 1 --branch ${BGUTIL_VERSION} \
