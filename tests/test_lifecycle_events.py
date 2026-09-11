@@ -37,9 +37,13 @@ class _FakeVoiceClient:
         self.playing = playing
         self.paused = paused
         self.disconnected = False
+        # Separat de `disconnected`: o reconectare interna a lui discord.py lasa
+        # clientul inregistrat si il aduce inapoi conectat, fara sa treaca prin
+        # `disconnect()`.
+        self.connected = True
 
     def is_connected(self):
-        return not self.disconnected
+        return self.connected and not self.disconnected
 
     def is_playing(self):
         return self.playing
@@ -287,15 +291,167 @@ def test_importing_the_bot_never_touches_the_volume():
 
 # --- 2. o deconectare nu e o preferinta a utilizatorului ---------------------
 
-def _leave_voice(state):
+def _leave_voice(state, *, still_connected=False, grace=0.05):
+    """Deconectare din voce, cu rabdarea de reconectare scurtata.
+
+    Curatarea e AMANATA cu `VOICE_RECONNECT_GRACE_SEC`, fiindca un blip al
+    websocket-ului de voce produce exact acelasi eveniment ca o deconectare
+    adevarata. Testul scurteaza rabdarea si aȘteapta task-ul, exact cum face deja
+    cu `EMPTY_CHANNEL_GRACE_SEC`.
+    """
     channel = _FakeChannel([])
     vc = _FakeVoiceClient(channel=channel)
+    # In clipa ecoului clientul NU e conectat — nici pe o reconectare interna, nici
+    # pe o deconectare reala. Diferenta apare abia mai tarziu: reconectarea il
+    # aduce inapoi in fereastra de rabdare. Un fals care raspunde "conectat" din
+    # prima face testul sa treaca chiar si fara rabdare, adica din motivul greșit.
+    vc.connected = False
     guild = _FakeGuild(vc)
     me = _FakeMember(guild, is_me=True)
-    with _Seams():
-        asyncio.run(bot_mod.bot.on_voice_state_update(
-            me, _VoiceState(channel=channel), _VoiceState(channel=None)))
+    saved = bot_mod.VOICE_RECONNECT_GRACE_SEC
+    bot_mod.VOICE_RECONNECT_GRACE_SEC = grace
+
+    async def reconnect_midway():
+        await asyncio.sleep(grace / 3)
+        vc.connected = True
+
+    async def drive():
+        if still_connected:
+            asyncio.get_running_loop().create_task(reconnect_midway())
+        else:
+            guild.voice_client = None
+        await bot_mod.bot.on_voice_state_update(
+            me, _VoiceState(channel=channel), _VoiceState(channel=None))
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    try:
+        with _Seams():
+            asyncio.run(drive())
+    finally:
+        bot_mod.VOICE_RECONNECT_GRACE_SEC = saved
     return state
+
+
+def test_an_internal_voice_reconnect_does_not_destroy_the_session():
+    """Bug-ul cel mai grav gasit de audit: "a cantat o piesa si a stat degeaba".
+
+    discord.py se reconecteaza singur dupa un blip al websocket-ului de voce
+    (close 4006/4009, 1006 fara close frame, 30s de liniște in poll_event):
+    trimite op4 cu channel=None, deci Discord ne ecoueaza EXACT evenimentul de
+    deconectare, si apoi revine in acelasi canal cu acelasi VoiceClient.
+
+    Tratat pe loc, un blip de o secunda golea coada, stingea 24/7 si invalida
+    `after_play` prin bump-ul de generatie — deci la finalul piesei nimic nu mai
+    avansa si nimic nu mai arma un timer. Conectat si mut pana la repornire.
+    """
+    st = _fresh_state()
+    st.queue = [{'query': 'https://y/1', 'title': 'A'},
+                {'query': 'https://y/2', 'title': 'B'}]
+    st.always_on = True
+    st.autoplay = True
+    st.loop_mode = 2
+    generation = st.play_generation
+
+    _leave_voice(st, still_connected=True)
+
+    assert len(st.queue) == 2, f'coada a fost golita de o reconectare: {st.queue}'
+    assert st.always_on is True, '24/7 a fost stins de o reconectare'
+    assert st.autoplay is True, 'autoplay a fost stins de o reconectare'
+    assert st.loop_mode == 2, 'loop-ul a fost resetat de o reconectare'
+    assert st.play_generation == generation, (
+        'generatia a fost incrementata: `after_play` al piesei care cânta a fost '
+        'invalidat, deci la finalul ei nimic nu mai avanseaza coada')
+
+
+def test_a_new_session_started_during_the_grace_window_is_not_wiped():
+    """Rabdarea deschide o fereastra: cineva poate porni `!play` in ea.
+
+    Garda de generatie e ce face amanarea sigura — fara ea, curatarea intarziata
+    ar goli coada sesiunii NOI, la 20 de secunde dupa ce a pornit.
+    """
+    st = _fresh_state()
+    channel = _FakeChannel([])
+    vc = _FakeVoiceClient(channel=channel)
+    vc.connected = False
+    guild = _FakeGuild(None)
+    me = _FakeMember(guild, is_me=True)
+    saved = bot_mod.VOICE_RECONNECT_GRACE_SEC
+    bot_mod.VOICE_RECONNECT_GRACE_SEC = 0.06
+
+    async def new_session_midway():
+        await asyncio.sleep(0.02)
+        # Exact ce face o redare noua: `bump_play_generation`, coada ei, 24/7.
+        st.play_generation += 1
+        st.queue = [{'query': 'https://y/nou', 'title': 'Nou'}]
+        st.always_on = True
+
+    async def drive():
+        asyncio.get_running_loop().create_task(new_session_midway())
+        await bot_mod.bot.on_voice_state_update(
+            me, _VoiceState(channel=channel), _VoiceState(channel=None))
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    try:
+        with _Seams():
+            asyncio.run(drive())
+    finally:
+        bot_mod.VOICE_RECONNECT_GRACE_SEC = saved
+
+    assert st.queue and st.queue[0]['query'] == 'https://y/nou', (
+        f'curatarea intarziata a golit coada sesiunii noi: {st.queue}')
+    assert st.always_on is True, '24/7 al sesiunii noi a fost stins'
+
+
+def test_a_real_disconnect_still_clears_everything():
+    """Amanarea nu are voie sa slabeasca curatarea unei deconectari adevarate."""
+    st = _fresh_state()
+    st.queue = [{'query': 'https://y/1', 'title': 'A'}]
+    st.always_on = True
+    st.autoplay = True
+    generation = st.play_generation
+
+    _leave_voice(st, still_connected=False)
+
+    assert st.queue == [], st.queue
+    assert st.always_on is False and st.autoplay is False
+    assert st.play_generation > generation
+
+
+def test_leaving_voice_forgets_the_panel():
+    """Panoul aparține sesiunii de voce, deci moare cu ea.
+
+    Pana acum doar `!stop` si tick-ul de inactivitate il curatau. Pe orice alta
+    cale — canal golit, Disconnect dat de un moderator, 4014/4022 — embed-ul "se
+    reda acum" rămânea in canal cu un `<t:...:R>` care curgea in fiecare client,
+    iar view-ul rămânea inregistrat: Skip si Pause confirmau interactiunea si nu
+    faceau nimic.
+    """
+    st = _fresh_state()
+    deleted = []
+
+    class _Msg:
+        async def delete(self):
+            deleted.append(True)
+
+    stopped = []
+
+    class _View:
+        def stop(self):
+            stopped.append(True)
+
+    st.current_msg = _Msg()
+    st.current_view = _View()
+
+    _leave_voice(st, still_connected=False)
+
+    assert deleted, 'panoul a rămas in canal dupa ce sesiunea s-a incheiat'
+    assert st.current_msg is None, st.current_msg
+    assert stopped, 'view-ul a rămas inregistrat: butoanele par vii si nu fac nimic'
+    assert st.current_view is None
 
 
 def test_being_disconnected_is_not_recorded_as_a_user_decision():

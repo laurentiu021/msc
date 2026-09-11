@@ -28,18 +28,31 @@ GUILD_ID = 11
 
 
 class _FakeVoiceClient:
-    channel = None
-
-    def __init__(self, playing=False, paused=False):
+    def __init__(self, playing=False, paused=False, *, connected=True,
+                 channel=None, move_lands=True):
         self.playing = playing
         self.paused = paused
         self.disconnects = []
+        # `is_connected()` e singurul adevar despre un client de voce. discord.py
+        # inregistreaza `guild.voice_client` INAINTE de handshake si il lasa pus pe
+        # toata reconectarea interna, deci un fals care raspunde mereu True ascunde
+        # exact clasa de bug-uri in care botul iese mut.
+        self.connected = connected
+        self.channel = channel
+        self.moves = []
+        self._move_lands = move_lands
 
     async def disconnect(self, *, force=False):
         self.disconnects.append(force)
+        self.connected = False
+
+    async def move_to(self, channel):
+        self.moves.append(channel)
+        if self._move_lands:
+            self.channel = channel
 
     def is_connected(self):
-        return True
+        return self.connected
 
     def is_playing(self):
         return self.playing
@@ -54,6 +67,8 @@ class _FakeVoiceChannel:
     def __init__(self, *outcomes, connect_perm=True, speak_perm=True):
         self.name = 'General'
         self.bitrate = 64000
+        # Membrii conteaza: un canal in care mai e cineva nu poate fi parasit.
+        self.members = []
         # Cate secunde a cerut fiecare incercare de conectare.
         self.connect_calls = []
         self._outcomes = list(outcomes)
@@ -597,11 +612,95 @@ def test_247_already_in_voice_does_not_reconnect():
     st = _fresh_state()
     st.last_url = 'https://www.youtube.com/watch?v=x'
     channel = _FakeVoiceChannel()
-    ctx = _FakeCtx(_FakeVoiceClient(playing=True), channel=channel)
+    ctx = _FakeCtx(_FakeVoiceClient(playing=True, channel=channel),
+                   channel=channel)
     with _Wiring() as w:
         asyncio.run(w.bot.registry['247'](ctx))
     assert channel.connect_calls == [], 's-a reconectat peste o sesiune activa'
     assert st.always_on is True
+
+
+def test_a_registered_but_unconnected_client_is_not_treated_as_ready():
+    """`guild.voice_client` nenul nu inseamna "conectat".
+
+    discord.py il inregistreaza INAINTE de handshake si il lasa pus pe toata
+    reconectarea interna. Cu vechea verificare pe adevar-simplu, `!play` ajungea
+    la `process_play`, care vede `not vc.is_connected()`, stinge steagul si iese
+    fara NICIUN mesaj si fara nicio linie de log — dupa ce comanda Ștersese deja
+    mesajul utilizatorului. Comanda dispărea pur si simplu.
+    """
+    st = _fresh_state()
+    channel = _FakeVoiceChannel()
+    half_open = _FakeVoiceClient(connected=False, channel=channel)
+    ctx = _FakeCtx(half_open, channel=channel)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['play'](ctx, search='ceva'))
+    assert w.plays == [], 'a pornit o rezolvare cu un client de voce neconectat'
+    assert ctx.sent, 'comanda a dispărut fara niciun mesaj'
+    assert channel.connect_calls == [], (
+        'a chemat connect() peste un slot ocupat: ar da ClientException')
+
+
+def test_247_with_a_half_open_client_does_not_claim_to_be_on():
+    """Trecea de `if not ctx.voice_client` si anunța "24/7 ON" dupa ce omorâse
+    singurul timer — exact starea pe care 24/7 trebuie sa o facă imposibila."""
+    st = _fresh_state()
+    channel = _FakeVoiceChannel()
+    ctx = _FakeCtx(_FakeVoiceClient(connected=False, channel=channel),
+                   channel=channel)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['247'](ctx))
+    assert st.always_on is False, '24/7 pornit peste o conexiune inexistenta'
+    assert st.autoplay is False, 'a aprins autoplay fara voce'
+
+
+def test_play_from_another_channel_moves_the_bot_when_the_old_one_is_empty():
+    """Altfel piesa cânta unde nu e nimeni, iar cel care a cerut-o nu o poate nici
+    opri din panou: `interaction_check` refuza pe oricine nu e in canalul botului."""
+    st = _fresh_state()
+    old = _FakeVoiceChannel()
+    old.name = 'Vechi'
+    new = _FakeVoiceChannel()
+    new.name = 'Nou'
+    vc = _FakeVoiceClient(channel=old)
+    ctx = _FakeCtx(vc, channel=new)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['play'](ctx, search='ceva'))
+    assert vc.moves == [new], f'nu s-a mutat in canalul autorului: {vc.moves}'
+    assert w.plays == ['ceva'], w.plays
+
+
+def test_play_from_another_channel_does_not_steal_a_session_in_use():
+    st = _fresh_state()
+    old = _FakeVoiceChannel()
+    old.name = 'Vechi'
+    old.members = [type('M', (), {'bot': False})()]
+    new = _FakeVoiceChannel()
+    new.name = 'Nou'
+    vc = _FakeVoiceClient(channel=old)
+    ctx = _FakeCtx(vc, channel=new)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['play'](ctx, search='ceva'))
+    assert vc.moves == [], 'a furat sesiunea unui canal in care se ascultă'
+    assert w.plays == [], 'a redat oricum'
+    assert any('Vechi' in str(m) for m in ctx.sent), ctx.sent
+
+
+def test_a_move_that_silently_fails_is_reported():
+    """`move_to` inghite propriul TimeoutError si revine la starea veche, deci
+    absenta unei excepții nu dovedește nimic — canalul o dovedește."""
+    st = _fresh_state()
+    old = _FakeVoiceChannel()
+    old.name = 'Vechi'
+    new = _FakeVoiceChannel()
+    new.name = 'Nou'
+    vc = _FakeVoiceClient(channel=old, move_lands=False)
+    ctx = _FakeCtx(vc, channel=new)
+    with _Wiring() as w:
+        asyncio.run(w.bot.registry['play'](ctx, search='ceva'))
+    assert vc.moves == [new], vc.moves
+    assert w.plays == [], 'a redat desi mutarea nu a reusit'
+    assert ctx.sent, 'mutarea eșuata a fost tacuta'
 
 
 def test_the_command_tree_is_no_longer_wiped_before_syncing():

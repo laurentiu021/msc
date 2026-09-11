@@ -120,6 +120,25 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         except DISCORD_ERRORS as e:
             log.debug(f"Curatarea clientului de voce a eșuat: {e}")
 
+    async def _can_play_in(ctx, channel) -> bool:
+        """Putem cânta acolo? Raspunde utilizatorului si intoarce False daca nu.
+
+        Scris o singura data fiindca il cer doua cai (conectarea si mutarea), iar
+        cele doua mesaje nu au voie sa divergea.
+        """
+        perms = channel.permissions_for(ctx.guild.me)
+        if not perms.connect:
+            await ctx.send(f"Nu am permisiunea sa intru in **{channel.name}**.",
+                           delete_after=15)
+            return False
+        if not perms.speak:
+            # Fara Speak s-ar conecta si ar tacea — adica exact reclamația
+            # "s-a conectat si nu se aude nimic", fara nicio urma in loguri.
+            await ctx.send(f"Pot intra in **{channel.name}**, dar nu am voie sa "
+                           f"vorbesc acolo.", delete_after=15)
+            return False
+        return True
+
     async def _ensure_voice(ctx):
         """Conecteaza-te la canalul autorului. None daca nu se poate.
 
@@ -139,23 +158,57 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         cazul 1 se rezolva acum din verificarea de permisiuni, deci aici putem
         aștepta cat merita cazul 2, si putem reincerca.
         """
-        if ctx.voice_client:
-            return ctx.voice_client
+        vc = ctx.voice_client
         channel = getattr(ctx.author.voice, 'channel', None)
+        if vc is not None:
+            if not vc.is_connected():
+                # `guild.voice_client` nenul NU inseamna "conectat". discord.py il
+                # inregistreaza in `abc.connect` INAINTE de handshake si il lasa
+                # pus pe toata reconectarea interna (`_poll_voice_ws` face
+                # `disconnect(cleanup=False)`, iar `cleanup()` e sub `if cleanup:`).
+                #
+                # Fara verificarea asta, apelantul primea un client mort si ieșea
+                # MUT: `process_play` vede `not vc.is_connected()`, stinge steagul
+                # si se intoarce fara niciun mesaj si fara nicio linie de log —
+                # dupa ce comanda a Șters deja mesajul utilizatorului. Un
+                # `connect()` acum ar ridica ClientException ("Already connected"),
+                # iar un `disconnect(force=True)` ar omori conexiunea pornita de
+                # alta comanda.
+                await ctx.send("Inca ma conectez la voce. Mai incearca in "
+                               "cateva secunde.", delete_after=10)
+                return None
+            if channel is None or vc.channel == channel:
+                return vc
+            # Conectat, dar in ALT canal. `interaction_check` refuza pe oricine nu
+            # e in canalul botului, deci un `!play` acceptat de aici produce starea
+            # imposibila: piesa cânta unde nu e nimeni, cel care a cerut-o nu o
+            # poate nici opri din panou, iar un strain din canalul vechi poate. Cu
+            # 24/7 pornit starea e permanenta.
+            if any(not m.bot for m in getattr(vc.channel, 'members', []) or []):
+                await ctx.send(f"Cânt deja in **{vc.channel.name}**. Vino acolo, "
+                               f"sau da `!stop` mai intai.", delete_after=15)
+                return None
+            if not await _can_play_in(ctx, channel):
+                return None
+            try:
+                await vc.move_to(channel)
+            except (*DISCORD_ERRORS, discord.ClientException) as e:
+                log.warning(f"Mutarea in canalul autorului a eșuat: {e}")
+                await ctx.send("Nu am reusit sa vin in canalul tau.", delete_after=10)
+                return None
+            # Succesul se verifica pe CANAL, nu pe absenta excepției: `move_to`
+            # inghite propriul TimeoutError (discord/voice_state.py il logheaza si
+            # revine la starea veche), deci un mutat eșuat se intoarce normal.
+            if vc.channel != channel:
+                await ctx.send("Nu am reusit sa vin in canalul tau.", delete_after=10)
+                return None
+            log.info(f"M-am mutat in canalul autorului: {channel.name}")
+            return vc
+
         if channel is None:
             await ctx.send("Intra pe voce!", delete_after=5)
             return None
-
-        perms = channel.permissions_for(ctx.guild.me)
-        if not perms.connect:
-            await ctx.send(f"Nu am permisiunea sa intru in **{channel.name}**.",
-                           delete_after=15)
-            return None
-        if not perms.speak:
-            # Fara Speak s-ar conecta si ar tacea — adica exact reclamația
-            # "s-a conectat si nu se aude nimic", fara nicio urma in loguri.
-            await ctx.send(f"Pot intra in **{channel.name}**, dar nu am voie sa "
-                           f"vorbesc acolo.", delete_after=15)
+        if not await _can_play_in(ctx, channel):
             return None
 
         for attempt in range(1, VOICE_CONNECT_ATTEMPTS + 1):
@@ -479,14 +532,20 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
             #
             # La eșec steagul se stinge: un 24/7 "pornit" fara voce e chiar starea
             # de mai sus, doar cu un mesaj de succes peste ea.
-            if not ctx.voice_client:
-                if not ctx.author.voice:
-                    state.always_on = False
-                    return await ctx.send("Intra pe voce ca sa pornesc 24/7.",
-                                          delete_after=10)
-                if await _ensure_voice(ctx) is None:
-                    state.always_on = False
-                    return
+            # `_ensure_voice` mereu, nu doar cand slotul e liber: un client
+            # inregistrat dar neconectat (handshake in curs, reconectare interna)
+            # trecea de `if not ctx.voice_client` si comanda anunța "24/7 ON" dupa
+            # ce omorâse singurul timer — exact starea pe care 24/7 trebuie sa o
+            # facă imposibila. Cand botul e deja in canalul potrivit, `_ensure_voice`
+            # se intoarce imediat, deci nu se schimba nimic pe calea normala.
+            if not ctx.author.voice and not (
+                    ctx.voice_client and ctx.voice_client.is_connected()):
+                state.always_on = False
+                return await ctx.send("Intra pe voce ca sa pornesc 24/7.",
+                                      delete_after=10)
+            if await _ensure_voice(ctx) is None:
+                state.always_on = False
+                return
             cancel_timeout(ctx)
             set_autoplay(state, True, by_user=True); state.loop_mode = 0
             state.show_queue = True

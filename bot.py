@@ -177,7 +177,7 @@ _heartbeat_task = None
 
 # --- Music engine init ---
 import music.player as player
-from music.ui import update_player_ui
+from music.ui import forget_panel, update_player_ui
 
 
 def start_timeout(ctx):
@@ -283,6 +283,61 @@ setup_music_commands(
 EMPTY_CHANNEL_GRACE_SEC = 20
 
 
+# Cat aȘteptam confirmarea ca sesiunea de voce s-a incheiat CHIAR. Vezi
+# comentariul din `on_voice_state_update`: un blip al websocket-ului de voce
+# produce exact acelasi eveniment ca o deconectare adevarata.
+VOICE_RECONNECT_GRACE_SEC = 20
+
+
+async def _end_voice_session(guild, generation):
+    """Curata sesiunea, dar numai daca deconectarea a fost reala.
+
+    Verificarea de generatie face amanarea sigura: daca cineva porneste o sesiune
+    noua in fereastra de rabdare, `play_generation` s-a schimbat deja si nu mai
+    ștergem nimic din ea.
+
+    Pe caile deliberate nu se pierde nimic: `!stop`, butonul Stop, `!247` off si
+    ramura de canal gol isi curata singure starea INAINTE sa se deconecteze, iar
+    `process_play` si `_play_next_async` ies oricum curat cand clientul de voce
+    nu mai e — deci o curatare intarziata cu 20s nu schimba nimic observabil.
+    """
+    await asyncio.sleep(VOICE_RECONNECT_GRACE_SEC)
+    state = get_state(guild.id)
+    vc = guild.voice_client
+    if (vc is not None and vc.is_connected()) or state.play_generation != generation:
+        music_log.info("Voce: reconectare interna, sesiunea continua")
+        return
+    state.queue.clear()
+    # by_user=False, deliberat: handler-ul asta NU poate sti cine a provocat
+    # deconectarea. Se declanșeaza si cand discord.py rupe singur conexiunea
+    # ("We were externally disconnected from voice", close 4014/4022/4021), cand
+    # canalul de voce e sters, sau pe calea automata de canal gol. Cu by_user=True,
+    # fiecare astfel de eveniment scria autoplay_user_off=True — singurul scriitor
+    # al steagului — si de atunci decide_idle_action raspundea "radio oprit de
+    # utilizator" pe viata procesului, deci 24/7 nu mai repornea niciodata radioul,
+    # invinuind un utilizator care nu facuse nimic. Cine chiar opreste deliberat
+    # (!stop, butonul Stop, !247 off) pune deja steagul cu by_user=True inainte de
+    # deconectare.
+    set_autoplay(state, False, by_user=False)
+    # Sesiunea s-a incheiat, deci nici "stai conectat" nu mai are obiect: fara asta
+    # rămânea always_on=True pe o stare deconectata.
+    state.always_on = False
+    state.loop_mode = 0
+    state.is_loading = False
+    if state.current_file:
+        state.current_file = None
+        player.trim_cache()
+    player.bump_play_generation(state)
+    # Panoul aparține sesiunii, deci moare cu ea. Pana acum doar `!stop` si tick-ul
+    # de inactivitate il curatau; pe orice alta cale — canal golit, Disconnect dat
+    # de un moderator, 4014/4022, canal sters — embed-ul "se reda acum" rămânea in
+    # canal cu `<t:...:R>` curgand in fiecare client, iar view-ul rămânea
+    # inregistrat: Skip/Pause/Inapoi confirmau interactiunea si nu faceau nimic.
+    # Idempotent: pe calea `!stop` `current_msg` e deja None.
+    await forget_panel(state)
+    cancel_timeout(guild)
+
+
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member == bot.user and before.channel and after.channel:
@@ -301,30 +356,25 @@ async def on_voice_state_update(member, before, after):
                 music_log.info("Bot unmuted -> resume")
 
     if member == bot.user and before.channel and not after.channel:
+        # AMANAT, nu imediat. discord.py se reconecteaza singur dupa un blip al
+        # websocket-ului de voce (close 4006/4009, 1006 fara close frame, 30s de
+        # liniște in poll_event): trimite op4 cu channel=None, deci Discord ne
+        # ecoueaza EXACT evenimentul asta, si apoi revine in acelasi canal, cu
+        # acelasi VoiceClient si cu piesa care cânta mai departe.
+        #
+        # Tratat pe loc ca "sesiunea s-a incheiat", un blip de o secunda golea
+        # coada, stingea 24/7 si invalida `after_play` — deci la finalul piesei
+        # nimic nu mai avansa si nimic nu mai arma un timer. Botul rămânea conectat
+        # si mut pana la repornirea containerului. Verificat cu discord.py 2.7.1:
+        # `_poll_voice_ws` face `disconnect(cleanup=False)` si reconecteaza, iar
+        # `_expecting_disconnect` — singurul care ar putea deosebi cele doua
+        # cazuri — e privat si consumat inainte sa ajungem noi.
         state = get_state(member.guild.id)
-        state.queue.clear()
-        # by_user=False, deliberat: handler-ul asta NU poate sti cine a provocat
-        # deconectarea. Se declanșeaza si cand discord.py rupe singur conexiunea
-        # ("We were externally disconnected from voice", close 4014/4022/4021),
-        # cand canalul de voce e sters, sau pe calea automata de canal gol. Cu
-        # by_user=True, fiecare astfel de eveniment scria autoplay_user_off=True
-        # — singurul scriitor al steagului — si de atunci decide_idle_action
-        # raspundea "radio oprit de utilizator" pe viata procesului, deci 24/7 nu
-        # mai repornea niciodata radioul, invinuind un utilizator care nu facuse
-        # nimic. Cine chiar opreste deliberat (!stop, butonul Stop, !247 off) pune
-        # deja steagul cu by_user=True inainte de deconectare.
-        set_autoplay(state, False, by_user=False)
-        # Sesiunea s-a incheiat, deci nici "stai conectat" nu mai are obiect: fara
-        # asta rămânea always_on=True pe o stare deconectata.
-        state.always_on = False
-        state.loop_mode = 0
-        state.is_loading = False
-        if state.current_file:
-            state.current_file = None
-            player.trim_cache()
-            state.current_file = None
-        player.bump_play_generation(state)
-        cancel_timeout(member.guild)
+        # `get_running_loop`, nu `bot.loop`: al doilea ridica AttributeError cat
+        # timp clientul nu e logat, iar un handler de eveniment ruleaza oricum
+        # mereu intr-o bucla.
+        asyncio.get_running_loop().create_task(
+            _end_voice_session(member.guild, state.play_generation))
 
     if not member.bot and before.channel:
         state = get_state(member.guild.id)
