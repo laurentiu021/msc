@@ -491,6 +491,29 @@ def _start_heartbeat():
 CRASH_LOOP_UPTIME_SEC = 300
 _UPTIME_FILE = os.path.join(DOWNLOAD_DIR, os.pardir, '.last_boot')
 
+# Momentul pornirii ACESTEI sesiuni, ca sa poata fi rescris impreuna cu ultimul semn
+# de viata. 0.0 = inca nu am trecut prin _announce_boot.
+_SESSION_START = 0.0
+
+
+def _write_uptime(started: float, ended: float) -> None:
+    """Singurul scriitor al fisierului de uptime.
+
+    Se rescrie PERIODIC, nu doar la pornire. Cu o singura scriere la boot
+    ({now},{now}), al doilea numar nu se schimba niciodata, deci diferenta e mereu
+    zero: fiecare repornire raporta "sesiunea anterioara a trait 0.0 minute" si —
+    daca STATUS_CHANNEL_ID e setat — trimitea alarma de bucla de crash-uri la orice
+    repornire, inclusiv la un deploy normal. O alarma care se aprinde mereu nu mai
+    spune nimic cand chiar e ceva.
+
+    Ceas de perete, nu monotonic: valoarea e citita de ALT proces, dupa repornire.
+    """
+    try:
+        with open(os.path.abspath(_UPTIME_FILE), 'w', encoding='utf-8') as fh:
+            fh.write(f"{started},{ended}")
+    except OSError as e:
+        log.warning(f"Nu am putut nota semnul de viata: {e}")
+
 
 async def _announce_boot() -> None:
     """Spune in canalul de status ca procesul a repornit, si cat a trait inainte.
@@ -507,11 +530,9 @@ async def _announce_boot() -> None:
     except (OSError, ValueError):
         pass                                   # prima pornire, sau volum nou
     now = time.time()
-    try:
-        with open(path, 'w', encoding='utf-8') as fh:
-            fh.write(f"{now},{now}")
-    except OSError as e:
-        log.warning(f"Nu am putut nota momentul pornirii: {e}")
+    global _SESSION_START
+    _SESSION_START = now
+    _write_uptime(now, now)
 
     if previous is None:
         log.info("Prima pornire pe acest volum")
@@ -669,6 +690,8 @@ async def _heartbeat():
             if now - last_snapshot >= SNAPSHOT_EVERY_SEC:
                 last_snapshot = now
                 await diag.refresh(bot, guild_states, bot.loop)
+                if _SESSION_START:
+                    _write_uptime(_SESSION_START, time.time())
             if now - last_sweep >= SWEEP_EVERY_SEC:
                 last_sweep = now
                 keep = {st.current_file for st in guild_states.values() if st.current_file}
@@ -852,6 +875,8 @@ async def _shutdown():
             await vc.disconnect(force=True)
         except DISCORD_ERRORS as e:
             log.warning(f"Deconectarea de la voce a eșuat la inchidere: {e}")
+    if _SESSION_START:
+        _write_uptime(_SESSION_START, time.time())
     await bot.close()
 
 

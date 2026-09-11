@@ -655,15 +655,14 @@ async def drive():
         print('[live] niciun canal text in care sa pot scrie', flush=True)
         return 2
 
-    members = [m for m in voice.members if not m.bot]
-    if not members and ARGS.soak:
-        members = [Ghost(voice)]
-    if not members:
-        print(f'[live] nu e nimeni in {voice.name}: intra in canal si porneste iar '
-              f'(am nevoie de un membru real ca sa dau comenzile in numele lui)',
-              flush=True)
-        return 2
+    # Fara nimeni in canal, comenzile se dau in numele unui membru fantoma. Nu e o
+    # scurtatura: ele se uita doar la `author.voice.channel`, iar a cere cuiva sa
+    # stea intr-un canal de voce ca sa poata rula testele inseamna, in practica, ca
+    # testele nu se mai ruleaza.
+    members = [m for m in voice.members if not m.bot] or [Ghost(voice)]
     member = members[0]
+    if isinstance(member, Ghost):
+        print('[live] nimeni in canal: dau comenzile ca membru fantoma', flush=True)
 
     perms = voice.permissions_for(guild.me)
     print(f'[live] guild={guild.name} voce={voice.name} text=#{text.name} '

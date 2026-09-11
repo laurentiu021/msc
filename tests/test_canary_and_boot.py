@@ -240,6 +240,80 @@ def test_announcing_without_a_channel_configured_is_a_no_op():
         bot_mod.STATUS_CHANNEL_ID = saved
 
 
+def test_a_running_session_keeps_refreshing_its_uptime():
+    """Fara reimprospatare, fiecare repornire raporta 0.0 minute.
+
+    Fisierul se scria o singura data, la pornire, ca `{now},{now}` — deci al doilea
+    numar nu se schimba niciodata si diferenta era mereu zero. Vazut in producție:
+    o sesiune de 16 minute a fost anunțata ca "0.0 minute", adica exact tiparul unei
+    bucle de crash-uri. Cu STATUS_CHANNEL_ID setat, alarma ar fi plecat la FIECARE
+    deploy — iar o alarma care se aprinde mereu nu mai spune nimic.
+    """
+    import bot as bot_mod
+
+    said = []
+
+    async def announce(text):
+        said.append(text)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, '.last_boot')
+        saved = (bot_mod._UPTIME_FILE, bot_mod.announce, bot_mod._SESSION_START)
+        bot_mod._UPTIME_FILE = path
+        bot_mod.announce = announce
+        try:
+            # O sesiune care a trait o ora si a fost omorata brusc: ultimul semn de
+            # viata e scris de heartbeat, nu de o inchidere curata.
+            bot_mod._write_uptime(1000.0, 1000.0)
+            bot_mod._write_uptime(1000.0, 4600.0)
+            asyncio.run(bot_mod._announce_boot())
+        finally:
+            (bot_mod._UPTIME_FILE, bot_mod.announce,
+             bot_mod._SESSION_START) = saved
+
+    assert said, 'repornirea nu a fost anunțata'
+    assert 'crash' not in said[0].lower(), (
+        f'o sesiune de 60 de minute raportata ca bucla de crash-uri: {said[0]}')
+    assert '60 min' in said[0], said[0]
+
+
+def test_the_heartbeat_is_what_keeps_it_fresh():
+    """Un scriitor pe care nu il cheama nimeni periodic nu repara nimic: dupa un
+    SIGKILL, fisierul ar rămâne cu valoarea de la pornire."""
+    import ast
+    import inspect
+
+    import bot as bot_mod
+
+    for fn in (bot_mod._heartbeat, bot_mod._shutdown):
+        src = inspect.getsource(fn)
+        called = {ast.unparse(n.func) for n in ast.walk(ast.parse(src.strip()))
+                  if isinstance(n, ast.Call)}
+        assert '_write_uptime' in called, (
+            f'{fn.__name__} nu reimprospateaza uptime-ul: {sorted(called)[:6]}')
+
+
+def test_the_boot_still_starts_a_fresh_measurement():
+    """Momentul pornirii trebuie sa fie REȚINUT, altfel reimprospatarea nu are de
+    unde sa stie de cand dureaza sesiunea."""
+    import bot as bot_mod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, '.last_boot')
+        saved = (bot_mod._UPTIME_FILE, bot_mod._SESSION_START)
+        bot_mod._UPTIME_FILE = path
+        bot_mod._SESSION_START = 0.0
+        try:
+            asyncio.run(bot_mod._announce_boot())
+            assert bot_mod._SESSION_START > 0, 'nu a reținut momentul pornirii'
+            with open(path, encoding='utf-8') as fh:
+                started, ended = (float(x) for x in fh.read().split(','))
+            assert started == ended, (started, ended)
+            assert abs(started - bot_mod._SESSION_START) < 0.001
+        finally:
+            bot_mod._UPTIME_FILE, bot_mod._SESSION_START = saved
+
+
 def test_the_canary_runs_from_the_heartbeat():
     """Un canar pe care nu il cheama nimeni nu prinde nimic."""
     import ast
