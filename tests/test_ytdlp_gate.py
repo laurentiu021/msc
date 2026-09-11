@@ -315,6 +315,40 @@ def test_a_request_never_hands_yt_dlp_the_shared_jar():
         assert leftovers == [], f'copii nesterse: {leftovers}'
 
 
+def test_a_failed_copy_drops_the_cookies_instead_of_sharing_the_jar():
+    """Cand copia privata nu se poate face, izolarea dispărea in tacere.
+
+    `borrow_cookies` intoarce None pe orice OSError (volum plin, jar lipsa in timpul
+    unui reseed) si scria doar o linie de DEBUG. Poarta mergea inainte cu `opts`
+    neatinse, adica ii dadea lui yt-dlp chiar FISIERUL COMUN — exact defectul pe care
+    copia exista sa il previna, si al carui rezultat documentat e "cookie-uri moarte
+    la toate cererile pana la repornirea containerului".
+
+    O cerere fara cookies eșueaza cel mai rau cu "Sign in to confirm" si se poate
+    reincerca. Un jar comun rescris de un thread abandonat nu se repara singur.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        shared = os.path.join(tmp, 'cookies.txt')
+        with open(shared, 'w', encoding='utf-8') as fh:
+            fh.write('# Netscape HTTP Cookie File' + chr(10))
+
+        fake = _FakeYtDlpModule(0.01)
+        saved = _install(fake)
+        saved_borrow = ytdlp.borrow_cookies
+        ytdlp.borrow_cookies = lambda path: None      # copia eșueaza
+        _reset_gate()
+        try:
+            asyncio.run(ytdlp.extract({'cookiefile': shared}, 'q'))
+        finally:
+            ytdlp.borrow_cookies = saved_borrow
+            ytdlp.yt_dlp = saved
+            _reset_gate()
+
+        assert fake.seen_cookiefiles, 'nu s-a construit nicio instanta'
+        assert all(p is None for p in fake.seen_cookiefiles), (
+            f'yt-dlp a primit un fisier de cookies: {fake.seen_cookiefiles}')
+
+
 def test_a_successful_request_moves_its_rotation_into_the_shared_jar():
     """Izolarea nu are voie sa piarda rotatia.
 

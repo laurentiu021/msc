@@ -168,6 +168,22 @@ async def extract(opts: dict, query: str, *, download: bool = False,
     private = borrow_cookies(shared) if shared else None
     if private:
         opts = {**opts, 'cookiefile': private}
+    elif shared:
+        # Copia n-a putut fi facuta (volum plin, jar lipsa in timpul unui reseed).
+        # A merge inainte cu fisierul COMUN ar reactiva exact defectul de mai sus,
+        # tacut: `save_cookies()` e necondiționat, deci cererea asta — sau
+        # thread-ul ei abandonat, minute mai tarziu — ar rescrie jar-ul comun din
+        # ce avea in memorie. O cerere fara cookies eșueaza cel mai rau cu "Sign in
+        # to confirm", si se poate reincerca; un jar comun stricat inseamna
+        # cookie-uri moarte la TOATE cererile pana repaste cineva sesiunea.
+        #
+        # Deci renunțam la cookies pentru cererea asta, si o spunem la WARNING:
+        # inainte, singura urma era o linie de DEBUG pe care nu o vede nimeni.
+        log.warning(f"Nu am putut face copia privata a jar-ului {shared}; "
+                    f"cererea {stage or 'yt-dlp'} merge FARA cookies, ca sa nu "
+                    f"pot rescrie fisierul comun")
+        opts = {k: v for k, v in opts.items() if k != 'cookiefile'}
+        shared = None
 
     def _run():
         # Construim SI inchidem aici, in thread-ul executorului. Daca inchiderea
