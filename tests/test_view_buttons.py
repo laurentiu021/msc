@@ -314,6 +314,75 @@ def test_no_dropdown_at_all_when_every_entry_is_unusable():
         'a construit un select fara nicio opțiune valida')
 
 
+def test_autoplay_on_starts_a_queue_that_is_already_full():
+    """`resume_if_idle` era INAUNTRUL blocului de prefill.
+
+    Singurul caz tratat era "coada goala, deci am adus piese". Cu piese deja in
+    coada si nimic care cânta, butonul aprindea autoplay si nu pornea nimic — nu
+    exista niciun `after_play` care sa scurga coada. `!247` il cheama
+    necondiționat, deci butonul se purta altfel decat comanda.
+    """
+    import music.player as player_mod
+
+    st = _fresh_state()
+    st.autoplay = False
+    st.queue = [{'query': 'https://y/1', 'title': 'A'}]
+    st.last_url = 'https://y/0'
+    resumed = []
+    prefills = []
+
+    async def fake_prefill(state, loop=None):
+        prefills.append(True)
+
+    async def no_ui(ctx, send_new=False):
+        return None
+
+    import music.ui as ui_mod
+    saved = (player_mod.resume_if_idle, views.prefill_autoplay_queue,
+             ui_mod.update_player_ui)
+    player_mod.resume_if_idle = lambda ctx: (resumed.append(True), 'pornit')[1]
+    views.prefill_autoplay_queue = fake_prefill
+    ui_mod.update_player_ui = no_ui
+    try:
+        _press('autoplay_btn', st)
+    finally:
+        (player_mod.resume_if_idle, views.prefill_autoplay_queue,
+         ui_mod.update_player_ui) = saved
+
+    assert st.autoplay is True
+    assert prefills == [], 'a cerut un Mix desi coada avea deja piese'
+    assert resumed, (
+        'autoplay ON cu coada plina si nimic care cânta nu a pornit nimic')
+
+
+def test_a_button_that_starts_nothing_still_refreshes_the_panel():
+    """Altfel panoul rămâne pe piesa dinainte, cu o coada care nu mai e a lui."""
+    import music.player as player_mod
+    import music.ui as ui_mod
+
+    st = _fresh_state()
+    st.queue = []
+    refreshes = []
+
+    async def fake_ui(ctx, send_new=False):
+        refreshes.append(send_new)
+
+    saved = (player_mod.resume_if_idle, ui_mod.update_player_ui,
+             player_mod.cancel_timeout, player_mod.start_timeout)
+    player_mod.resume_if_idle = lambda ctx: 'coada goala'
+    ui_mod.update_player_ui = fake_ui
+    player_mod.cancel_timeout = lambda *a, **k: None
+    player_mod.start_timeout = lambda *a, **k: None
+    try:
+        view = views.MusicControlView(_FakeCtx(_FakeVoiceClient()))
+        asyncio.run(view.skip_btn.callback(_FakeInteraction()))
+    finally:
+        (player_mod.resume_if_idle, ui_mod.update_player_ui,
+         player_mod.cancel_timeout, player_mod.start_timeout) = saved
+
+    assert refreshes, 'panoul a rămas sa arate piesa care nu mai cânta'
+
+
 def _defer_failure(exc):
     """Ruleaza `_safe_defer` peste o confirmare care eșueaza. Intoarce logurile."""
     import io

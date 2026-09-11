@@ -131,6 +131,12 @@ class MusicControlView(discord.ui.View):
             return 'oprit ca sa avanseze'
         decision = _p.resume_if_idle(self.ctx)
         log.info(f"Buton pe idle: {decision}")
+        if decision != 'pornit':
+            # Nimic nou nu porneste, deci nimeni nu va reimprospăta panoul: el
+            # rămâne pe piesa dinainte, cu o coada care nu mai e a lui. Cand chiar
+            # pornește ceva, `process_play` il actualizeaza singur.
+            from music.ui import update_player_ui
+            await update_player_ui(self.ctx)
         return decision
 
     async def _safe_defer(self, interaction: discord.Interaction):
@@ -253,11 +259,16 @@ class MusicControlView(discord.ui.View):
                         await prefill_autoplay_queue(state, self.ctx.bot.loop)
                 except Exception as e:
                     log.warning(f"Prefill esuat: {e}", exc_info=True)
-                # Prefill-ul a tinut `is_loading`, dar nu porneste nicio redare.
-                # Un `!play` intrat in fereastra aceea a fost pus in coada crezand
-                # ca incarcarea in curs o va scurge — deci trebuie sa o scurgem noi.
-                import music.player as _p
-                log.info(f"Autoplay dupa prefill: {_p.resume_if_idle(self.ctx)}")
+            # AFARA din blocul de prefill, la fel ca in `!247`. Inauntru, singurul
+            # caz tratat era "coada goala, deci am adus piese"; cu piese DEJA in
+            # coada si nimic care cânta, butonul aprindea autoplay si nu pornea
+            # nimic — nu exista niciun `after_play` care sa scurga coada.
+            #
+            # Prefill-ul a tinut `is_loading`, iar un `!play` intrat in fereastra
+            # aceea a fost pus in coada crezand ca incarcarea in curs o va scurge,
+            # deci tot aici e si locul in care o scurgem.
+            import music.player as _p
+            log.info(f"Autoplay ON: {_p.resume_if_idle(self.ctx)}")
         else:
             state.show_queue = False
         from music.ui import update_player_ui
