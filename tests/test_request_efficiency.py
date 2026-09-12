@@ -602,6 +602,76 @@ def test_a_second_prefill_after_the_first_still_tops_up():
     assert len(st.queue) == 3, f'nu a completat coada scazuta: {len(st.queue)}'
 
 
+# --- plafonul de diversitate trebuie sa țina si intre prefill-uri ---------------
+
+def test_the_same_artist_cap_survives_a_refill():
+    """`artist_key` cade pe CANAL cand titlul nu are separator.
+
+    Piesele din coada nu purtau canalul, deci prima umplere numara corect (are
+    canalul la indemana), iar urmatoarea recitește coada si gaseste doar titlul:
+    cheia iese goala, piesele nu se mai numara, si acelasi artist putea aduna 4+
+    piese. Exact ce plafonul exista sa impiedice — un radio care da aceeasi voce la
+    infinit. Titlurile de mai jos sunt un singur cuvant, ca la manele.
+
+    Toate cele patru strategii sunt inlocuite, nu doar Mix-ul: altfel strategia 4
+    chiar ar cere o cautare pe YouTube, iar rezultatul testului ar depinde de ce
+    intoarce internetul in ziua aceea.
+    """
+    st = GuildState()
+    st.last_url = 'https://www.youtube.com/watch?v=seed00'
+    st.last_title = 'Cineva - Ceva'
+    batch = 0
+
+    async def fake_mix(state, loop, origin_id, skip_ids, needed, artist_counts=None):
+        nonlocal batch
+        batch += 1
+        added = 0
+        for n in range(needed):
+            if autoplay._add_to_queue(state, f'b{batch}n{n}', f'Meneaito{batch}{n}',
+                                      skip_ids, artist_counts,
+                                      channel='Tzanca Uraganu'):
+                added += 1
+        return added
+
+    async def nothing(*a, **k):
+        return 0
+
+    saved = (autoplay._try_ytdlp_mix, autoplay._try_api_related,
+             autoplay._try_api_search, autoplay._try_ytdlp_search)
+    autoplay._try_ytdlp_mix = fake_mix
+    autoplay._try_api_related = nothing
+    autoplay._try_api_search = nothing
+    autoplay._try_ytdlp_search = nothing
+    try:
+        asyncio.run(autoplay.prefill_autoplay_queue(st, None, target=4))
+        first = len(st.queue)
+        # Coada scade (s-a ascultat una), deci urmeaza un refill: el recitește coada.
+        st.queue.pop(0)
+        asyncio.run(autoplay.prefill_autoplay_queue(st, None, target=4))
+    finally:
+        (autoplay._try_ytdlp_mix, autoplay._try_api_related,
+         autoplay._try_api_search, autoplay._try_ytdlp_search) = saved
+
+    from music.autoplay import MAX_SAME_ARTIST
+    # Numarate dupa TITLU, nu dupa cheia calculata din canal: altfel verificarea ar
+    # depinde de chiar campul pe care il testeaza, iar scoaterea canalului ar face-o
+    # sa treaca din oficiu (cheia iese goala pentru tot). Toate piesele produse de
+    # fake sunt ale aceluiasi artist, deci titlul e suficient.
+    same = [q for q in st.queue if str(q.get('title', '')).startswith('Meneaito')]
+    assert first == MAX_SAME_ARTIST, (
+        f'prima umplere nu a respectat plafonul: {first}')
+    assert len(same) <= MAX_SAME_ARTIST, (
+        f'{len(same)} piese de la acelasi artist dupa refill (plafon '
+        f'{MAX_SAME_ARTIST}): {[q["title"] for q in st.queue]}')
+
+
+def test_a_queued_track_remembers_its_channel():
+    """Fara canal in element, verificarea de mai sus nu are de unde sa il afle."""
+    st = GuildState()
+    autoplay._add_to_queue(st, 'vid1', 'Meneaito', set(), {}, channel='Tzanca Uraganu')
+    assert st.queue[0].get('channel') == 'Tzanca Uraganu', st.queue[0]
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

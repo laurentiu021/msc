@@ -159,9 +159,17 @@ def _add_to_queue(state, vid_id, title, skip_ids, artist_counts=None, channel=''
             if artist_counts.get(key, 0) >= MAX_SAME_ARTIST:
                 return False
             artist_counts[key] = artist_counts.get(key, 0) + 1
+    # Canalul se PASTREAZA in element, la fel ca in history. `artist_key` cade pe
+    # canal exact cand titlul nu are separator ("Meneaito", nu "Artist - Piesa"),
+    # deci fara el plafonul de diversitate se scurgea intre prefill-uri: prima
+    # umplere numara corect (are canalul la indemana), dar urmatoarea recitește coada
+    # si gaseste doar titlul, deci cheia iese goala si piesele nu se mai numara —
+    # acelasi artist putea aduna 4+ piese in coada, adica exact ce plafonul exista sa
+    # impiedice.
     state.queue.append({
         'query': f"https://www.youtube.com/watch?v={vid_id}",
-        'title': title or 'Autoplay'
+        'title': title or 'Autoplay',
+        'channel': channel or '',
     })
     skip_ids.add(vid_id)
     return True
