@@ -1114,6 +1114,48 @@ def test_a_playlist_on_an_idle_bot_starts_and_still_reports_the_rest():
     assert '2' in said, f'nu a spus cate au rămas in coada: {said!r}'
 
 
+def test_an_empty_playlist_still_plays_the_track_in_the_link():
+    """Vazut in producție, 2026-09-12 09:57: trei incercari la rand, toate refuzate.
+
+    Un `list=` care nu intoarce nicio intrare — mix de YouTube Music, lista privata,
+    RDAMVM — ridica "Playlist gol", iar utilizatorul primea "Nu am putut citi
+    playlist-ul" desi linkul duce un `v=<id>` perfect redabil. A trebuit sa gaseasca
+    singur alta forma de link ca sa asculte piesa.
+    """
+    st = _fresh_state()
+    ctx = _FakeCtx(_FakeVoiceClient(playing=False), channel=None)
+    link = 'https://youtu.be/vid0?list=RDAMVMvid0'
+    ytdlp, saved = _fake_playlist(0)
+    try:
+        with _Wiring() as w:
+            asyncio.run(w.bot.registry['play'](ctx, search=link))
+            plays = list(w.plays)
+    finally:
+        ytdlp.extract = saved
+
+    assert plays == [link], f'nu a redat piesa din link: {plays}'
+    said = ' '.join(str(m) for m in ctx.sent).lower()
+    assert 'nu am putut citi' not in said, f'a raportat un eșec: {said!r}'
+
+
+def test_an_empty_playlist_over_a_playing_track_queues_it():
+    """Aceeasi decizie ca la o piesa normala: daca se aude ceva, intra in coada."""
+    st = _fresh_state()
+    ctx = _FakeCtx(_FakeVoiceClient(playing=True), channel=None)
+    link = 'https://youtu.be/vid0?list=RDAMVMvid0'
+    ytdlp, saved = _fake_playlist(0)
+    try:
+        with _Wiring() as w:
+            asyncio.run(w.bot.registry['play'](ctx, search=link))
+            plays = list(w.plays)
+    finally:
+        ytdlp.extract = saved
+
+    assert plays == [], f'a taiat piesa care cânta: {plays}'
+    assert len(st.queue) == 1 and st.queue[0]['query'] == link, st.queue
+    assert ctx.sent, 'nicio confirmare'
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

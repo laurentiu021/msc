@@ -364,6 +364,27 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         log.info(f"Link de platforma rezolvat ca: {search}")
         return search
 
+    async def _play_or_queue(ctx, state, vc, query):
+        """Reda acum, sau pune in coada daca se aude deja ceva.
+
+        Un singur loc, fiindca decizia asta se ia din DOUA intrari: `!play` cu o
+        piesa, si ramura de playlist cand lista se dovedeste goala. Cand era scrisa
+        doar in prima, a doua nu avea ce sa faca si raspundea cu o eroare.
+        """
+        if vc.is_playing() or vc.is_paused() or state.is_loading:
+            state.queue.append({'query': query, 'title': query})
+            # Confirmare explicita. Comanda isi sterge propriul mesaj, iar
+            # actualizarea panoului schimba doar contorul din footer, pe un panou
+            # care poate fi mult mai sus in canal — deci cea mai folosita comanda
+            # putea sa nu produca nimic vizibil.
+            await ctx.send(
+                f"➕ **#{len(state.queue)}** in coada: {item_title(query, 60)}"
+                + ("  *(se incarca altceva chiar acum)*" if state.is_loading else ""),
+                delete_after=12)
+            await update_player_ui(ctx)
+        else:
+            await process_play(ctx, query)
+
     async def _suggest_played(interaction, current: str):
         """Adaptorul de autocomplete. Logica e in `autocomplete_choices`, testabila."""
         return autocomplete_choices(current)
@@ -438,7 +459,15 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                     info = await ytdlp.extract(ydl_opts_pl, search,
                                                loop=bot.loop, stage='playlist')
                 entries = info.get('entries', [])
-                if not entries: raise ValueError("Playlist gol")
+                if not entries:
+                    # Vazut in producție, 2026-09-12 09:57: trei incercari la rand cu
+                    # acelasi link, toate refuzate cu "Nu am putut citi playlist-ul",
+                    # desi linkul duce un `v=<id>` perfect redabil. Un `list=` care nu
+                    # da nicio intrare (mix YouTube Music, lista privata, RDAMVM) nu e
+                    # un motiv sa nu asculti piesa pe care ai cerut-o.
+                    log.info("Playlist fara intrari; il tratez ca pe o singura piesa")
+                    await _play_or_queue(ctx, state, vc, search)
+                    return
                 first = entries.pop(0)
                 for e in entries:
                     url = e.get('url') or e.get('id')
@@ -477,19 +506,7 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                     start_timeout(ctx)
             return
 
-        if vc.is_playing() or vc.is_paused() or state.is_loading:
-            state.queue.append({'query': search, 'title': search})
-            # Confirmare explicita. Comanda isi sterge propriul mesaj, iar
-            # actualizarea panoului schimba doar contorul din footer, pe un panou
-            # care poate fi mult mai sus in canal — deci cea mai folosita comanda
-            # putea sa nu produca nimic vizibil.
-            await ctx.send(
-                f"➕ **#{len(state.queue)}** in coada: {item_title(search, 60)}"
-                + ("  *(se incarca altceva chiar acum)*" if state.is_loading else ""),
-                delete_after=12)
-            await update_player_ui(ctx)
-        else:
-            await process_play(ctx, search)
+        await _play_or_queue(ctx, state, vc, search)
 
     @bot.command()
     @only_in_session
