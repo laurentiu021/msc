@@ -781,21 +781,68 @@ def test_guest_is_still_the_last_hope_when_cookies_give_nothing():
 
 def test_a_rate_limited_guest_extraction_arms_the_breaker():
     """Un 429 nu ridica excepție: yt-dlp il raporteaza ca warning si intoarce zero
-    formate. Singurul canal prin care ajunge la noi e motivul reținut de logger."""
+    formate. Motivul ajunge la noi doar prin logger, deci testul il emite pe acolo,
+    nu punand un atribut privat cu mana."""
     saved = _with_cookies()
     resolve.clear_guest_rate_limit()
-    config._YdlLog.last_reason = ('[youtube] vid123: Unable to download webpage: '
-                                 'HTTP Error 429: Too Many Requests')
+
+    def extract(stage, opts):
+        if 'cookiefile' in opts:
+            return {'id': 'vid123', 'title': 'T', 'duration': 200,
+                    'webpage_url': VIDEO, 'formats': AAC_ONLY}
+        config.YDL_LOGGER.warning('[youtube] vid123: Unable to download webpage: '
+                                  'HTTP Error 429: Too Many Requests')
+        return {'id': 'vid123', 'title': 'T', 'duration': 200,
+                'webpage_url': VIDEO, 'formats': []}
+
     try:
-        with _Ytdlp(extract=_aac_then({'id': 'vid123', 'title': 'T', 'duration': 200,
-                                       'webpage_url': VIDEO, 'formats': []}),
+        with _Ytdlp(extract=extract,
                     download=lambda stage, opts: ({'id': 'vid123'}, None)):
             _run(resolve.resolve_from_url(VIDEO))
         assert resolve.guest_rate_limited(), 'un 429 pe guest nu a aprins nimic'
     finally:
         config._cookies_path = saved
         resolve.clear_guest_rate_limit()
-        config._YdlLog.last_reason = None
+        config.clear_ydl_reason()
+
+
+def test_the_breaker_reads_every_reason_not_just_the_last():
+    """Secvența REALA dintr-o cerere de producție, 2026-09-12 12:28.
+
+    yt-dlp scrie cinci linii la rand, iar cauza (429, apoi verificarea anti-bot) e a
+    doua si a treia; ULTIMA e mereu o consecinta ("Requested format is not
+    available"). Intrerupatorul se uita doar la ultima, deci nu se aprindea niciodata
+    — si am continuat sa plătim cereri pe care YouTube le refuza, ~4-14 secunde pe
+    fiecare piesa neaflata in cache. Dovedit direct din loguri, nu presupus.
+    """
+    saved = _with_cookies()
+    resolve.clear_guest_rate_limit()
+
+    def extract(stage, opts):
+        if 'cookiefile' in opts:
+            return {'id': 'vid123', 'title': 'T', 'duration': 200,
+                    'webpage_url': VIDEO, 'formats': AAC_ONLY}
+        for line in ('[youtube] vid123: Unable to download webpage: HTTP Error 429: '
+                     'Too Many Requests',
+                     '[youtube] No title found in player responses; falling back',
+                     "[youtube] Sign in to confirm you're not a bot. Use --cookies",
+                     'No video formats found!',
+                     'Requested format is not available'):
+            config.YDL_LOGGER.warning(line)
+        return {'id': 'vid123', 'title': 'T', 'duration': 200,
+                'webpage_url': VIDEO, 'formats': []}
+
+    try:
+        with _Ytdlp(extract=extract,
+                    download=lambda stage, opts: ({'id': 'vid123'}, None)):
+            _run(resolve.resolve_from_url(VIDEO))
+        assert resolve.guest_rate_limited(), (
+            'refuzul era a doua linie din cinci, iar ultima era despre formate: '
+            'intrerupatorul nu s-a aprins')
+    finally:
+        config._cookies_path = saved
+        resolve.clear_guest_rate_limit()
+        config.clear_ydl_reason()
 
 
 def test_the_download_also_skips_a_burned_guest():

@@ -96,6 +96,25 @@ class _YdlLog:
     # disponibil era o presupunere scrisa de noi.
     last_reason: str | None = None
 
+    # TOATE motivele de la ultima golire, nu doar ultimul. O singura cerere poate
+    # produce cinci linii la rand — masurat in producție 2026-09-12 12:28:
+    # "HTTP Error 429" -> "No title found" -> "Sign in to confirm you're not a bot"
+    # -> "No video formats found" -> "Requested format is not available". Cine se
+    # uita doar la ultima vede o problema de FORMAT si rateaza complet refuzul de
+    # acces, care e a doua si a treia. Exact asta facea intrerupatorul de guest: nu
+    # se aprindea niciodata, si continuam sa plătim cererile refuzate.
+    #
+    # Plafonat: o descarcare HLS poate produce sute de linii, si nu ne trebuie decat
+    # verdictul, nu jurnalul.
+    reasons: list[str] = []
+    MAX_REASONS = 12
+
+    @classmethod
+    def _remember(cls, text: str) -> None:
+        cls.last_reason = text
+        if len(cls.reasons) < cls.MAX_REASONS:
+            cls.reasons.append(text)
+
     def debug(self, msg):
         # Liniile de downloader vin cu \r in fata (sunt gandite pentru terminal,
         # ca sa se suprascrie una pe alta); intr-un log de linii ar tăia prefixul
@@ -106,7 +125,7 @@ class _YdlLog:
         # primul caracter din afara setului si scotea "ownload] File is larger".
         text = text.removeprefix('[debug] ')
         if any(marker in text for marker in self._PROMOTE):
-            _YdlLog.last_reason = text
+            _YdlLog._remember(text)
             log.info(f"yt-dlp: {text}")
         else:
             log.debug(f"yt-dlp: {text}")
@@ -115,11 +134,11 @@ class _YdlLog:
         log.info(f"yt-dlp: {msg}")
 
     def warning(self, msg):
-        _YdlLog.last_reason = str(msg)
+        _YdlLog._remember(str(msg))
         log.warning(f"yt-dlp: {msg}")
 
     def error(self, msg):
-        _YdlLog.last_reason = str(msg)
+        _YdlLog._remember(str(msg))
         log.error(f"yt-dlp: {msg}")
 
 
@@ -133,11 +152,22 @@ def clear_ydl_reason():
     pentru piesa curenta — exact bug-ul pe care state.last_raw_error il avea.
     """
     _YdlLog.last_reason = None
+    _YdlLog.reasons = []
 
 
 def last_ydl_reason() -> str | None:
     """Ultima decizie explicata de yt-dlp de la ultima golire."""
     return _YdlLog.last_reason
+
+
+def ydl_reasons() -> tuple[str, ...]:
+    """TOATE deciziile de la ultima golire, in ordine.
+
+    Pentru intrebari de forma "a refuzat YouTube accesul in cererea asta?", unde
+    ultima linie e aproape mereu o consecinta ("Requested format is not available")
+    si nu cauza ("Sign in to confirm you're not a bot").
+    """
+    return tuple(_YdlLog.reasons)
 
 
 def yt_client_args(*clients):

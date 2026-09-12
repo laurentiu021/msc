@@ -25,7 +25,7 @@ from music.config import (HLS_MAX_BYTES, MAX_DOWNLOAD_BYTES, MAX_TRACK_SECONDS,
                           clear_ydl_reason, cookies_available,
                           count_real_formats, duration_within_limits,
                           has_opus_audio, has_real_formats,
-                          last_ydl_reason, log,
+                          last_ydl_reason, log, ydl_reasons,
                           make_download_opts, make_search_opts,
                           search_query, yt_client_args, WEB_CLIENTS)
 from music.errors import YtdlpTimeout, diagnose_error
@@ -74,7 +74,7 @@ def guest_rate_limited(now: float | None = None) -> bool:
 GUEST_REFUSAL_VERDICTS = ('ratelimit', 'cookies')
 
 
-def note_guest_rate_limit(reason: str | None, *, now: float | None = None) -> bool:
+def note_guest_rate_limit(reason, *, now: float | None = None) -> bool:
     """Aprinde intrerupatorul daca YouTube a REFUZAT calea de guest.
 
     Nu pe orice eșec: un video indisponibil sau un format lipsa nu spune nimic despre
@@ -82,10 +82,15 @@ def note_guest_rate_limit(reason: str | None, *, now: float | None = None) -> bo
     alternativa exact cand e nevoie de ea.
     """
     global _guest_blocked_until
-    if not reason:
-        return False
-    kind, _ = diagnose_error(reason)
-    if kind not in GUEST_REFUSAL_VERDICTS:
+    # Un text sau mai multe: o singura cerere produce cinci linii la rand, iar cauza
+    # ("Sign in to confirm", 429) e a doua sau a treia, in timp ce ultima e mereu o
+    # consecinta ("Requested format is not available"). Cine se uita doar la ultima
+    # nu aprinde niciodata intrerupatorul — asa a fost pana la 2026-09-12, si logurile
+    # au aratat exact asta.
+    texts = [reason] if isinstance(reason, str) else list(reason or ())
+    kind = next((k for k in (diagnose_error(t)[0] for t in texts if t)
+                 if k in GUEST_REFUSAL_VERDICTS), None)
+    if kind is None:
         return False
     _guest_blocked_until = (now if now is not None else time.time()) +         GUEST_RATELIMIT_COOLDOWN_SEC
     log.info(f"Guest refuzat de YouTube ({kind}); nu mai incerc fara cookies "
@@ -315,6 +320,7 @@ async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple
             log.info("Sar peste guest (limitat de YouTube): am deja un candidat "
                      "redabil, doar fara opus")
             continue
+        clear_ydl_reason()
         search_opts = make_search_opts(
             with_cookies=use_cookies,
             extractor_args=yt_client_args(*clients),
@@ -337,7 +343,7 @@ async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple
                 if has_real_formats(fmts):
                     clear_guest_rate_limit()
                 else:
-                    note_guest_rate_limit(last_ydl_reason())
+                    note_guest_rate_limit(ydl_reasons())
             selected = candidate
             if has_real_formats(fmts):
                 if has_opus_audio(fmts):
@@ -356,7 +362,7 @@ async def _pick_format_source(target_url: str, loop) -> tuple[dict | None, tuple
         except Exception as e:
             raw_error = str(e)[:600]
             if not use_cookies:
-                note_guest_rate_limit(raw_error)
+                note_guest_rate_limit((raw_error,) + ydl_reasons())
             log.warning(f"Extractia a eșuat cu client={label}: {e}", exc_info=True)
     if without_opus is not None:
         candidate, clients, use_cookies = without_opus
@@ -495,7 +501,7 @@ async def _download(web_url: str, client: tuple | None, prefer_cookies: bool,
             except Exception as e:
                 dl_error = str(e)[:600]
                 if not use_cookies:
-                    note_guest_rate_limit(dl_error) or                         note_guest_rate_limit(last_ydl_reason())
+                    note_guest_rate_limit((dl_error,) + ydl_reasons())
                 if worth_another_format(dl_error):
                     format_worthy = True
                 log.warning(f"Download esuat (cookies={use_cookies}, "
