@@ -700,6 +700,67 @@ def test_the_reconnect_grace_outlasts_a_fresh_handshake():
         f'handshake lent ar Șterge o sesiune care s-a intors')
 
 
+# --- cine anuleaza timer-ul trebuie sa lase ceva in loc ------------------------
+
+def _calls_in(fn_node):
+    """Numele functiilor chemate DIRECT in fn_node, fara cele din functii nested.
+
+    Fara excluderea celor nested, `setup_music_commands` ar arata ca si cheama tot,
+    fiindca toate comenzile sunt definite in el.
+    """
+    import ast
+
+    names = set()
+
+    class Visitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node):
+            if node is not fn_node:
+                return                       # nu coboram in alta functie
+            self.generic_visit(node)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            names.add(ast.unparse(node.func).split('.')[-1])
+            self.generic_visit(node)
+
+    Visitor().visit(fn_node)
+    return names
+
+
+def test_every_timer_cancellation_leaves_something_in_its_place():
+    """`idle_timer` se re-armeaza doar din propriul `finally`, adica doar dintr-un
+    tick care EXISTA deja. Deci orice functie care il anuleaza si nu porneste nimic
+    lasa 24/7 fara niciun tick programat: bot in canal, coada plina, tacere pana la
+    repornirea containerului.
+
+    Verificat de mana pe toate cele opt locuri (2026-09-12) si toate erau in regula.
+    Testul exista ca sa nu mai fie nevoie de auditul acela: comanda urmatoare care
+    anuleaza timer-ul fara plasa picheaza aici, nu in producție intr-o seara de
+    weekend.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    # Ori porneste ceva, ori decide explicit ce urmeaza, ori incheie sesiunea.
+    recovery = {'process_play', 'start_timeout', 'resume_if_idle', 'trigger_radio',
+                'play_next', 'disconnect'}
+    offenders = []
+    for rel in ('music/commands.py', 'music/views.py', 'music/player.py'):
+        tree = ast.parse((root / rel).read_text(encoding='utf-8'))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            calls = _calls_in(node)
+            if 'cancel_timeout' not in calls:
+                continue
+            if not (calls & recovery):
+                offenders.append(f'{rel}:{node.lineno} {node.name}')
+    assert not offenders, (
+        f'anuleaza timer-ul si nu lasa nimic in loc: {offenders}')
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.
