@@ -233,6 +233,59 @@ def test_the_play_command_uses_the_helper():
     assert 'is_youtube_playlist' in called, 'ramura de playlist nu foloseste garda'
 
 
+def test_a_mix_link_from_the_phone_is_normalised_before_extraction():
+    """Masurat contra YouTube-ului real, 2026-09-12: forma scurta da ZERO intrari.
+
+    `youtu.be/<id>?list=RD<id>` — exact ce da butonul Share pentru un mix — intoarce 0,
+    iar `www.youtube.com/watch?v=<id>&list=RD<id>` intoarce 30. Extractorul
+    `youtube:tab` nu desface mix-ul din forma scurta, deci utilizatorul primea "Nu am
+    putut citi playlist-ul" pe un link perfect valid.
+    """
+    from music.commands import canonical_playlist_url
+
+    assert canonical_playlist_url('https://youtu.be/abc123?list=RDabc123') == (
+        'https://www.youtube.com/watch?v=abc123&list=RDabc123')
+    assert canonical_playlist_url(
+        'https://music.youtube.com/watch?v=abc123&list=RDAMVMabc123') == (
+        'https://www.youtube.com/watch?v=abc123&list=RDAMVMabc123')
+
+
+def test_a_playlist_without_a_video_keeps_the_playlist_form():
+    from music.commands import canonical_playlist_url
+
+    assert canonical_playlist_url('https://www.youtube.com/playlist?list=PLxyz') == (
+        'https://www.youtube.com/playlist?list=PLxyz')
+
+
+def test_a_link_without_a_list_is_left_alone():
+    """Normalizarea nu are voie sa atinga un link normal de piesa."""
+    from music.commands import canonical_playlist_url
+
+    for url in ('https://www.youtube.com/watch?v=abc123',
+                'https://youtu.be/abc123', 'nu e link deloc'):
+        assert canonical_playlist_url(url) == url, url
+
+
+def test_the_playlist_branch_extracts_from_the_normalised_url():
+    """Un helper pe care ramura nu il foloseste nu repara nimic."""
+    import ast
+    import inspect
+
+    from music import commands as commands_mod
+
+    src = inspect.getsource(commands_mod.setup_music_commands)
+    for node in ast.walk(ast.parse(src.strip())):
+        if not isinstance(node, ast.Call):
+            continue
+        if not ast.unparse(node.func).endswith('ytdlp.extract'):
+            continue
+        args = [ast.unparse(a) for a in node.args]
+        if any("stage='playlist'" in ast.unparse(k) for k in node.keywords):
+            assert any('canonical_playlist_url' in a for a in args), args
+            return
+    raise AssertionError('nu am gasit extractia de playlist')
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

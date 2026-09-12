@@ -13,7 +13,7 @@ import discord
 from music.config import (FFMPEG_OPTS, cookies_available, log,
                           make_search_opts)
 from music.state import get_state, guild_states, loading, set_autoplay
-from music.utils import (DISCORD_ERRORS, cleanup_file, format_time, item_title,
+from music.utils import (DISCORD_ERRORS, cleanup_file, format_time, item_title, video_id,
                          make_opus_source, may_control, safe_delete,
                          suggest_tracks)
 from music.autoplay import prefill_autoplay_queue
@@ -59,6 +59,33 @@ def is_youtube_playlist(url: str) -> bool:
     if (parsed.hostname or '').lower() not in YOUTUBE_HOSTS:
         return False
     return any(value.strip() for value in parse_qs(parsed.query).get('list', []))
+
+
+def canonical_playlist_url(url: str) -> str:
+    """Forma pe care extractorul de playlist-uri al lui yt-dlp o ințelege.
+
+    Masurat contra YouTube-ului real, 2026-09-12: `youtu.be/<id>?list=RD<id>` — exact
+    ce da butonul Share din aplicatia de telefon pentru un mix — intoarce ZERO intrari,
+    iar `www.youtube.com/watch?v=<id>&list=RD<id>` intoarce 30. Extractorul `youtube:tab`
+    nu rezolva mix-ul din forma scurta.
+
+    De asta a vazut el "Nu am putut citi playlist-ul" de sase ori azi: linkul lui era
+    perfect valid, doar ca il trimiteam la yt-dlp intr-o forma pe care acesta nu o
+    desface. Iar in ramura de playlist a intrat abia de ieri, cand am inceput sa
+    recunoaștem `youtu.be/...?list=` — deci regresia e a mea.
+    """
+    try:
+        parsed = urlparse(url or '')
+    except ValueError:
+        return url
+    params = parse_qs(parsed.query)
+    playlist = next((v.strip() for v in params.get('list', []) if v.strip()), '')
+    if not playlist:
+        return url
+    vid = video_id(url)
+    if vid:
+        return f'https://www.youtube.com/watch?v={vid}&list={playlist}'
+    return f'https://www.youtube.com/playlist?list={playlist}'
 
 
 # Schemele fara `//` care NU sunt niciodata un titlu de piesa. Enumerate, nu
@@ -456,7 +483,8 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
                 guard = (contextlib.nullcontext() if state.is_loading
                          else loading(state))
                 with guard:
-                    info = await ytdlp.extract(ydl_opts_pl, search,
+                    info = await ytdlp.extract(ydl_opts_pl,
+                                               canonical_playlist_url(search),
                                                loop=bot.loop, stage='playlist')
                 entries = info.get('entries', [])
                 if not entries:
