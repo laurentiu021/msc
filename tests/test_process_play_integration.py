@@ -153,6 +153,12 @@ class _Harness:
 def _fresh_state():
     st = GuildState()
     state_mod.guild_states[77] = st
+    # Intrerupatorul de guest e stare globala pe PROCES — corect in producție, unde
+    # IP-ul e comun tuturor guild-urilor, dar in teste se scurge de la unul la altul:
+    # un test care simuleaza "not a bot" pe calea de guest il aprindea, iar cel urmator
+    # nu mai ajungea deloc la varianta de guest si picheaza cu "nu s-a descarcat
+    # nimic". Se reseteaza aici, unde se reseteaza si restul stării.
+    resolve.clear_guest_rate_limit()
     return st
 
 

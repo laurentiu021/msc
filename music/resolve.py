@@ -60,21 +60,35 @@ def guest_rate_limited(now: float | None = None) -> bool:
     return (now if now is not None else time.time()) < _guest_blocked_until
 
 
-def note_guest_rate_limit(reason: str | None, *, now: float | None = None) -> bool:
-    """Aprinde intrerupatorul daca motivul e chiar o limitare de rata.
+# Verdictele care inseamna "YouTube REFUZA calea fara cookies de pe IP-ul asta".
+# `ratelimit` e 429-ul. `cookies` e "Sign in to confirm you're not a bot", si sensul
+# lui depinde de cine a primit-o: pe o cerere CU cookies inseamna sesiune moarta (si
+# nu suprima nimic, fiindca functia asta se cheama doar pe incercari de guest), iar pe
+# una FARA cookies inseamna exact ca IP-ul nu e acceptat neautentificat — deci
+# urmatoarea piesa va primi acelasi raspuns.
+#
+# Masurat in producție, 2026-09-12 11:19-11:24: calea cu cookies dadea 7 formate
+# redabile, iar cea de guest primea verificarea anti-bot si eșua — de doua ori pe
+# piesa (extractie + descarcare), ~14 secunde aruncate pe fiecare piesa neaflata in
+# cache. Intrerupatorul nu se aprindea, fiindca cerea strict un 429.
+GUEST_REFUSAL_VERDICTS = ('ratelimit', 'cookies')
 
-    Nu pe orice eșec: un video indisponibil sau un cookie expirat nu spune nimic
-    despre IP, iar a opri calea de guest pentru astea ar insemna sa pierdem singura
+
+def note_guest_rate_limit(reason: str | None, *, now: float | None = None) -> bool:
+    """Aprinde intrerupatorul daca YouTube a REFUZAT calea de guest.
+
+    Nu pe orice eșec: un video indisponibil sau un format lipsa nu spune nimic despre
+    IP, iar a opri calea de guest pentru astea ar insemna sa pierdem singura
     alternativa exact cand e nevoie de ea.
     """
     global _guest_blocked_until
     if not reason:
         return False
     kind, _ = diagnose_error(reason)
-    if kind != 'ratelimit':
+    if kind not in GUEST_REFUSAL_VERDICTS:
         return False
     _guest_blocked_until = (now if now is not None else time.time()) +         GUEST_RATELIMIT_COOLDOWN_SEC
-    log.info(f"Guest limitat de YouTube; nu mai incerc fara cookies "
+    log.info(f"Guest refuzat de YouTube ({kind}); nu mai incerc fara cookies "
              f"{GUEST_RATELIMIT_COOLDOWN_SEC // 60} minute")
     return True
 

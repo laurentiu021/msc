@@ -829,14 +829,34 @@ def test_the_breaker_expires_on_its_own():
         resolve.clear_guest_rate_limit()
 
 
-def test_only_a_real_rate_limit_arms_it():
-    """Un video sters sau un cookie expirat nu spune nimic despre IP, iar a opri
-    calea de guest pentru ele ar pierde alternativa exact cand e nevoie de ea."""
+def test_only_a_refusal_of_the_guest_path_arms_it():
+    """Un video sters sau un format lipsa nu spune nimic despre IP, iar a opri calea
+    de guest pentru ele ar pierde alternativa exact cand e nevoie de ea."""
     resolve.clear_guest_rate_limit()
-    for reason in ('This video is unavailable', 'Sign in to confirm you are not a bot',
-                   'Requested format is not available', '', None):
+    for reason in ('This video is unavailable', 'Requested format is not available',
+                   "We are processing this video", '', None):
         assert resolve.note_guest_rate_limit(reason) is False, reason
         assert not resolve.guest_rate_limited()
+
+
+def test_a_bot_check_on_the_guest_path_also_arms_it():
+    """Masurat in producție, 2026-09-12 11:19-11:24: calea cu cookies dadea 7 formate
+    redabile, iar cea de guest primea "Sign in to confirm you are not a bot" — de doua
+    ori pe piesa (extractie + descarcare), ~14 secunde aruncate la fiecare piesa
+    neaflata in cache. Refuzul e al IP-ului neautentificat, nu al videoclipului, deci
+    piesa urmatoare primeste exact acelasi raspuns.
+
+    Functia se cheama DOAR pe incercari de guest, deci nu poate confunda asta cu o
+    sesiune moarta: aceeasi fraza primita pe calea CU cookies nu trece pe aici.
+    """
+    resolve.clear_guest_rate_limit()
+    try:
+        assert resolve.note_guest_rate_limit(
+            'ERROR: [youtube] x: Sign in to confirm you are not a bot. '
+            'Use --cookies-from-browser') is True
+        assert resolve.guest_rate_limited()
+    finally:
+        resolve.clear_guest_rate_limit()
 
 
 if __name__ == '__main__':
