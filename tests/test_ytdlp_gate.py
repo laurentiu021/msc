@@ -377,6 +377,57 @@ def test_a_successful_request_moves_its_rotation_into_the_shared_jar():
             'rotatia scrisa de yt-dlp nu a ajuns in jar-ul de pe volum')
 
 
+def test_a_cancelled_request_is_treated_like_an_abandoned_thread():
+    """Anularea nu e o ieșire curata, e acelasi abandon ca un timeout.
+
+    `wait_for` anuleaza doar invelisul asyncio: un `concurrent.futures` deja PORNIT
+    nu se poate anula, deci thread-ul continua sa lucreze si sa scrie in copia lui de
+    cookies la `close()`. Fara o ramura proprie, `finally` Ștergea copia sub el —
+    fisierul se recreeaza la scriere si rămâne pe volum cu o sesiune Google in el —
+    iar slotul se elibera fara sa contorizeze thread-ul abandonat, deci saturarea pe
+    care watchdog-ul o urmareste devenea invizibila.
+
+    Se ajunge aici obișnuit: tick-ul de inactivitate cheama prefill-ul, iar prima
+    comanda scrisa in acele secunde ii anuleaza task-ul.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        shared = os.path.join(tmp, 'cookies.txt')
+        with open(shared, 'w', encoding='utf-8') as fh:
+            fh.write('# Netscape HTTP Cookie File' + chr(10))
+
+        fake = _FakeYtDlpModule(0.6)
+        saved = _install(fake)
+        _reset_gate()
+        before = ytdlp._leaked_live
+        try:
+            async def scenario():
+                task = asyncio.create_task(
+                    ytdlp.extract({'cookiefile': shared}, 'q'))
+                await asyncio.sleep(0.15)          # a ajuns in executor
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                # Thread-ul inca lucreaza: copia lui NU are voie sa dispara.
+                live = [n for n in os.listdir(tmp) if n.startswith('cookies-')]
+                assert live, 'copia a fost stearsa sub thread-ul care inca ruleaza'
+                assert ytdlp._leaked_live == before + 1, (
+                    f'thread-ul abandonat nu a fost contorizat: '
+                    f'{ytdlp._leaked_live} vs {before}')
+                await asyncio.sleep(0.9)           # thread-ul se incheie
+                return [n for n in os.listdir(tmp) if n.startswith('cookies-')]
+
+            leftovers = asyncio.run(scenario())
+        finally:
+            ytdlp.yt_dlp = saved
+            _reset_gate()
+
+        assert leftovers == [], f'copia a rămas pe volum: {leftovers}'
+        assert ytdlp._leaked_live == before, (
+            f'contorul de thread-uri abandonate nu s-a intors: {ytdlp._leaked_live}')
+
+
 def test_a_timeout_leaves_the_shared_jar_alone_even_after_the_thread_writes():
     """Cronologia completa a defectului, prin poarta reala.
 

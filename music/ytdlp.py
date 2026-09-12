@@ -223,6 +223,30 @@ async def extract(opts: dict, query: str, *, download: bool = False,
                     f"continua in fundal (abandonate acum: {live}/{MAX_WORKERS}, "
                     f"total de la pornire: {total})")
                 raise YtdlpTimeout(stage, budget) from e
+            except asyncio.CancelledError:
+                # Anularea nu e o ieșire curata, e acelasi abandon ca un timeout.
+                # `wait_for` anuleaza doar invelisul asyncio: un `concurrent.futures`
+                # deja PORNIT nu se poate anula, deci thread-ul continua sa lucreze
+                # si sa scrie in copia lui de cookies la `close()`. Fara ramura asta,
+                # `finally` Ștergea copia sub el (fisierul se recreeaza la scriere si
+                # rămâne pe volum cu o sesiune Google in el, fara sa il mai stearga
+                # nimeni), iar slotul se elibera fara sa contorizeze thread-ul
+                # abandonat — adica exact saturarea pe care watchdog-ul o urmareste
+                # devenea invizibila.
+                #
+                # Se ajunge aici obișnuit: tick-ul de inactivitate cheama prefill-ul,
+                # iar prima comanda scrisa in acele secunde ii anuleaza task-ul.
+                live, total = _mark_leaked()
+                work.add_done_callback(_release_leaked)
+                if private:
+                    work.add_done_callback(
+                        lambda _f, path=private: discard_cookies(path))
+                    private = None
+                log.info(
+                    f"Cererea yt-dlp ({stage or 'cerere'}) a fost anulata; thread-ul "
+                    f"continua in fundal (abandonate acum: {live}/{MAX_WORKERS}, "
+                    f"total de la pornire: {total})")
+                raise
         # Doar la succes: rotatia scrisa de yt-dlp (`__Secure-1PSIDTS`, `SIDCC`)
         # merge in jar-ul comun. La eșec, copia poate conține exact valorile pe
         # care YouTube le-a invalidat, deci se arunca.
