@@ -423,6 +423,82 @@ def test_the_cap_closes_after_real_requests():
             api.DAILY_UNIT_CAP = saved_cap
 
 
+# --- frana de cota se uita la ce a adus API-ul --------------------------------
+
+def _prefill_with(mix_added, related_added):
+    """Ruleaza prefill-ul cu strategiile inlocuite; intoarce daca s-a cerut search."""
+    import asyncio
+
+    from music import autoplay
+    from music import youtube_api as yt_api_mod
+    from music.state import GuildState
+
+    st = GuildState()
+    st.last_url = 'https://www.youtube.com/watch?v=seed00'
+    st.last_title = 'Artist - Piesa'
+    calls = []
+
+    async def fake_mix(state, loop, origin_id, skip_ids, needed, artist_counts=None):
+        calls.append('mix')
+        for n in range(mix_added):
+            autoplay._add_to_queue(state, f'mix{n}', f'Unu{n} - Doi{n}', skip_ids,
+                                   artist_counts)
+        return mix_added
+
+    async def fake_related(state, loop, origin_id, skip_ids, needed,
+                           artist_counts=None):
+        calls.append('related')
+        for n in range(related_added):
+            autoplay._add_to_queue(state, f'rel{n}', f'Trei{n} - Patru{n}', skip_ids,
+                                   artist_counts)
+        return related_added
+
+    async def fake_search(state, loop, title, skip_ids, needed, artist_counts=None):
+        calls.append('search')
+        return 0
+
+    async def fake_ytdlp_search(state, loop, title, skip_ids, needed,
+                                artist_counts=None):
+        calls.append('ytdlp_search')
+        return 0
+
+    saved = (autoplay._try_ytdlp_mix, autoplay._try_api_related,
+             autoplay._try_api_search, autoplay._try_ytdlp_search,
+             yt_api_mod.is_available)
+    autoplay._try_ytdlp_mix = fake_mix
+    autoplay._try_api_related = fake_related
+    autoplay._try_api_search = fake_search
+    autoplay._try_ytdlp_search = fake_ytdlp_search
+    yt_api_mod.is_available = lambda: True
+    try:
+        asyncio.run(autoplay.prefill_autoplay_queue(st, None, target=12))
+    finally:
+        (autoplay._try_ytdlp_mix, autoplay._try_api_related,
+         autoplay._try_api_search, autoplay._try_ytdlp_search,
+         yt_api_mod.is_available) = saved
+    return calls
+
+
+def test_a_useless_api_is_not_asked_a_second_time():
+    """Frana era pe totalul general, nu pe rezultatul API-ului.
+
+    `added > 0` includea si piesele venite din Mix, deci cazul obișnuit — Mix-ul
+    aduce cateva, API-ul related zero — cumpara inca o cautare de 100 de unitati
+    exact dupa ce primise dovada ca API-ul nu ajuta acum. Comentariul de deasupra
+    condiției spunea deja ce trebuie sa se intample; condiția nu o facea.
+    """
+    calls = _prefill_with(mix_added=3, related_added=0)
+    assert 'related' in calls, calls
+    assert 'search' not in calls, (
+        f'a cumparat o a doua cautare de API dupa un related gol: {calls}')
+
+
+def test_a_working_api_is_still_used_twice_when_the_queue_is_short():
+    """Frana nu are voie sa devina "o singura cerere, mereu"."""
+    calls = _prefill_with(mix_added=0, related_added=2)
+    assert calls.count('search') == 1, calls
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

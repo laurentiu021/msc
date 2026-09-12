@@ -105,17 +105,24 @@ async def _prefill(state: GuildState, bot_loop, target: int):
     # Strategiile de API costa cota (100 unitati fiecare cerere de search, plus
     # detaliile videoclipului). Le oprim dupa prima care nu aduce nimic: un
     # prefill eșuat consuma sute de unitati din cele 10.000 pe zi, degeaba.
-    api_spent = 0
+    #
+    # Frana se uita la ce a adus API-ul, nu la totalul general: `added > 0` includea
+    # si piesele venite din Mix, deci cazul obișnuit — Mix-ul aduce cateva, API-ul
+    # zero — trecea mai departe si cumpara inca o cautare de 100 de unitati exact
+    # dupa ce primise dovada ca API-ul nu ajuta acum. Condiția de dinainte nu
+    # implementa ce spunea comentariul de deasupra ei.
+    api_worked = False
     if yt_api.is_available() and added < needed:
         got = await _try_api_related(state, bot_loop, origin_id, skip_ids,
                                      needed - added, artist_counts)
         added += got
-        api_spent += 1
-        if got == 0:
+        api_worked = got > 0
+        if not api_worked:
             log.info("Autoplay: API related n-a adus nimic, nu mai cheltui cota")
 
-    # Strategy 3: YouTube API search (dupa titlu)
-    if yt_api.is_available() and added < needed and api_spent < 2 and added > 0:
+    # Strategy 3: YouTube API search (dupa titlu). Cel mult o a doua cerere de API,
+    # si numai daca prima a chiar adus ceva.
+    if yt_api.is_available() and added < needed and api_worked:
         added += await _try_api_search(state, bot_loop, state.last_title, skip_ids,
                                        needed - added, artist_counts)
 
