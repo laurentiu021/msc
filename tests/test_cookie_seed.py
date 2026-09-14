@@ -382,6 +382,92 @@ def test_there_is_one_cookie_line_parser():
     assert len(hits) <= 1, f'mai multe parsere de linii de cookie: {hits}'
 
 
+# --- un export din incognito are TOATE sesiunile httpOnly ----------------------
+
+def _httponly_jar(tmp):
+    """Exact forma unui export din Chrome incognito: sesiunile sunt httpOnly."""
+    path = os.path.join(tmp, 'cookies.txt')
+    rows = [
+        ('#HttpOnly_.youtube.com', 'SID'),
+        ('#HttpOnly_.youtube.com', '__Secure-1PSID'),
+        ('#HttpOnly_.youtube.com', '__Secure-3PSID'),
+        ('#HttpOnly_.youtube.com', '__Secure-1PSIDTS'),
+        ('.youtube.com', 'SAPISID'),
+        ('.youtube.com', 'PREF'),
+    ]
+    with open(path, 'w', encoding='utf-8', newline=chr(10)) as fh:
+        fh.write('# Netscape HTTP Cookie File' + chr(10))
+        for domain, name in rows:
+            fh.write(chr(9).join([domain, 'TRUE', '/', 'TRUE', '9999999999',
+                                  name, 'valoare']) + chr(10))
+    return path, len(rows)
+
+
+def test_httponly_entries_are_counted_not_skipped():
+    """`#HttpOnly_` NU e un comentariu: asa marcheaza formatul Netscape un cookie
+    httpOnly, si exact asa sunt marcate TOATE cookie-urile de sesiune ale YouTube.
+
+    Parser-ul sarea orice linie cu `#`, deci le pierdea pe toate. Vazut pe un export
+    real din Chrome incognito (2026-09-14): 20 de cookie-uri, 11 httpOnly, raportate
+    ca "9 intrari" si zero cookie-uri de sesiune.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path, expected = _httponly_jar(tmp)
+        health = config.cookie_health(path)
+        assert health['entries'] == expected, (
+            f"{health['entries']} in loc de {expected}: liniile httpOnly au fost sarite")
+
+
+def test_health_does_not_call_a_valid_jar_broken():
+    """Ce vede omul in `!health`. Raportarea greșita nu e cosmetica: il trimite sa
+    reinnoiasca niste cookie-uri care nu aveau nimic."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path, _ = _httponly_jar(tmp)
+        health = config.cookie_health(path)
+        assert health['missing'] == [] or not health['missing'], (
+            f"raportate ca lipsa desi sunt in jar: {health['missing']}")
+        assert {'SID', '__Secure-1PSID', '__Secure-3PSID'} <= set(health['present']), (
+            health['present'])
+        assert config.cookies_valid(path) is True
+
+
+def test_one_parser_reads_the_jar():
+    """Regula pentru `#HttpOnly_` a existat corect in `_session_names` si greșit in
+    `_cookie_lines`. Doua parsere insemna exact asta: unul bun si unul care minte."""
+    import ast
+    import inspect
+
+    src = inspect.getsource(config._session_names)
+    called = {ast.unparse(n.func) for n in ast.walk(ast.parse(src.strip()))
+              if isinstance(n, ast.Call)}
+    assert '_cookie_lines' in called, (
+        f'_session_names isi face iar propria parsare: {sorted(called)}')
+    # Pe literalii din COD, fara docstring: cuvantul apare firesc in explicatia de
+    # ce regula sta intr-un singur loc, iar o verificare pe sursa bruta ar picha exact
+    # din cauza explicatiei. Docstring-ul se scoate structural, nu prin comparatie de
+    # text — `inspect.getdoc` normalizeaza indentarea, deci nu e egal cu literalul.
+    fn = ast.parse(src.strip()).body[0]
+    body = fn.body
+    if (isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body = body[1:]
+    literals = [n.value for stmt in body for n in ast.walk(stmt)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    assert not any('HttpOnly' in v for v in literals), (
+        f'regula e scrisa a doua oara in cod: {literals}')
+
+
+def test_a_real_comment_is_still_ignored():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'cookies.txt')
+        with open(path, 'w', encoding='utf-8', newline=chr(10)) as fh:
+            fh.write('# Netscape HTTP Cookie File' + chr(10))
+            fh.write('# generat de o extensie' + chr(10))
+            fh.write(chr(9).join(['.youtube.com', 'TRUE', '/', 'TRUE',
+                                  '9999999999', 'SID', 'x']) + chr(10))
+        assert config.cookie_health(path)['entries'] == 1
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.

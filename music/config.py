@@ -356,7 +356,20 @@ def _cookie_file_paths():
 
 
 def _cookie_lines(source: str, *, is_text: bool = False) -> list[str]:
-    """Liniile utile din jar — un singur parser, folosit de tot ce il citeste."""
+    """Liniile utile din jar, cu prefixul `#HttpOnly_` scos — un singur parser.
+
+    `#HttpOnly_` NU e un comentariu: e felul in care formatul Netscape marcheaza un
+    cookie httpOnly, si exact asa sunt marcate TOATE cookie-urile de sesiune ale
+    YouTube-ului. Sarind liniile care incep cu `#`, parser-ul asta le pierdea pe
+    toate — iar `cookie_health` si `cookie_status` sunt construite pe el, deci `!health`
+    raporta un jar perfect valid ca "invalid, lipsesc SID, __Secure-1PSID, ..." si
+    trimitea omul sa reinnoiasca niste cookie-uri care nu aveau nimic.
+    Vazut pe un export din Chrome incognito (2026-09-14): 20 de cookie-uri, 11 dintre
+    ele httpOnly, raportate ca 9 intrari si zero cookie-uri de sesiune.
+
+    `_session_names` avea deja regula corecta scrisa separat — semnul obișnuit ca
+    exista doua parsere si doar unul e bun.
+    """
     if is_text:
         text = source or ''
     else:
@@ -365,8 +378,17 @@ def _cookie_lines(source: str, *, is_text: bool = False) -> list[str]:
                 text = fh.read()
         except OSError:
             return []
-    return [l for l in text.strip().splitlines()
-            if l.strip() and not l.startswith('#')]
+    lines = []
+    for raw in text.strip().splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith('#HttpOnly_'):
+            line = line[len('#HttpOnly_'):]
+        elif line.startswith('#'):
+            continue
+        lines.append(line)
+    return lines
 
 
 def _count_cookie_entries(path: str) -> int:
@@ -426,28 +448,20 @@ def _session_names(path: str) -> set:
     """Cookie-urile de sesiune valabile pentru youtube.com, din jar-ul dat.
 
     Domeniul conteaza: un `SID` de `.google.com` nu pleaca niciodata spre YouTube.
+    Parsarea vine din `_cookie_lines`, ca regula pentru `#HttpOnly_` sa existe intr-un
+    singur loc — cand era scrisa aici a doua oara, cealalta copie a rămas greșita si
+    numaratoarea de intrari pierdea toate cookie-urile de sesiune.
     """
     found = set()
-    try:
-        with open(path, encoding='utf-8', errors='replace') as fh:
-            for line in fh:
-                raw = line.strip()
-                if not raw:
-                    continue
-                if raw.startswith('#HttpOnly_'):
-                    raw = raw[len('#HttpOnly_'):]
-                elif raw.startswith('#'):
-                    continue
-                parts = raw.split('\t')
-                if len(parts) < 7:
-                    continue
-                domain = parts[0].lstrip('.').lower()
-                name = parts[5]
-                if name in COOKIE_SESSION and (
-                        domain == 'youtube.com' or domain.endswith('.youtube.com')):
-                    found.add(name)
-    except OSError as e:
-        log.debug(f"Nu am putut citi jar-ul {path}: {e}")
+    for line in _cookie_lines(path):
+        parts = line.split('	')
+        if len(parts) < 7:
+            continue
+        domain = parts[0].lstrip('.').lower()
+        if not (domain == 'youtube.com' or domain.endswith('.youtube.com')):
+            continue
+        if parts[5] in COOKIE_SESSION:
+            found.add(parts[5])
     return found
 
 
