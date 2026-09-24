@@ -708,6 +708,10 @@ def setup_music_commands(bot, process_play, play_next, update_player_ui, start_t
         vc.stop()
         await asyncio.sleep(0.3)
         state.last_start_time = time.time() - seconds
+        # stop + play pornesc audio si peste o pauza, deci pauza s-a incheiat — la
+        # fel ca in `process_play`. Rămasa aprinsa, panoul arata "rămas" static cat
+        # timp muzica mergea, iar urmatoarea pauza nu isi mai muta reperul.
+        state.paused_at = 0.0
         after_play = player_mod.make_after_play(ctx, state, filename)
         seek_opts = dict(FFMPEG_OPTS)
         seek_opts['before_options'] = f'-ss {seconds}'

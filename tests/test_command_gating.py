@@ -822,6 +822,61 @@ def test_seek_on_a_paused_track_is_accepted():
         f'a refuzat un seek pe o piesa pusa pe pauza: {ctx.sent}')
 
 
+def test_a_seek_over_a_pause_restarts_the_panel_clock():
+    """`!seek` porneste audio (stop + play), dar lasa `paused_at` aprins.
+
+    Panoul citea deci piesa drept pauzata: "rămas 3:00" static, fara numaratoare,
+    cat timp muzica mergea. Iar urmatoarea pauza nu mai muta reperul
+    (`mark_paused` pastreaza o pauza deja inceputa), deci la reluare timpul scurs
+    era scazut cu toata durata de la pauza VECHE: panoul arata cu un minut mai mult
+    ramas decat avea piesa. `process_play` face exact aceeasi pornire si stinge
+    `paused_at`; `!seek` nu o facea.
+    """
+    import tempfile
+    import types
+
+    from music.state import mark_paused, mark_resumed
+    from music.utils import playback_remaining
+
+    st = _fresh_state()
+    channel = _FakeVoiceChannel()
+    vc = _FakeVoiceClient(playing=False, paused=True, channel=channel)
+    st.last_duration = 200
+    st.last_start_time = 4940.0
+    mark_paused(st, 4990.0)                # pauza la 0:50
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'piesa.opus')
+        with open(path, 'wb') as fh:
+            fh.write(b'audio')
+        st.current_file = path
+        ctx = _FakeCtx(vc, channel=channel)
+        saved = (commands_mod.make_opus_source, commands_mod.time)
+
+        async def fake_source(filename, channel_, **kwargs):
+            return object()
+
+        commands_mod.make_opus_source = fake_source
+        # Ceasul comenzii, fixat: seek-ul se intampla la t=5000.
+        commands_mod.time = types.SimpleNamespace(time=lambda: 5000.0)
+        try:
+            with _Wiring() as w:
+                asyncio.run(w.bot.registry['seek'](ctx, timestamp='0:30'))
+        finally:
+            commands_mod.make_opus_source, commands_mod.time = saved
+
+    assert vc.playing and not vc.paused, 'premisa: dupa seek audio merge'
+    assert st.paused_at == 0.0, 'panoul arata o piesa pauzata in timp ce cânta'
+    assert playback_remaining(5000.0, st.last_start_time, 200, st.paused_at) == (30, 170)
+
+    # 50s de muzica, 50s de pauza: la reluare au trecut 80s din piesa.
+    mark_paused(st, 5050.0)
+    mark_resumed(st, 5100.0)
+    elapsed, remaining = playback_remaining(5100.0, st.last_start_time, 200,
+                                            st.paused_at)
+    assert (elapsed, remaining) == (80, 120), (
+        f'dupa pauza/reluare panoul arata {elapsed}s scurse, {remaining}s ramase')
+
+
 def test_the_command_tree_is_no_longer_wiped_before_syncing():
     """Golirea exista cand nu aveam nicio comanda slash.
 
