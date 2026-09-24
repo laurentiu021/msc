@@ -8,7 +8,7 @@ import time
 import aiohttp
 import discord
 from music.config import (BLACKLIST, DOWNLOAD_CACHE_BYTES, DOWNLOAD_DIR,
-                          MAX_TRACK_SECONDS, MIN_TRACK_SECONDS, log)
+                          MIN_TRACK_SECONDS, duration_within_limits, log)
 
 # Tot ce poate ieși din stratul HTTP al lui discord.py, intr-un singur loc.
 #
@@ -501,7 +501,11 @@ def reject_reason(title, duration, last_title: str, live_status=None) -> str:
     # celelalte rezultate erau perfect bune.
     if live_status in ('is_live', 'is_upcoming', 'post_live'):
         return 'transmisiune live'
-    if duration and duration > MAX_TRACK_SECONDS:
+    # Plafonul prin ACELASI predicat ca filtrul de descarcare. Scris aici separat,
+    # ca `duration > MAX`, lasa sa treaca o piesa de exact MAX_TRACK_SECONDS: era
+    # aleasa din cautare, plătea o extractie completa si era refuzata abia apoi, in
+    # loc sa se treaca la urmatorul rezultat.
+    if duration and not duration_within_limits(duration):
         return 'prea lunga'
     if duration and duration < MIN_TRACK_SECONDS:
         return 'prea scurta'

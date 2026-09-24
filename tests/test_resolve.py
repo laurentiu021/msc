@@ -97,7 +97,8 @@ def test_an_overlong_track_is_refused_before_the_download():
                   'webpage_url': VIDEO, 'formats': PLAYABLE}
     with _Ytdlp(extract=lambda stage, opts: long_track) as yt:
         result = _run(resolve.resolve_from_url(VIDEO))
-    assert result.reject_reason and 'minute' in result.reject_reason
+    assert result.reject_reason and '3:00:00' in result.reject_reason, (
+        result.reject_reason)
     assert not any('download' in s for s in yt.stages)
 
 

@@ -452,7 +452,8 @@ def test_direct_overlong_url_is_refused_with_the_real_reason():
     assert not h.download_calls
     assert st._consecutive_errors == 0
     text = str(ctx.sent[0])
-    assert '180' in text or 'minute' in text, text
+    # Durata reala a piesei, scrisa exact (3 ore), nu doar cuvantul "minute".
+    assert '3:00:00' in text, text
     assert 'necunoscuta' not in text.lower(), 'refuzul a ajuns la diagnose_error'
 
 
@@ -550,6 +551,49 @@ def test_the_pre_check_agrees_exactly_with_the_download_filter():
         assert refused_by_us == refused_by_ytdlp, (
             f"durata={info.get('duration', 'LIPSA')}: verificarea zice "
             f"{refused_by_us}, yt-dlp zice {refused_by_ytdlp}")
+
+
+def test_the_automatic_choosers_never_pick_what_the_download_refuses():
+    """Aceeasi regula de durata si la alegerea automata: cautare si autoplay.
+
+    Unificarea din 2026-09-10 a aliniat verificarea din resolve.py cu filtrul de
+    descarcare, dar mai rămâneau doua copii scrise cu `duration > MAX`: filtrul de
+    cautare (`reject_reason`) si cel de autoplay (`_add_to_queue`). O piesa de
+    EXACT MAX_TRACK_SECONDS era deci aleasa din cautare sau pusa in coada, plătea o
+    extractie completa si era refuzata abia apoi — in loc sa treaca la urmatorul
+    rezultat, care era bun.
+
+    Doar duratele CUNOSCUTE: o intrare de lista fara durata nu poate fi judecata
+    acolo, iar extractia completa o va spune.
+    """
+    import yt_dlp
+
+    from music.autoplay import _add_to_queue
+    from music.config import MATCH_FILTER_EXPR, MAX_TRACK_SECONDS
+
+    ytdlp_filter = yt_dlp.utils.match_filter_func(MATCH_FILTER_EXPR)
+    for duration in (MAX_TRACK_SECONDS - 1, MAX_TRACK_SECONDS,
+                     MAX_TRACK_SECONDS + 1, MAX_TRACK_SECONDS + 59):
+        refused = ytdlp_filter({'id': 'x', 'title': 'T', 'duration': duration}) is not None
+        if not refused:
+            continue
+        assert utils.reject_reason('Artist - Piesa', duration, ''), (
+            f'cautarea alege o piesa de {duration}s pe care descarcarea o refuza')
+        queued = _add_to_queue(GuildState(), f'v{duration}', 'Artist - Piesa', set(),
+                               duration=duration)
+        assert not queued, (
+            f'autoplay pune in coada o piesa de {duration}s pe care descarcarea o refuza')
+
+
+def test_a_duration_refusal_shows_two_different_numbers():
+    """"Piesa are 11 minute, limita e 11" — impartirea intreaga dadea acelasi numar
+    pentru orice piesa intre 11:00 si 11:59, deci refuzul parea sa se contrazica."""
+    from music.config import MAX_TRACK_SECONDS
+
+    reason = resolve.unplayable_reason({'duration': MAX_TRACK_SECONDS + 30})
+    assert reason, 'premisa: piesa e peste limita'
+    assert utils.format_time(MAX_TRACK_SECONDS + 30) in reason, reason
+    assert utils.format_time(MAX_TRACK_SECONDS) in reason, reason
 
 
 def test_an_explicit_short_link_is_still_played():

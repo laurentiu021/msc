@@ -1,7 +1,7 @@
 """Logica autoplay: YouTube Mix (preferat) + fallback-uri."""
 import re
-from music.config import (AUTOPLAY_QUEUE_TARGET, BLACKLIST, MAX_TRACK_SECONDS,
-                          MIN_TRACK_SECONDS, cookies_available, log,
+from music.config import (AUTOPLAY_QUEUE_TARGET, BLACKLIST, MIN_TRACK_SECONDS,
+                          cookies_available, duration_within_limits, log,
                           make_search_opts)
 from music.state import GuildState
 from music.utils import clean_search_title, video_id
@@ -151,7 +151,10 @@ def _add_to_queue(state, vid_id, title, skip_ids, artist_counts=None, channel=''
     # ajungeau in coada si abia process_play le refuza, dupa ce pierdea cereri.
     if live_status in ('is_live', 'is_upcoming', 'post_live'):
         return False
-    if duration and (duration > MAX_TRACK_SECONDS or duration < MIN_TRACK_SECONDS):
+    # Plafonul prin acelasi predicat ca filtrul de descarcare: cu `> MAX`, o piesa
+    # de exact MAX_TRACK_SECONDS intra in coada si era refuzata abia la redare.
+    if duration and (not duration_within_limits(duration)
+                     or duration < MIN_TRACK_SECONDS):
         return False
     if artist_counts is not None:
         key = artist_key(title_text, channel)

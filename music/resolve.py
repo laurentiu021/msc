@@ -29,8 +29,8 @@ from music.config import (HLS_MAX_BYTES, MAX_DOWNLOAD_BYTES, MAX_TRACK_SECONDS,
                           make_download_opts, make_search_opts,
                           search_query, yt_client_args, WEB_CLIENTS)
 from music.errors import YtdlpTimeout, diagnose_error
-from music.utils import (AUDIO_EXTS, cached_download, is_clean, item_title,
-                         video_id,
+from music.utils import (AUDIO_EXTS, cached_download, format_time, is_clean,
+                         item_title, video_id,
                          reject_reason)
 
 # Lanturile de clienti. Cerem ambii clienti in ACEEASI cerere: yt-dlp cumuleaza
@@ -214,8 +214,10 @@ def unplayable_reason(info) -> str | None:
     if not duration_within_limits(duration):
         if not duration:
             return "YouTube nu spune cat dureaza, deci nu o pot descarca"
-        return (f"Piesa are {int(duration // 60)} minute, limita e "
-                f"{MAX_TRACK_SECONDS // 60}")
+        # mm:ss, nu minute intregi: impartirea intreaga dadea "Piesa are 11 minute,
+        # limita e 11" pentru orice piesa intre 11:00 si 11:59.
+        return (f"Piesa are {format_time(duration)}, limita e sub "
+                f"{format_time(MAX_TRACK_SECONDS)}")
     return None
 
 
