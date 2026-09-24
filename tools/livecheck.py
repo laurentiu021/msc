@@ -313,6 +313,9 @@ async def a_second_play_queues_without_interrupting(live, r):
     r.check(grew, f'a intrat in coada ({depth} -> {len(live.state.queue)})')
     r.check(live.state.last_title == before, 'nu a intrerupt piesa curenta')
     r.check(live.vc.is_playing(), 'inca cânta')
+    # Confirmarea pleaca DUPA ce coada a crescut, si o vedem abia prin evenimentul
+    # de gateway: aceeasi aȘteptare ca in `commands_on_an_empty_session...`.
+    await live.wait(lambda: live.said(mark), 5)
     said = live.text_of(mark)
     r.check(bool(said.strip()), 'a confirmat adaugarea in coada')
     r.note('confirmare: ' + said.replace('\n', ' ')[:160])
@@ -349,6 +352,7 @@ async def seek_works_and_refuses_nonsense(live, r):
     r.note('raspuns: ' + live.text_of(mark).replace('\n', ' ')[:120])
     mark = live.since()
     await live.run_command('!seek -10')
+    await live.wait(lambda: live.said(mark), 5)
     said = live.text_of(mark).lower()
     r.check('negativ' in said or 'nu' in said, f'refuza timp negativ: {said[:120]!r}')
     r.check(bool(live.vc and live.vc.is_playing()),
@@ -438,6 +442,7 @@ async def a_member_outside_the_channel_cannot_control(live, r):
 
     mark = live.since()
     await live.run_command('!skip', author=_Elsewhere())
+    await live.wait(lambda: live.said(mark), 5)
     said = live.text_of(mark).lower()
     r.check(live.vc and live.vc.is_connected(), 'sesiunea a supraviețuit')
     r.check(bool(said.strip()), f'a raspuns strainului: {said[:120]!r}')
@@ -501,6 +506,7 @@ async def a_playlist_link_adds_more_than_one(live, r):
     await live.run_command(f'!play {playlist}')
     grew = await live.wait(lambda: len(live.state.queue) >= 2
                            or (live.vc and live.vc.is_playing()), 150)
+    await live.wait(lambda: live.said(mark), 5)
     said = live.text_of(mark).replace('\n', ' ')
     r.check(grew, f'a adaugat piese din playlist (coada={len(live.state.queue)})')
     r.check(bool(said.strip()), f'a confirmat: {said[:160]!r}')
