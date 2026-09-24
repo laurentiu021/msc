@@ -229,6 +229,62 @@ def test_displaced_file_is_kept_when_it_is_the_same_file():
         assert target not in h.cleaned, 'a sters fisierul pe care tocmai il reda'
 
 
+def test_a_track_started_by_nplay_still_obeys_the_loop():
+    """`!nplay` aprinde `skip_request` ca sa inlocuiasca piesa curenta, dar
+    inlocuirea nu trece prin `_play_next_async`: callback-ul piesei vechi e
+    invalidat de generatie, deci nimic nu consuma steagul. El rămânea aprins pe
+    toata durata piesei NOI, iar cand aceasta se termina natural loop-ul era sarit:
+    loop 1 nu o repeta si trecea la urmatoarea din coada, loop 2 o scotea din
+    rotatie. O piesa pornita cu `!play` se comporta corect, deci diferenta venea
+    doar din comanda care a pornit-o.
+    """
+    new_url = 'https://www.youtube.com/watch?v=vid999'
+    queued_url = 'https://www.youtube.com/watch?v=coada00001'
+    # loop_mode -> (ce trebuie sa porneasca dupa piesa noua, ce rămâne in coada)
+    expected = {1: ([new_url], [queued_url]), 2: ([queued_url], [new_url])}
+    for loop_mode, (want_next, want_queue) in expected.items():
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, 'noua.opus')
+            old = os.path.join(tmp, 'veche.opus')
+            for f in (target, old):
+                open(f, 'wb').write(b'audio')
+            st = _state()
+            st.loop_mode = loop_mode
+            st.current_file = old
+            st.last_url = 'https://www.youtube.com/watch?v=veche00001'
+            st.last_title = 'Artist - Veche'
+            st.queue = [{'query': queued_url, 'title': 'Din coada'}]
+            vc = _VoiceClient()
+            vc.play(object())                  # piesa veche cânta
+            ctx = _Ctx(vc)
+            ended = []
+            played = []
+            saved = (player.trim_cache, player.process_play)
+            player.trim_cache = lambda: None
+            try:
+                with _Harness(target):
+                    st.skip_request = True     # exact ce face `!nplay` in commands.py
+                    asyncio.run(player.process_play(ctx, 'ceva nou'))
+                    assert st.last_url == new_url, st.last_url
+                    # Piesa noua se termina natural: callback-ul ei e cel viu si
+                    # cheama play_next, care programeaza `_play_next_async`.
+                    player.play_next = lambda c: ended.append(c)
+                    vc.after(None)
+                    assert ended == [ctx], 'sfarsitul piesei noi nu a ajuns la play_next'
+
+                    async def record(ctx_, query, is_radio=False, **kwargs):
+                        played.append(query)
+
+                    player.process_play = record
+                    asyncio.run(player._play_next_async(ctx, player.begin_loading(st)))
+            finally:
+                player.trim_cache, player.process_play = saved
+            rest = [item['query'] for item in st.queue]
+            assert (played, rest) == (want_next, want_queue), (
+                f'loop {loop_mode} dupa !nplay: a pornit {played}, coada {rest}; '
+                f'trebuia {want_next}, coada {want_queue}')
+
+
 def test_last_raw_error_is_cleared_on_success():
     with tempfile.TemporaryDirectory() as tmp:
         target = os.path.join(tmp, 'noua.opus')

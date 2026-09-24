@@ -702,6 +702,12 @@ async def process_play(ctx, query, is_radio=False, *, after_rollback=False):
         # A ieșit audio din proces. Momentul asta e singurul raspuns la "mai
         # merge?" care nu costa nicio cerere catre YouTube.
         state.last_play_ok = time.time()
+        # Inlocuirea s-a produs, deci skip-ul cerut pentru piesa de dinainte s-a
+        # implinit. `!nplay` il aprinde si nu trece prin `_play_next_async` —
+        # callback-ul piesei inlocuite e invalidat de generatie — deci nimic altceva
+        # nu il stingea: steagul rămânea pe piesa NOUA si ii manca loop-ul la final
+        # (loop 1 nu o repeta, loop 2 o scotea din rotatie).
+        state.skip_request = False
         _log_play_result('ok', started_at, query, url=web_url, reused=reused,
                          duration=state.last_duration, cookies=jar_authenticated)
 
