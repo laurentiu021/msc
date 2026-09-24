@@ -160,6 +160,47 @@ def test_a_jar_without_session_cookies_is_flagged():
     assert 'SID' in issues, issues
 
 
+def _jar_verdict(body):
+    """(cookies_valid, liniile de cookies din problems()) pentru un jar REAL."""
+    from music import config
+
+    saved = config._cookies_path
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'cookies.txt')
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write('# Netscape HTTP Cookie File\n' + body)
+        config._cookies_path = path
+        try:
+            strict = config.cookies_valid(path)
+            issues = [p for p in diag.problems(_snapshot()) if 'cookies' in p]
+        finally:
+            config._cookies_path = saved
+    return strict, issues
+
+
+def test_a_session_that_lives_only_on_google_is_flagged():
+    """`!health` judeca jar-ul dupa aceeasi regula ca `cookies_valid`.
+
+    Verdictul se calcula separat, ca un OR pe cele patru nume din COOKIE_CRITICAL,
+    pe orice domeniu. Un jar cu SID si SAPISID doar pe `.google.com` trecea, desi nu
+    trimite niciun cookie la youtube.com — exact jar-ul pe care `cookies_valid` il
+    refuza la adoptare si la promovare. Deci raportul spunea "sanatos" tocmai
+    despre starea in care autentificarea sigur nu merge.
+    """
+    strict, issues = _jar_verdict(
+        '.google.com\tTRUE\t/\tTRUE\t1790000000\tSID\tx\n'
+        '.google.com\tTRUE\t/\tTRUE\t1790000000\tSAPISID\ty\n')
+    assert strict is False, 'premisa: regula autoritara il refuza'
+    assert any('sesiune valida' in p for p in issues), (
+        f'jar fara sesiune pe youtube.com raportat drept sanatos: {issues}')
+
+    # Si invers: o sesiune reala pe youtube.com nu are voie sa fie semnalata.
+    strict, issues = _jar_verdict(
+        '.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSID\tx\n')
+    assert strict is True
+    assert issues == [], f'o sesiune buna a fost raportata drept problema: {issues}'
+
+
 def test_cookies_on_disk_but_not_in_use_is_a_problem():
     """Singura stare in care NIMIC nu poate cânta era raportata drept sanatoasa.
 

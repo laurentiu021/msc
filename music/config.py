@@ -772,6 +772,13 @@ def cookie_status() -> dict:
     except OSError:
         age = None
     health = cookie_health(path)
+    # Sesiunea se judeca prin ACEEASI regula ca adoptarea si promovarea jar-ului
+    # (`cookies_valid`): o identitate de sesiune pentru youtube.com. Verdictul de
+    # aici era scris separat, ca un OR pe COOKIE_CRITICAL pe orice domeniu, deci un
+    # jar cu SID si SAPISID doar pe `.google.com` — care nu trimite nimic la
+    # YouTube — ieșea "valid" exact in raportul dupa care se decide daca trebuie
+    # reexportate cookie-urile.
+    session = _session_names(path)
     return {
         'path': path,
         'exists': True,
@@ -779,9 +786,11 @@ def cookie_status() -> dict:
         'age_sec': round(age) if age is not None else None,
         # Numarul de intrari nu spune daca jar-ul mai autentifica: un fisier cu
         # 20 de linii si zero cookie-uri de sesiune e la fel de inutil ca unul gol.
-        'session_cookies': health['present'],
-        'missing_critical': health['missing'],
-        'valid': bool(health['entries'] and health['present']),
+        'session_cookies': sorted(session),
+        # Ce lipseste pentru o sesiune pe youtube.com, adica exact ce trebuie
+        # adus de un export nou.
+        'missing_critical': sorted(set(COOKIE_SESSION) - session),
+        'valid': cookies_valid(path),
         'has_good_copy': os.path.exists(path + _GOOD_SUFFIX),
     }
 

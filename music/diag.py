@@ -206,7 +206,9 @@ def problems(snapshot: dict) -> list[str]:
         out.append(f"cookies EXISTA pe disc ({cookies['entries']} intrari) dar nu "
                    f"sunt folosite: botul merge ca guest")
     elif not cookies.get('valid', True):
-        out.append(f"cookies fara sesiune valida (lipsesc: "
+        # "pe youtube.com": un export tipic are SID si pe `.google.com`, deci fara
+        # domeniu mesajul ar parea sa contrazica ce vede omul in fisier.
+        out.append(f"cookies fara sesiune valida pe youtube.com (lipsesc: "
                    f"{', '.join(cookies.get('missing_critical') or [])})")
     elif cookies['age_sec'] and cookies['age_sec'] > 7 * 24 * 3600:
         out.append(f"cookies nerotite de {cookies['age_sec'] // 86400} zile")
