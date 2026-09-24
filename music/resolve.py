@@ -92,7 +92,8 @@ def note_guest_rate_limit(reason, *, now: float | None = None) -> bool:
                  if k in GUEST_REFUSAL_VERDICTS), None)
     if kind is None:
         return False
-    _guest_blocked_until = (now if now is not None else time.time()) +         GUEST_RATELIMIT_COOLDOWN_SEC
+    _guest_blocked_until = ((now if now is not None else time.time())
+                            + GUEST_RATELIMIT_COOLDOWN_SEC)
     log.info(f"Guest refuzat de YouTube ({kind}); nu mai incerc fara cookies "
              f"{GUEST_RATELIMIT_COOLDOWN_SEC // 60} minute")
     return True
