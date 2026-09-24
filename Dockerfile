@@ -1,8 +1,18 @@
+# Runtime-urile JS, pinuite ca yt-dlp si bgutil (vezi requirements.txt). Deno
+# rezolva provocarile JS ale YouTube-ului, Node ruleaza serverul de PO Token: cand
+# erau instalate prin scripturi descarcate la build (`deno.land/install.sh | sh`,
+# `setup_24.x | bash`), orice rebuild — chiar fara nicio schimbare in repo — le
+# putea schimba pe amandoua, fara nicio urma. Declarate inainte de primul FROM ca
+# sa poata fi folosite in liniile FROM; CI-ul verifica ce ajunge in imagine.
+ARG NODE_VERSION=24.21.0
+ARG DENO_VERSION=2.9.6
+
 # --- Etapa 1: serverul de PO Token -------------------------------------------
 # Separata ca sa nu rămâna in imaginea finala nici git, nici toolchain-ul de
 # TypeScript, nici dev-dependencies din node_modules. Din tot ce se construiește
-# aici pleaca mai departe DOAR `build/` si dependentele de producție.
-FROM node:24-slim AS pot-builder
+# aici pleaca mai departe DOAR `build/`, dependentele de producție si executabilul
+# `node` — acelasi Node care construieste serverul il si ruleaza.
+FROM node:${NODE_VERSION}-slim AS pot-builder
 
 # PO Token provider (bgutil) — pinuit la aceeasi versiune ca pluginul pip din
 # requirements.txt. 2.0.0 patcheaza GHSA-qpv9-8xfj-xx9m (RCE prin bind pe 0.0.0.0)
@@ -10,8 +20,8 @@ FROM node:24-slim AS pot-builder
 # Serverul >=1.3.2 cere Node >=22 (vezi engines din server/package.json).
 ARG BGUTIL_VERSION=2.0.0
 
-# pipefail: fara el, un curl eșuat trimite pagina de eroare in bash, care iese
-# cu 0, si build-ul continua mai departe cu un repo de Node lipsa.
+# pipefail: un pas eșuat dintr-un pipe trebuie sa opreasca build-ul, nu sa fie
+# acoperit de codul de ieșire al ultimului pas.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # `ca-certificates` NU e in node:24-slim, iar fara el `git clone` prin HTTPS cade
@@ -32,31 +42,31 @@ RUN git clone --single-branch --depth 1 --branch ${BGUTIL_VERSION} \
     && rm -rf /opt/pot-provider/.git
 
 
+# --- Deno --------------------------------------------------------------------
+# Imaginea oficiala `bin` contine doar executabilul, exact pentru COPY --from.
+FROM denoland/deno:bin-${DENO_VERSION} AS deno
+
+
 # --- Etapa 2: imaginea care ruleaza ------------------------------------------
 FROM python:3.12-slim
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # `curl` rămâne: start.sh il folosește ca sa aȘtepte pe starea REALA a serverului
-# de PO Token, nu pe un `sleep` fix. `git` si `unzip` nu mai au ce sa caute aici —
-# clonarea s-a intamplat in etapa de build.
+# de PO Token, nu pe un `sleep` fix. `git` nu mai are ce sa caute aici — clonarea
+# s-a intamplat in etapa de build.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg libsodium-dev curl ca-certificates \
-    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# Node doar ca executabil: la runtime nu se foloseste npm, doar `node`, pentru
+# serverul de PO Token si ca runtime JS de rezerva pentru yt-dlp.
+COPY --from=pot-builder /usr/local/bin/node /usr/local/bin/node
 
 # Deno pentru challenge-urile JS ale YouTube-ului. Node e activat ca REZERVA in
 # `config.JS_RUNTIMES`: yt-dlp porneste implicit doar cu deno, deci fara asta o
 # instalare de deno care se rupe ar face sa dispara tacit formatele opus.
-#
-# `unzip` e cerut de instalatorul lui Deno ("either unzip or 7z is required") si
-# nu mai e nevoie de el dupa aceea, deci se pune si se scoate in ACELASI strat —
-# altfel ar rămâne in imaginea finala degeaba.
-RUN apt-get update && apt-get install -y --no-install-recommends unzip \
-    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y \
-    && apt-get purge -y --auto-remove unzip \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=deno /deno /usr/local/bin/deno
 
 WORKDIR /app
 

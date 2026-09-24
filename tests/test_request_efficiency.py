@@ -281,6 +281,45 @@ def test_the_pot_provider_versions_are_in_lockstep():
         f'plugin {plugin.group(1)} != server {server.group(1)}')
 
 
+def test_the_js_runtimes_are_pinned_like_everything_else():
+    """Deno si Node, pinuite ca yt-dlp si bgutil — nu "ce e mai nou in ziua build-ului".
+
+    Deno rezolva provocarile JS ale YouTube-ului, iar daca se strica formatele opus
+    dispar tacit; Node ruleaza serverul de PO Token, fara de care fiecare descarcare
+    primeste 403. Se instalau totusi prin scripturi descarcate si rulate direct in
+    shell (`deno.land/install.sh | sh`, `setup_24.x | bash`), adica ultima versiune
+    de la momentul build-ului: un rebuild fara nicio schimbare in repo le putea
+    schimba pe amandoua, si nimic nu spunea ca s-a intamplat. In plus, Node-ul care
+    construia serverul (node:24-slim) si cel care il rula (NodeSource) erau doua
+    versiuni care plutesc independent.
+    """
+    import re
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    docker = open(os.path.join(root, 'Dockerfile'), encoding='utf-8').read()
+    code = '\n'.join(line for line in docker.splitlines()
+                     if not line.lstrip().startswith('#'))
+    piped = re.findall(r'^.*\|[^|&;\n]*\b(?:ba)?sh\b.*$', code, re.M)
+    assert not piped, f'script descarcat si rulat direct in shell: {piped}'
+
+    for arg in ('NODE_VERSION', 'DENO_VERSION'):
+        assert re.search(rf'^ARG {arg}=\d+\.\d+\.\d+$', docker, re.M), (
+            f'{arg} nu e pinuit la o versiune exacta')
+    assert re.search(r'^FROM node:\$\{NODE_VERSION\}-slim AS pot-builder$',
+                     docker, re.M), 'serverul de PO Token nu se construieste cu Node-ul pinuit'
+    assert re.search(r'^FROM denoland/deno:bin-\$\{DENO_VERSION\} AS deno$',
+                     docker, re.M), 'Deno nu vine din imaginea pinuita'
+    # Acelasi Node construieste si ruleaza serverul.
+    assert 'COPY --from=pot-builder /usr/local/bin/node /usr/local/bin/node' in docker
+    assert 'COPY --from=deno /deno /usr/local/bin/deno' in docker
+
+    # Iar CI-ul verifica in imaginea construita ca asta s-a si livrat.
+    ci = open(os.path.join(root, '.github', 'workflows', 'ci.yml'),
+              encoding='utf-8').read()
+    for arg in ('NODE_VERSION', 'DENO_VERSION'):
+        assert f'ARG {arg}=' in ci, f'CI nu compara {arg} cu imaginea construita'
+
+
 def test_the_image_can_never_carry_a_google_session():
     """`.dockerignore` exclude tot ce `.gitignore` numeste drept secret.
 

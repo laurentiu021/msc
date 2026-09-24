@@ -68,3 +68,40 @@ jobs:
         run: |
           docker run --rm --entrypoint bash gogu:ci -c \
             'python -c "import yt_dlp; print(yt_dlp.version.__version__)"'
+      - name: The JS runtimes must be the pinned ones
+        # Deno rezolva provocarile JS ale YouTube-ului, Node ruleaza serverul de PO
+        # Token: un runtime schimbat pe tacute strica exact descarcarile. Pinurile se
+        # citesc din Dockerfile, deci nu exista o a doua copie care sa driftuiasca.
+        run: |
+          node_want=$(sed -n 's/^ARG NODE_VERSION=//p' Dockerfile)
+          deno_want=$(sed -n 's/^ARG DENO_VERSION=//p' Dockerfile)
+          node_have=$(docker run --rm --entrypoint node gogu:ci --version)
+          deno_have=$(docker run --rm --entrypoint deno gogu:ci --version | head -1)
+          echo "node: ${node_have} (pinuit ${node_want})"
+          echo "deno: ${deno_have} (pinuit ${deno_want})"
+          test -n "$node_want"
+          test -n "$deno_want"
+          test "$node_have" = "v${node_want}"
+          case "$deno_have" in
+            "deno ${deno_want} "*) ;;
+            *) echo "Deno din imagine nu e cel pinuit"; exit 1 ;;
+          esac
+      - name: The PO Token server must start on the bundled Node
+        # /health nu depinde de serverul de PO Token (intentionat), deci un Node care
+        # nu porneste in imagine ar trece de healthcheck si ar da 403 la fiecare
+        # descarcare. Aceeasi proba ca in start.sh.
+        run: |
+          docker run --rm --entrypoint bash gogu:ci -c '
+            node /opt/pot-provider/server/build/main.js --port 4416 > /tmp/pot.log 2>&1 &
+            for _ in $(seq 1 60); do
+              if curl -fsS --max-time 2 http://127.0.0.1:4416/ping; then exit 0; fi
+              sleep 0.5
+            done
+            cat /tmp/pot.log
+            exit 1'
+      - name: The whole package must be in the image
+        # .dockerignore exclude scratch-ul din radacina (`/_*.py`), iar
+        # `music/__init__.py` trebuie sa rămâna.
+        run: |
+          docker run --rm --entrypoint bash gogu:ci -c \
+            'test -f music/__init__.py && DISCORD_TOKEN=x python -c "import bot, music.player; print(\"import OK\")"'
