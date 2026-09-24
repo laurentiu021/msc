@@ -9,7 +9,9 @@
 .env
 .env.*
 !.env.example
-cookies.txt
+# cookies*, nu doar cookies.txt: la fel ca in .gitignore, prinde si copiile —
+# cookies.txt.good (ultimul jar bun) si cookies.txt.tmp (scrierea atomica).
+cookies*
 *.cookies
 .cookies_seed
 
@@ -21,8 +23,15 @@ __pycache__/
 
 downloads/
 data/
+# COOKIE_DIR-ul harness-ului live (tools/livecheck.py): audio, cache de yt-dlp si,
+# cand ruleaza cu cookies, un jar cu o sesiune reala.
+.livecheck/
+# Momentul ultimei porniri, scris la fiecare rulare: stare de runtime, nu cod.
+.last_boot
 *.log
 logs.*.json
+# Reproducerile de investigatie din radacina (_repro_*.py, _refute_*.py, ...).
+/_*.py
 
 tests/
 # Emulatorul de Discord si YouTube: unelte de dezvoltare, nu ceva ce ruleaza

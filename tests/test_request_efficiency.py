@@ -281,6 +281,38 @@ def test_the_pot_provider_versions_are_in_lockstep():
         f'plugin {plugin.group(1)} != server {server.group(1)}')
 
 
+def test_the_image_can_never_carry_a_google_session():
+    """`.dockerignore` exclude tot ce `.gitignore` numeste drept secret.
+
+    Doua liste pentru acelasi lucru driftează: `.gitignore` prindea `cookies*` — deci
+    si `cookies.txt.good` (ultima copie buna) si `cookies.txt.tmp` (scrierea
+    atomica) — iar `.dockerignore` doar `cookies.txt`. Un `docker build` dintr-un
+    checkout local punea deci o sesiune Google in straturile imaginii. La fel
+    `.livecheck/`: e COOKIE_DIR-ul harness-ului live, deci tine un jar oricand
+    acesta ruleaza cu cookies.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def patterns(name):
+        with open(os.path.join(root, name), encoding='utf-8') as fh:
+            return [line.strip() for line in fh]
+
+    gitignore = patterns('.gitignore')
+    start = next(i for i, line in enumerate(gitignore)
+                 if line.startswith('# --- secrete'))
+    secrets = []
+    for line in gitignore[start + 1:]:
+        if line.startswith('# ---'):
+            break
+        if line and not line.startswith('#'):
+            secrets.append(line)
+    assert secrets, 'sectiunea de secrete a dispărut din .gitignore'
+
+    docker = set(patterns('.dockerignore'))
+    missing = [p for p in secrets + ['.livecheck/'] if p not in docker]
+    assert not missing, f'.dockerignore lasa in imagine: {missing}'
+
+
 def test_the_healthcheck_path_is_one_the_server_answers():
     """railway.toml si bot.py trebuie sa cada de acord, altfel deploy-ul eșueaza."""
     import re
