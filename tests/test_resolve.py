@@ -1069,6 +1069,54 @@ def test_an_abandoned_request_cannot_speak_for_the_next_one():
         f'{resolved.raw_error!r}')
 
 
+def test_the_real_youtubedl_reports_into_the_box_of_its_request():
+    """Cutia per cerere merge doar daca YoutubeDL foloseste CHIAR obiectul primit.
+
+    Testele de mai sus au un YoutubeDL scris de noi. Daca cel real si-ar copia
+    parametrii (si, odata cu ei, logger-ul), fiecare linie ar ajunge intr-o cutie pe
+    care n-o citeste nimeni — intrerupatorul de guest n-ar mai vedea niciun 429, fara
+    ca vreun test sa pice. Aici ruleaza yt-dlp-ul instalat, prin poarta reala, pe o
+    cerere pe care o refuza fara retea; iar orice conexiune externa e oricum
+    blocata, ca testul sa rămâna ermetic.
+    """
+    import socket
+
+    real_connect = socket.socket.connect
+    external = []
+
+    def loopback_only(sock, address, *args, **kwargs):
+        host = address[0] if isinstance(address, tuple) else str(address)
+        if host not in ('127.0.0.1', '::1', 'localhost'):
+            external.append(address)
+            raise OSError('testul nu are voie sa iasa in retea')
+        return real_connect(sock, address, *args, **kwargs)
+
+    async def scenario():
+        config.clear_ydl_reason()
+        try:
+            await ytdlp_mod.extract(config.make_search_opts(), 'nu e un url',
+                                    stage='fara_retea')
+        except Exception as e:
+            print(f'refuzat cum trebuie: {type(e).__name__}')
+        return config.ydl_reasons()
+
+    saved = (ytdlp_mod.YT_REQUEST_MIN_INTERVAL_SEC,
+             ytdlp_mod.YT_REQUEST_MAX_INTERVAL_SEC, config._cookies_path)
+    ytdlp_mod.YT_REQUEST_MIN_INTERVAL_SEC = ytdlp_mod.YT_REQUEST_MAX_INTERVAL_SEC = 0.0
+    config._cookies_path = None
+    socket.socket.connect = loopback_only
+    try:
+        reasons = _run(scenario())
+    finally:
+        socket.socket.connect = real_connect
+        (ytdlp_mod.YT_REQUEST_MIN_INTERVAL_SEC, ytdlp_mod.YT_REQUEST_MAX_INTERVAL_SEC,
+         config._cookies_path) = saved
+        ytdlp_mod._NEXT_ALLOWED_AT = 0.0
+    assert not external, f'a iesit in retea: {external}'
+    assert any('not a valid URL' in r for r in reasons), (
+        f'refuzul lui yt-dlp nu a ajuns in cutia cererii: {reasons}')
+
+
 if __name__ == '__main__':
     # Consola Windows e cp1252: un mesaj de eșec cu diacritice ar arunca
     # UnicodeEncodeError si ar ascunde exact testul care a picat.
