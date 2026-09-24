@@ -20,6 +20,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -904,6 +905,167 @@ def test_a_bot_check_on_the_guest_path_also_arms_it():
         assert resolve.guest_rate_limited()
     finally:
         resolve.clear_guest_rate_limit()
+
+
+# --- motivele lui yt-dlp apartin cererii care le-a produs ----------------------
+
+class _ScriptedYtDlp:
+    """Modulul `yt_dlp`, inlocuit SUB poarta reala din music/ytdlp.py.
+
+    `_Ytdlp` de mai sus inlocuieste poarta cu totul, deci nu poate vedea nimic din
+    ordinea reala dintre doua cereri. Aici poarta, executorul si thread-urile sunt
+    cele reale; doar YoutubeDL e un scenariu per URL, care scrie prin logger-ul
+    primit in opts (singurul canal prin care yt-dlp isi explica deciziile) si
+    aȘteapta pe Event-uri, deci ordinea e fixata, nu cronometrata.
+    """
+
+    def __init__(self, handlers):
+        outer = self
+        self.handlers = handlers
+
+        class YoutubeDL:
+            def __init__(self, opts):
+                self.opts = opts
+
+            def extract_info(self, url, download=False):
+                return outer.handlers[url](self.opts.get('logger'), download)
+
+            def prepare_filename(self, info):
+                return info.get('_filename', '')
+
+            def close(self):
+                pass
+
+        self.YoutubeDL = YoutubeDL
+
+    def __enter__(self):
+        self.saved = (ytdlp_mod.yt_dlp, ytdlp_mod.YT_REQUEST_MIN_INTERVAL_SEC,
+                      ytdlp_mod.YT_REQUEST_MAX_INTERVAL_SEC, config._cookies_path)
+        ytdlp_mod.yt_dlp = self
+        # Fara pauza de throttle intre cereri: testul fixeaza ordinea prin Event-uri.
+        ytdlp_mod.YT_REQUEST_MIN_INTERVAL_SEC = ytdlp_mod.YT_REQUEST_MAX_INTERVAL_SEC = 0.0
+        ytdlp_mod._NEXT_ALLOWED_AT = 0.0
+        # Fara cookies: lanțul e doar guest, exact calea pe care o pazeste
+        # intrerupatorul.
+        config._cookies_path = None
+        resolve.clear_guest_rate_limit()
+        return self
+
+    def __exit__(self, *exc):
+        (ytdlp_mod.yt_dlp, ytdlp_mod.YT_REQUEST_MIN_INTERVAL_SEC,
+         ytdlp_mod.YT_REQUEST_MAX_INTERVAL_SEC, config._cookies_path) = self.saved
+        ytdlp_mod._NEXT_ALLOWED_AT = 0.0
+        resolve.clear_guest_rate_limit()
+        return False
+
+
+def _waited(event):
+    """Aștepta un Event din thread-ul de yt-dlp; un blocaj pica testul, nu il agata."""
+    if not event.wait(10):
+        raise RuntimeError('scenariul de test s-a blocat')
+
+
+def test_a_request_waiting_for_the_gate_cannot_erase_another_ones_refusal():
+    """Reprodus 2026-09-24 pe poarta reala.
+
+    Motivele erau o singura lista pe PROCES, iar fiecare cerere o golea inainte sa
+    astepte poarta. O a doua cerere (prefetch, un `!play`, prefill-ul de autoplay)
+    pornita cat prima era in zbor ștergea deci 429-ul primei, iar intrerupatorul de
+    guest nu se aprindea — exact refuzul pentru care exista.
+    """
+    first_logged, release_first, release_second = (
+        threading.Event(), threading.Event(), threading.Event())
+
+    def first(logger, download):
+        logger.warning('[youtube] aaa: Unable to download webpage: '
+                       'HTTP Error 429: Too Many Requests')
+        first_logged.set()
+        _waited(release_first)
+        return {'id': 'aaa', 'formats': []}
+
+    def second(logger, download):
+        _waited(release_second)
+        return {'id': 'bbb', 'formats': []}
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        a = asyncio.create_task(resolve._pick_format_source('URL_A', loop))
+        await asyncio.to_thread(_waited, first_logged)
+        b = asyncio.create_task(resolve._pick_format_source('URL_B', loop))
+        for _ in range(10):
+            await asyncio.sleep(0)      # B isi incepe cererea si se opreste la poarta
+        release_first.set()
+        await a
+        tripped = resolve.guest_rate_limited()
+        release_second.set()
+        await b
+        return tripped
+
+    with _ScriptedYtDlp({'URL_A': first, 'URL_B': second}):
+        tripped = _run(scenario())
+    assert tripped, ('429-ul primei cereri a fost Șters de a doua, care doar aȘtepta '
+                     'poarta: intrerupatorul de guest nu s-a aprins')
+
+
+def test_an_abandoned_request_cannot_speak_for_the_next_one():
+    """Un thread abandonat (timeout sau anulare) continua sa scrie in logger minute
+    in sir, in afara portii. Cu o lista comuna, linia lui ajungea motivul altei
+    cereri: o descarcare refuzata tacut era diagnosticata cu "Sign in to confirm"-ul
+    orfanului — adica 'cookies', verdictul care declanșeaza revenirea la jar-ul bun
+    (`rollback_cookies`), o lovitura unica, cheltuita pe cauza altcuiva.
+    """
+    orphan_entered, orphan_go, orphan_spoke, orphan_done = (
+        threading.Event(), threading.Event(), threading.Event(), threading.Event())
+    download_entered, download_go = threading.Event(), threading.Event()
+    tmp = tempfile.mkdtemp()
+    never_written = os.path.join(tmp, 'bbb.opus')
+
+    def orphan(logger, download):
+        orphan_entered.set()
+        try:
+            _waited(orphan_go)
+            logger.warning("[youtube] aaa: Sign in to confirm you're not a bot. "
+                           "Use --cookies-from-browser")
+            orphan_spoke.set()
+            return {'id': 'aaa'}
+        finally:
+            orphan_done.set()
+
+    def live(logger, download):
+        if not download:
+            return {'id': 'bbb', 'title': 'Artist - Piesa', 'duration': 200,
+                    'webpage_url': 'URL_B', 'formats': PLAYABLE}
+        download_entered.set()
+        _waited(download_go)
+        # Refuz tacut: nicio excepție, niciun fisier — ca match_filter-ul real.
+        return {'id': 'bbb', 'ext': 'opus', '_filename': never_written}
+
+    async def scenario():
+        a = asyncio.create_task(ytdlp_mod.extract(
+            config.make_search_opts(), 'URL_A', stage='abandonata'))
+        await asyncio.to_thread(_waited, orphan_entered)
+        a.cancel()
+        try:
+            await a
+        except asyncio.CancelledError:
+            pass
+        b = asyncio.create_task(resolve.resolve_from_url('URL_B'))
+        await asyncio.to_thread(_waited, download_entered)
+        orphan_go.set()                 # orfanul vorbeste in timpul cererii vii
+        await asyncio.to_thread(_waited, orphan_spoke)
+        download_go.set()
+        return await b
+
+    try:
+        with _ScriptedYtDlp({'URL_A': orphan, 'URL_B': live}):
+            resolved = _run(scenario())
+            _waited(orphan_done)
+    finally:
+        os.rmdir(tmp)
+    assert not resolved.ok
+    assert 'Sign in' not in (resolved.raw_error or ''), (
+        f'descarcarea a fost diagnosticata cu linia unei cereri abandonate: '
+        f'{resolved.raw_error!r}')
 
 
 if __name__ == '__main__':

@@ -1,4 +1,5 @@
 """Constante si configurare muzica."""
+import contextvars
 import copy
 import hashlib
 import logging
@@ -77,6 +78,53 @@ BLACKLIST = [
     "asmr", "karaoke", "instrumental", "tutorial",
 ]
 
+class _YdlReasons:
+    """Ce a explicat yt-dlp pentru O cerere: ultima linie, si toate de la golire."""
+
+    # Plafonat: o descarcare HLS poate produce sute de linii, si nu ne trebuie decat
+    # verdictul, nu jurnalul.
+    MAX = 12
+
+    def __init__(self):
+        # Ultima linie care explica o decizie. Cand yt-dlp refuza o piesa prin
+        # match_filter nu ridica nicio excepție, deci fara asta singurul motiv
+        # disponibil era o presupunere scrisa de noi.
+        self.last: str | None = None
+        # TOATE motivele, nu doar ultimul. O singura cerere poate produce cinci
+        # linii la rand — masurat in producție 2026-09-12 12:28: "HTTP Error 429"
+        # -> "No title found" -> "Sign in to confirm you're not a bot" -> "No video
+        # formats found" -> "Requested format is not available". Cine se uita doar
+        # la ultima vede o problema de FORMAT si rateaza complet refuzul de acces,
+        # care e a doua si a treia. Exact asta facea intrerupatorul de guest: nu se
+        # aprindea niciodata, si continuam sa plătim cererile refuzate.
+        self.items: list[str] = []
+
+    def remember(self, text: str) -> None:
+        self.last = text
+        if len(self.items) < self.MAX:
+            self.items.append(text)
+
+
+# Cutia cererii CURENTE, per task asyncio — nu una pe proces. Cand motivele erau o
+# singura lista comuna, doua lucruri se amestecau, ambele reproduse pe poarta reala
+# (2026-09-24):
+#
+# 1. O cerere care doar AȘTEPTA poarta (prefetch, un `!play`, prefill-ul de
+#    autoplay) golea lista inainte sa intre, deci ștergea 429-ul cererii aflate in
+#    zbor: intrerupatorul de guest nu se aprindea exact pentru refuzul lui.
+# 2. Un thread abandonat (timeout, anulare) scrie in logger minute in sir, in afara
+#    portii, deci linia lui devenea motivul altei cereri: o descarcare refuzata
+#    tacut era diagnosticata cu "Sign in to confirm"-ul orfanului — adica 'cookies',
+#    verdictul care consuma revenirea unica la jar-ul bun.
+#
+# Fiecare task are propriul context, deci propria cutie. Thread-ul executorului nu
+# vede contextul task-ului, asa ca logger-ul fiecarei cereri e LEGAT de cutia ei
+# (`ydl_logger_for_request`); un thread abandonat scrie deci mai departe doar in
+# cutia cererii lui, pe care n-o mai citeste nimeni.
+_REASONS: contextvars.ContextVar = contextvars.ContextVar('ydl_reasons',
+                                                          default=None)
+
+
 class _YdlLog:
     """Logger pentru yt-dlp, ca deciziile lui sa nu mai fie invizibile.
 
@@ -91,29 +139,15 @@ class _YdlLog:
                 'skipping', 'Sign in to confirm', 'not available',
                 'has already been downloaded')
 
-    # Ultima linie care explica o decizie. Cand yt-dlp refuza o piesa prin
-    # match_filter nu ridica nicio excepție, deci fara asta singurul motiv
-    # disponibil era o presupunere scrisa de noi.
-    last_reason: str | None = None
+    def __init__(self, reasons: _YdlReasons | None = None):
+        # Cutia cererii care foloseste logger-ul. Fara ea (YDL_LOGGER, din opts-urile
+        # de baza) scrie in cutia contextului curent.
+        self._reasons = reasons
 
-    # TOATE motivele de la ultima golire, nu doar ultimul. O singura cerere poate
-    # produce cinci linii la rand — masurat in producție 2026-09-12 12:28:
-    # "HTTP Error 429" -> "No title found" -> "Sign in to confirm you're not a bot"
-    # -> "No video formats found" -> "Requested format is not available". Cine se
-    # uita doar la ultima vede o problema de FORMAT si rateaza complet refuzul de
-    # acces, care e a doua si a treia. Exact asta facea intrerupatorul de guest: nu
-    # se aprindea niciodata, si continuam sa plătim cererile refuzate.
-    #
-    # Plafonat: o descarcare HLS poate produce sute de linii, si nu ne trebuie decat
-    # verdictul, nu jurnalul.
-    reasons: list[str] = []
-    MAX_REASONS = 12
-
-    @classmethod
-    def _remember(cls, text: str) -> None:
-        cls.last_reason = text
-        if len(cls.reasons) < cls.MAX_REASONS:
-            cls.reasons.append(text)
+    def _remember(self, text: str) -> None:
+        box = self._reasons if self._reasons is not None else _REASONS.get()
+        if box is not None:
+            box.remember(text)
 
     def debug(self, msg):
         # Liniile de downloader vin cu \r in fata (sunt gandite pentru terminal,
@@ -125,7 +159,7 @@ class _YdlLog:
         # primul caracter din afara setului si scotea "ownload] File is larger".
         text = text.removeprefix('[debug] ')
         if any(marker in text for marker in self._PROMOTE):
-            _YdlLog._remember(text)
+            self._remember(text)
             log.info(f"yt-dlp: {text}")
         else:
             log.debug(f"yt-dlp: {text}")
@@ -134,11 +168,11 @@ class _YdlLog:
         log.info(f"yt-dlp: {msg}")
 
     def warning(self, msg):
-        _YdlLog._remember(str(msg))
+        self._remember(str(msg))
         log.warning(f"yt-dlp: {msg}")
 
     def error(self, msg):
-        _YdlLog._remember(str(msg))
+        self._remember(str(msg))
         log.error(f"yt-dlp: {msg}")
 
 
@@ -150,24 +184,43 @@ def clear_ydl_reason():
 
     Fara golire, motivul unei piese de acum o ora ar fi raportat ca explicatie
     pentru piesa curenta — exact bug-ul pe care state.last_raw_error il avea.
+
+    O cutie NOUA, nu golirea celei vechi: o cerere inca in zbor (sau un thread
+    abandonat) isi pastreaza cutia ei, deci nici nu pierde ce a scris, nici nu
+    scrie in cea a cererii care urmeaza.
     """
-    _YdlLog.last_reason = None
-    _YdlLog.reasons = []
+    _REASONS.set(_YdlReasons())
+
+
+def ydl_logger_for_request() -> _YdlLog:
+    """Logger-ul unei cereri, legat de cutia task-ului care o face.
+
+    Il cheama poarta (`ytdlp.extract`) pentru fiecare cerere: thread-ul
+    executorului nu vede contextul task-ului, deci legatura trebuie sa calatoreasca
+    in obiect.
+    """
+    box = _REASONS.get()
+    if box is None:
+        box = _YdlReasons()
+        _REASONS.set(box)
+    return _YdlLog(box)
 
 
 def last_ydl_reason() -> str | None:
-    """Ultima decizie explicata de yt-dlp de la ultima golire."""
-    return _YdlLog.last_reason
+    """Ultima decizie explicata de yt-dlp de la ultima golire, in task-ul curent."""
+    box = _REASONS.get()
+    return box.last if box is not None else None
 
 
 def ydl_reasons() -> tuple[str, ...]:
-    """TOATE deciziile de la ultima golire, in ordine.
+    """TOATE deciziile de la ultima golire, in ordine, in task-ul curent.
 
     Pentru intrebari de forma "a refuzat YouTube accesul in cererea asta?", unde
     ultima linie e aproape mereu o consecinta ("Requested format is not available")
     si nu cauza ("Sign in to confirm you're not a bot").
     """
-    return tuple(_YdlLog.reasons)
+    box = _REASONS.get()
+    return tuple(box.items) if box is not None else ()
 
 
 def yt_client_args(*clients):

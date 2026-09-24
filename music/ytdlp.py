@@ -35,7 +35,8 @@ import yt_dlp
 
 from music.config import (YT_REQUEST_MAX_INTERVAL_SEC,
                           YT_REQUEST_MIN_INTERVAL_SEC, adopt_cookies,
-                          borrow_cookies, discard_cookies, env_num, log)
+                          borrow_cookies, discard_cookies, env_num, log,
+                          ydl_logger_for_request)
 from music.errors import YtdlpTimeout
 
 _NEXT_ALLOWED_AT = 0.0
@@ -157,6 +158,13 @@ async def extract(opts: dict, query: str, *, download: bool = False,
     """
     loop = loop or asyncio.get_running_loop()
     budget = DOWNLOAD_TIMEOUT_SEC if download else EXTRACT_TIMEOUT_SEC
+
+    # Motivele pe care yt-dlp le da cererii asteia ajung in cutia task-ului care a
+    # facut-o, nu intr-o lista comuna: altfel o cerere care doar aȘtepta poarta le
+    # Ștergea pe ale celei in zbor, iar un thread abandonat vorbea in numele
+    # urmatoarei. Vezi `config._REASONS`.
+    if 'logger' in opts:
+        opts = {**opts, 'logger': ydl_logger_for_request()}
 
     # Cererea lucreaza pe COPIA ei a jar-ului, niciodata pe fisierul comun.
     # `YoutubeDL.close()` cheama `save_cookies()`, care rescrie necondiționat
